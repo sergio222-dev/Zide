@@ -1,9 +1,11 @@
-//! Search Everywhere prototype: double-Shift popup with file search over a real project.
+//! Search Everywhere prototype: double-Shift popup with file and text search over a real project.
 //!
 //! `zide-ui [root]` indexes `root` (default: the current directory) in the background;
-//! the window shows up before the index is ready (ADR-009). Timings go to stderr.
+//! the window shows up before the index is ready (ADR-009). Tab switches between the Files and
+//! Text tabs. Timings go to stderr.
 
 use std::{
+    ops::Range,
     path::PathBuf,
     sync::{
         Arc,
@@ -16,14 +18,41 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
 use zide_core::{DoubleShiftDetector, scan_files};
 use zide_index::FileIndex;
-use zide_search::{FileHit, FileQuery, search_files_cancellable};
+use zide_search::{
+    FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_files_cancellable, search_text,
+};
 
-const MAX_RESULTS: usize = 200;
+const MAX_FILE_RESULTS: usize = 200;
+const MAX_TEXT_RESULTS: usize = 1000;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Files,
+    Text,
+}
+
+impl Tab {
+    fn toggled(self) -> Self {
+        match self {
+            Tab::Files => Tab::Text,
+            Tab::Text => Tab::Files,
+        }
+    }
+}
+
+/// What the background text search tells the UI.
+enum TextMessage {
+    Hits(Vec<TextHit>),
+    Done(Result<usize, TextSearchError>),
+}
 
 struct Popup {
     input: Entity<InputState>,
     query: String,
-    hits: Arc<Vec<FileHit>>,
+    tab: Tab,
+    files: Arc<Vec<FileHit>>,
+    text: Arc<Vec<TextHit>>,
+    text_status: String,
     selected: usize,
     scroll: UniformListScrollHandle,
     opened_at: Option<Instant>,
@@ -31,20 +60,22 @@ struct Popup {
 }
 
 impl Popup {
-    fn set_hits(&mut self, hits: Vec<FileHit>) {
-        self.hits = Arc::new(hits);
-        self.select(0);
+    fn len(&self) -> usize {
+        match self.tab {
+            Tab::Files => self.files.len(),
+            Tab::Text => self.text.len(),
+        }
     }
 
     fn select(&mut self, row: usize) {
         self.selected = row;
-        if !self.hits.is_empty() {
+        if self.len() > 0 {
             self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
         }
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let last = self.hits.len().saturating_sub(1);
+        let last = self.len().saturating_sub(1);
         self.select(self.selected.saturating_add_signed(delta).min(last));
     }
 }
@@ -56,7 +87,7 @@ struct Workspace {
     /// `None` while the project is still being scanned.
     index: Option<Arc<FileIndex>>,
     popup: Option<Popup>,
-    /// Bumped on every search; a finished search applies only if it is still the latest.
+    /// Bumped on every search; results of an older search are dropped.
     search_generation: u64,
     cancel_search: Option<Arc<AtomicBool>>,
 }
@@ -77,11 +108,7 @@ impl Workspace {
             eprintln!("indexed {} files in {:?}", index.len(), started.elapsed());
             this.update(cx, |this, cx| {
                 this.index = Some(Arc::new(index));
-                let query = this.popup.as_ref().map(|p| p.query.clone());
-                if let Some(query) = query {
-                    this.search(&query, cx);
-                }
-                cx.notify();
+                this.search_again(cx);
             })
             .ok();
         })
@@ -103,102 +130,148 @@ impl Workspace {
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 let query = input.read(cx).value().to_string();
-                this.search(&query, cx);
+                if let Some(popup) = &mut this.popup {
+                    popup.query = query;
+                }
+                this.search_again(cx);
             }
         });
         input.update(cx, |state, cx| state.focus(window, cx));
         self.popup = Some(Popup {
             input,
             query: String::new(),
-            hits: Arc::default(),
+            tab: Tab::Files,
+            files: Arc::default(),
+            text: Arc::default(),
+            text_status: String::new(),
             selected: 0,
             scroll: UniformListScrollHandle::new(),
             opened_at: Some(Instant::now()),
             _subscription: subscription,
         });
-        self.search("", cx);
+        self.search_again(cx);
     }
 
-    /// There is no editor yet: "opening" a file logs it and closes the popup.
+    fn switch_tab(&mut self, cx: &mut Context<Self>) {
+        if let Some(popup) = &mut self.popup {
+            popup.tab = popup.tab.toggled();
+            popup.selected = 0;
+        }
+        self.search_again(cx);
+    }
+
+    /// There is no editor yet: "opening" a result logs it and closes the popup.
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(popup) = &self.popup else {
+        let (Some(popup), Some(index)) = (&self.popup, &self.index) else {
             return;
         };
-        if let (Some(hit), Some(index)) = (popup.hits.get(popup.selected), &self.index) {
-            let line = FileQuery::parse(&popup.query).line;
-            eprintln!("open {} line {line:?}", index.paths()[hit.index]);
+        let target = match popup.tab {
+            Tab::Files => popup.files.get(popup.selected).map(|hit| {
+                (
+                    index.paths()[hit.index].clone(),
+                    FileQuery::parse(&popup.query).line,
+                )
+            }),
+            Tab::Text => popup
+                .text
+                .get(popup.selected)
+                .map(|hit| (index.paths()[hit.file].clone(), Some(hit.line as u32))),
+        };
+        if let Some((path, line)) = target {
+            eprintln!("open {path} line {line:?}");
             self.close_popup(window, cx);
         }
     }
 
     fn close_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_running_search();
         self.popup = None;
         self.focus.focus(window, cx);
         cx.notify();
     }
 
-    /// Runs the search on a background thread. Typing again cancels the running search
-    /// and drops its results, so the UI thread never waits and never shows stale hits.
-    fn search(&mut self, query: &str, cx: &mut Context<Self>) {
+    fn cancel_running_search(&mut self) {
         if let Some(cancel) = self.cancel_search.take() {
             cancel.store(true, Ordering::Relaxed);
         }
         self.search_generation += 1;
-        let Some(popup) = &mut self.popup else {
-            return;
-        };
-        popup.query = query.to_string();
-        let Some(index) = self.index.clone() else {
+    }
+
+    /// Searches again for the popup's current query and tab, on background threads.
+    /// Typing again cancels the running search and drops its results, so the UI thread
+    /// never waits and never shows stale hits.
+    fn search_again(&mut self, cx: &mut Context<Self>) {
+        self.cancel_running_search();
+        let (Some(popup), Some(index)) = (&mut self.popup, self.index.clone()) else {
             cx.notify();
             return;
         };
-
-        if query.trim().is_empty() {
-            // nothing typed yet: show the first files
-            let hits = (0..index.len().min(MAX_RESULTS))
-                .map(|index| FileHit {
-                    index,
-                    score: 0,
-                    fragments: Vec::new(),
-                })
-                .collect();
-            popup.set_hits(hits);
-            cx.notify();
-            return;
-        }
-
+        let query = popup.query.clone();
         let generation = self.search_generation;
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_search = Some(cancel.clone());
-        let query = query.to_string();
+
+        match popup.tab {
+            Tab::Files if query.trim().is_empty() => {
+                // nothing typed yet: show the first files
+                popup.files = Arc::new(
+                    (0..index.len().min(MAX_FILE_RESULTS))
+                        .map(|index| FileHit {
+                            index,
+                            score: 0,
+                            fragments: Vec::new(),
+                        })
+                        .collect(),
+                );
+                popup.select(0);
+                cx.notify();
+            }
+            Tab::Files => self.search_files(query, index, generation, cancel, cx),
+            Tab::Text => {
+                popup.text = Arc::default();
+                popup.text_status = String::new();
+                popup.select(0);
+                cx.notify();
+                if !query.is_empty() {
+                    self.search_text(query, index, generation, cancel, cx);
+                }
+            }
+        }
+    }
+
+    fn search_files(
+        &mut self,
+        query: String,
+        index: Arc<FileIndex>,
+        generation: u64,
+        cancel: Arc<AtomicBool>,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
             let started = Instant::now();
             let label = query.clone();
             let hits = cx
                 .background_executor()
                 .spawn(async move {
-                    search_files_cancellable(
-                        &index,
-                        &FileQuery::parse(&query),
-                        MAX_RESULTS,
-                        &cancel,
-                    )
+                    let query = FileQuery::parse(&query);
+                    search_files_cancellable(&index, &query, MAX_FILE_RESULTS, &cancel)
                 })
                 .await;
             let Some(hits) = hits else {
-                return; // cancelled by a newer keystroke
+                return; // cancelled by a newer search
             };
             this.update(cx, |this, cx| {
                 if this.search_generation != generation {
                     return;
                 }
                 eprintln!(
-                    "search {label:?}: {} hits in {:?}",
+                    "files {label:?}: {} hits in {:?}",
                     hits.len(),
                     started.elapsed()
                 );
                 if let Some(popup) = &mut this.popup {
-                    popup.set_hits(hits);
+                    popup.files = Arc::new(hits);
+                    popup.select(0);
                     cx.notify();
                 }
             })
@@ -207,10 +280,85 @@ impl Workspace {
         .detach();
     }
 
-    fn status(&self) -> String {
-        match &self.index {
-            Some(index) => format!("{} files · {}", index.len(), self.root.display()),
-            None => format!("Indexing {}…", self.root.display()),
+    /// Streams hits: the background thread sends them in batches and the UI appends them
+    /// as they arrive.
+    fn search_text(
+        &mut self,
+        pattern: String,
+        index: Arc<FileIndex>,
+        generation: u64,
+        cancel: Arc<AtomicBool>,
+        cx: &mut Context<Self>,
+    ) {
+        let (tx, rx) = async_channel::unbounded::<TextMessage>();
+        let root = self.root.clone();
+        let label = pattern.clone();
+        cx.background_executor()
+            .spawn(async move {
+                let query = TextQuery {
+                    pattern,
+                    ..Default::default()
+                };
+                let result =
+                    search_text(&index, &root, &query, MAX_TEXT_RESULTS, &cancel, |hits| {
+                        let _ = tx.send_blocking(TextMessage::Hits(hits));
+                    });
+                let _ = tx.send_blocking(TextMessage::Done(result));
+            })
+            .detach();
+
+        cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            let mut first_batch = true;
+            while let Ok(message) = rx.recv().await {
+                let keep_going = this
+                    .update(cx, |this, cx| {
+                        if this.search_generation != generation {
+                            return false;
+                        }
+                        let Some(popup) = &mut this.popup else {
+                            return false;
+                        };
+                        match message {
+                            TextMessage::Hits(hits) => {
+                                if first_batch {
+                                    eprintln!(
+                                        "text {label:?}: first batch after {:?}",
+                                        started.elapsed()
+                                    );
+                                    first_batch = false;
+                                }
+                                Arc::make_mut(&mut popup.text).extend(hits);
+                                popup.text_status =
+                                    format!("{} hits · searching…", popup.text.len());
+                            }
+                            TextMessage::Done(Ok(total)) => {
+                                eprintln!(
+                                    "text {label:?}: {total} hits in {:?}",
+                                    started.elapsed()
+                                );
+                                popup.text_status = format!("{total} hits");
+                            }
+                            TextMessage::Done(Err(e)) => popup.text_status = e.to_string(),
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn status(&self, popup: &Popup) -> String {
+        match (&self.index, popup.tab) {
+            (None, _) => format!("Indexing {}…", self.root.display()),
+            (Some(index), Tab::Files) => format!("{} files · {}", index.len(), self.root.display()),
+            (Some(_), Tab::Text) if popup.query.is_empty() => "Type text to search in files".into(),
+            (Some(_), Tab::Text) => popup.text_status.clone(),
         }
     }
 }
@@ -247,6 +395,7 @@ impl Render for Workspace {
                 };
                 match event.keystroke.key.as_str() {
                     "escape" => this.close_popup(window, cx),
+                    "tab" => this.switch_tab(cx),
                     "down" => popup.move_selection(1),
                     "up" => popup.move_selection(-1),
                     "pagedown" => popup.move_selection(10),
@@ -258,67 +407,113 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .p_4()
-            .child("Press Shift twice to open the popup. Esc closes it.");
+            .child("Press Shift twice to open the popup. Tab switches tabs, Esc closes it.");
 
-        if let (Some(popup), Some(index)) = (&self.popup, &self.index) {
-            let (index, hits, selected) = (index.clone(), popup.hits.clone(), popup.selected);
-            root = root.child(
-                popup_frame(&popup.input, self.status()).child(
-                    uniform_list("results", hits.len(), move |range, _, _| {
+        let Some(popup) = &self.popup else {
+            return root;
+        };
+        let mut frame = popup_frame(popup.tab, &popup.input, self.status(popup));
+        if let Some(index) = &self.index {
+            let (index, selected) = (index.clone(), popup.selected);
+            let list = match popup.tab {
+                Tab::Files => {
+                    let hits = popup.files.clone();
+                    uniform_list("files", hits.len(), move |range, _, _| {
                         range
                             .map(|row| {
-                                let item = div().h(px(24.)).px_2().child(highlighted(
-                                    index.paths()[hits[row].index].clone(),
-                                    &hits[row],
-                                ));
-                                if row == selected {
-                                    item.bg(rgb(0xd6e4ff))
-                                } else {
-                                    item
-                                }
+                                let path = index.paths()[hits[row].index].clone();
+                                row_frame(row == selected)
+                                    .child(highlighted(path, ranges_in_chars(&hits[row])))
                             })
                             .collect()
                     })
-                    .track_scroll(&popup.scroll)
-                    .w_full()
-                    .h(px(340.)),
-                ),
-            );
-        } else if let Some(popup) = &self.popup {
-            root = root.child(popup_frame(&popup.input, self.status()));
+                }
+                Tab::Text => {
+                    let hits = popup.text.clone();
+                    uniform_list("text", hits.len(), move |range, _, _| {
+                        range
+                            .map(|row| text_row(&index, &hits[row], row == selected))
+                            .collect()
+                    })
+                }
+            };
+            frame = frame.child(list.track_scroll(&popup.scroll).w_full().h(px(320.)));
         }
+        root = root.child(frame);
         root
     }
 }
 
-/// The path with the matched fragments in bold blue.
-fn highlighted(path: String, hit: &FileHit) -> StyledText {
-    // fragments are `char` ranges, GPUI wants byte ranges
-    let byte_at: Vec<usize> = path
-        .char_indices()
-        .map(|(b, _)| b)
-        .chain(std::iter::once(path.len()))
-        .collect();
-    let style = HighlightStyle {
-        color: Some(rgb(0x1a5fd0).into()),
-        font_weight: Some(FontWeight::BOLD),
-        ..Default::default()
-    };
-    let highlights: Vec<_> = hit
-        .fragments
-        .iter()
-        .map(|f| (byte_at[f.start]..byte_at[f.end], style))
-        .collect();
-    StyledText::new(path).with_highlights(highlights)
+fn ranges_in_chars(hit: &FileHit) -> Vec<Range<usize>> {
+    hit.fragments.iter().map(|f| f.start..f.end).collect()
 }
 
-fn popup_frame(input: &Entity<InputState>, status: String) -> Div {
+fn row_frame(selected: bool) -> Div {
+    let row = div().h(px(24.)).px_2().flex().gap_2().overflow_hidden();
+    if selected { row.bg(rgb(0xd6e4ff)) } else { row }
+}
+
+fn text_row(index: &FileIndex, hit: &TextHit, selected: bool) -> Div {
+    // show the line without its indentation, moving the match ranges with it
+    let text = hit.text.trim_start();
+    let shift = hit.text.len() - text.len();
+    let ranges = hit
+        .ranges
+        .iter()
+        .filter(|r| r.end > shift)
+        .map(|r| r.start.saturating_sub(shift)..r.end - shift)
+        .collect();
+    row_frame(selected)
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(rgb(0x777777))
+                .child(format!("{}:{}", index.paths()[hit.file], hit.line)),
+        )
+        .child(highlighted_bytes(text.to_string(), ranges))
+}
+
+const HIGHLIGHT: fn() -> HighlightStyle = || HighlightStyle {
+    color: Some(rgb(0x1a5fd0).into()),
+    font_weight: Some(FontWeight::BOLD),
+    ..Default::default()
+};
+
+/// `text` with the given `char` ranges in bold blue.
+fn highlighted(text: String, char_ranges: Vec<Range<usize>>) -> StyledText {
+    let byte_at: Vec<usize> = text
+        .char_indices()
+        .map(|(b, _)| b)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let bytes = char_ranges
+        .into_iter()
+        .map(|r| byte_at[r.start]..byte_at[r.end])
+        .collect();
+    highlighted_bytes(text, bytes)
+}
+
+/// `text` with the given byte ranges in bold blue.
+fn highlighted_bytes(text: String, byte_ranges: Vec<Range<usize>>) -> StyledText {
+    let highlights: Vec<_> = byte_ranges.into_iter().map(|r| (r, HIGHLIGHT())).collect();
+    StyledText::new(text).with_highlights(highlights)
+}
+
+fn popup_frame(tab: Tab, input: &Entity<InputState>, status: String) -> Div {
+    let tab_label = |label: &'static str, this: Tab| {
+        let item = div().px_2().rounded_sm().child(label);
+        if tab == this {
+            item.bg(rgb(0xd6e4ff)).font_weight(FontWeight::BOLD)
+        } else {
+            item
+        }
+    };
     div()
         .absolute()
         .top_16()
         .left_1_4()
         .w_1_2()
-        .h(px(420.))
+        .h(px(440.))
         .p_2()
         .gap_2()
         .flex()
@@ -327,6 +522,13 @@ fn popup_frame(input: &Entity<InputState>, status: String) -> Div {
         .border_1()
         .border_color(rgb(0xc8c8c8))
         .rounded_md()
+        .child(
+            div()
+                .flex()
+                .gap_1()
+                .child(tab_label("Files", Tab::Files))
+                .child(tab_label("Text", Tab::Text)),
+        )
         .child(Input::new(input))
         .child(div().text_xs().text_color(rgb(0x777777)).child(status))
 }
