@@ -47,6 +47,7 @@ actions!(
         FindInFiles,
         RecentFiles,
         ToggleProjectTree,
+        FindUsages,
     ]
 );
 
@@ -103,6 +104,13 @@ fn action_registry() -> Vec<ActionDef> {
             action: Some(Box::new(GoToFile)),
             closes_popup: false,
             run: |ws, _, cx| ws.show_tab(Tab::Files, cx),
+        },
+        ActionDef {
+            name: "Find Usages",
+            synonyms: &["references", "occurrences", "where used"],
+            action: Some(Box::new(FindUsages)),
+            closes_popup: false,
+            run: |ws, window, cx| ws.find_usages(window, cx),
         },
         ActionDef {
             name: "Toggle Project Tree",
@@ -645,6 +653,29 @@ impl Workspace {
     }
 
     /// Opens the popup on `tab` (Go to File, Go to Symbol, Find Action, Find in Files).
+    /// Alt+F7: every whole-word occurrence of the identifier under the cursor, in the Text tab.
+    /// Textual for now: a language server will say which ones really are usages.
+    fn find_usages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(word) = self.viewer.as_ref().and_then(Viewer::word_at_cursor) else {
+            return;
+        };
+        if self.popup.is_none() {
+            self.open_popup(window, cx);
+        }
+        let Some(popup) = &mut self.popup else {
+            return;
+        };
+        popup.query = word.clone();
+        popup.options = TextOptions {
+            regex: false,
+            case_sensitive: true,
+            whole_word: true,
+        };
+        let input = popup.input.clone();
+        input.update(cx, |state, cx| state.set_value(word, window, cx));
+        self.show_tab(Tab::Text, cx);
+    }
+
     fn open_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.is_none() {
             self.open_popup(window, cx);
@@ -1290,6 +1321,7 @@ impl Render for Workspace {
                 }),
             )
             .on_action(cx.listener(|this, _: &ToggleProjectTree, _, cx| this.toggle_tree(cx)))
+            .on_action(cx.listener(|this, _: &FindUsages, window, cx| this.find_usages(window, cx)))
             .on_action(cx.listener(|this, _: &SwitchTab, _, cx| {
                 if this.popup.is_some() {
                     this.switch_tab(cx);
@@ -1779,6 +1811,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-f", FindInFiles, Some("Workspace")),
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
+            KeyBinding::new("alt-f7", FindUsages, Some("Workspace")),
             KeyBinding::new("ctrl-shift-n", GoToFile, Some("Workspace")),
             KeyBinding::new("ctrl-alt-shift-n", GoToSymbol, Some("Workspace")),
             KeyBinding::new("ctrl-shift-a", FindAction, Some("Workspace")),

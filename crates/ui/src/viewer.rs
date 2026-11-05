@@ -461,6 +461,25 @@ impl Viewer {
     }
 
     /// The text selected in Visual mode, when it is a single line: what the panel starts with.
+    /// The identifier under the cursor, if it is on one.
+    pub fn word_at_cursor(&self) -> Option<String> {
+        let position = self.buffer.position_of(self.vim.cursor());
+        let line: Vec<char> = self.buffer.line(position.line).chars().collect();
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        if !line.get(position.column).copied().is_some_and(is_word) {
+            return None;
+        }
+        let start = line[..position.column]
+            .iter()
+            .rposition(|&c| !is_word(c))
+            .map_or(0, |i| i + 1);
+        let end = line[position.column..]
+            .iter()
+            .position(|&c| !is_word(c))
+            .map_or(line.len(), |i| position.column + i);
+        Some(line[start..end].iter().collect())
+    }
+
     pub fn selected_text(&self) -> Option<String> {
         let (range, linewise) = self.vim.selection(&self.buffer)?;
         let text = self.buffer.slice(range);
@@ -997,6 +1016,20 @@ mod tests {
         assert_eq!(names(source.find("1;").unwrap()), ["P", "go"]);
         assert_eq!(names(source.find("struct").unwrap()), ["P"]);
         assert!(names(source.len() - 1).is_empty()); // after the last declaration
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_word_under_the_cursor_is_an_identifier() {
+        let (dir, file) = temp_file("word", "let foo_bar = baz;\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        assert_eq!(viewer.word_at_cursor().as_deref(), Some("let"));
+        type_keys(&mut viewer, "w");
+        viewer.handle_key(Key::Char('l'));
+        assert_eq!(viewer.word_at_cursor().as_deref(), Some("foo_bar"));
+        type_keys(&mut viewer, "e");
+        type_keys(&mut viewer, "l"); // on the space
+        assert_eq!(viewer.word_at_cursor(), None);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[::core::prelude::v1::test]
