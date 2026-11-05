@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
 use zide_index::FileIndex;
-use zide_matcher::{FixingLayoutMatcher, Matcher, MatchingMode, RussianToEnglish};
+use zide_matcher::{FixingLayoutMatcher, MatchedFragment, Matcher, MatchingMode, RussianToEnglish};
 
 /// A file search query: what to match, and the line to open (`Foo.rs:42`).
 #[derive(Debug, PartialEq, Eq)]
@@ -34,6 +34,8 @@ pub struct FileHit {
     /// Index into the [`FileIndex`].
     pub index: usize,
     pub score: i32,
+    /// Matched parts of the path, as `char` ranges, sorted by start.
+    pub fragments: Vec<MatchedFragment>,
 }
 
 /// Fuzzy file search over names and paths, best matches first.
@@ -72,8 +74,11 @@ pub fn search_files_cancellable(
             if cancel.load(Ordering::Relaxed) {
                 return None;
             }
-            score_path(path, &name_matcher, dir_matcher.as_ref())
-                .map(|score| FileHit { index: i, score })
+            score_path(path, &name_matcher, dir_matcher.as_ref()).map(|score| FileHit {
+                index: i,
+                score,
+                fragments: Vec::new(),
+            })
         })
         .collect();
     if cancel.load(Ordering::Relaxed) {
@@ -95,7 +100,38 @@ pub fn search_files_cancellable(
         hits.truncate(limit);
     }
     hits.sort_unstable_by(order);
+    for hit in &mut hits {
+        hit.fragments = path_fragments(
+            &index.paths()[hit.index],
+            &name_matcher,
+            dir_matcher.as_ref(),
+        );
+    }
     Some(hits)
+}
+
+/// Matched parts of `path`, to highlight: those of the file name and, when given, of the directories.
+fn path_fragments(
+    path: &str,
+    name_matcher: &FixingLayoutMatcher,
+    dir_matcher: Option<&FixingLayoutMatcher>,
+) -> Vec<MatchedFragment> {
+    let (dir, name) = path.rsplit_once('/').map_or(("", path), |(d, n)| (d, n));
+    let name_chars: Vec<char> = name.chars().collect();
+    let name_offset = path.chars().count() - name_chars.len();
+
+    let mut fragments = Vec::new();
+    if let Some(dir_matcher) = dir_matcher {
+        let dir_chars: Vec<char> = dir.chars().collect();
+        fragments.extend(dir_matcher.match_chars(&dir_chars).unwrap_or_default());
+    }
+    for f in name_matcher.match_chars(&name_chars).unwrap_or_default() {
+        fragments.push(MatchedFragment::new(
+            f.start + name_offset,
+            f.end + name_offset,
+        ));
+    }
+    fragments
 }
 
 /// Like IntelliJ's navigation: a leading `*` lets the pattern match anywhere in the name.
@@ -189,6 +225,19 @@ mod tests {
     fn camel_humps_match_file_names() {
         let idx = index(&["src/MinusculeMatcher.kt", "src/Other.kt"]);
         assert_eq!(found(&idx, "MiMa"), ["src/MinusculeMatcher.kt"]);
+    }
+
+    #[test]
+    fn hits_carry_the_matched_fragments_of_the_path() {
+        let idx = index(&["src/MinusculeMatcher.kt"]);
+        let hits = search_files(&idx, &FileQuery::parse("MiMa"), 10);
+        let ranges: Vec<_> = hits[0].fragments.iter().map(|f| (f.start, f.end)).collect();
+        assert_eq!(ranges, [(4, 6), (13, 15)]);
+
+        let idx = index(&["lang-impl/src/GotoFile.java"]);
+        let hits = search_files(&idx, &FileQuery::parse("lang/Goto"), 10);
+        let ranges: Vec<_> = hits[0].fragments.iter().map(|f| (f.start, f.end)).collect();
+        assert_eq!(ranges, [(0, 4), (14, 18)]);
     }
 
     #[test]

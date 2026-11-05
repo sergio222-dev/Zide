@@ -156,7 +156,11 @@ impl Workspace {
         if query.trim().is_empty() {
             // nothing typed yet: show the first files
             let hits = (0..index.len().min(MAX_RESULTS))
-                .map(|index| FileHit { index, score: 0 })
+                .map(|index| FileHit {
+                    index,
+                    score: 0,
+                    fragments: Vec::new(),
+                })
                 .collect();
             popup.set_hits(hits);
             cx.notify();
@@ -263,10 +267,10 @@ impl Render for Workspace {
                     uniform_list("results", hits.len(), move |range, _, _| {
                         range
                             .map(|row| {
-                                let item = div()
-                                    .h(px(24.))
-                                    .px_2()
-                                    .child(index.paths()[hits[row].index].clone());
+                                let item = div().h(px(24.)).px_2().child(highlighted(
+                                    index.paths()[hits[row].index].clone(),
+                                    &hits[row],
+                                ));
                                 if row == selected {
                                     item.bg(rgb(0xd6e4ff))
                                 } else {
@@ -285,6 +289,27 @@ impl Render for Workspace {
         }
         root
     }
+}
+
+/// The path with the matched fragments in bold blue.
+fn highlighted(path: String, hit: &FileHit) -> StyledText {
+    // fragments are `char` ranges, GPUI wants byte ranges
+    let byte_at: Vec<usize> = path
+        .char_indices()
+        .map(|(b, _)| b)
+        .chain(std::iter::once(path.len()))
+        .collect();
+    let style = HighlightStyle {
+        color: Some(rgb(0x1a5fd0).into()),
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
+    let highlights: Vec<_> = hit
+        .fragments
+        .iter()
+        .map(|f| (byte_at[f.start]..byte_at[f.end], style))
+        .collect();
+    StyledText::new(path).with_highlights(highlights)
 }
 
 fn popup_frame(input: &Entity<InputState>, status: String) -> Div {
