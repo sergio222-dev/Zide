@@ -7,6 +7,10 @@ publish.workspace = true
 
 [dependencies]
 rayon = "1"
+globset = "0.4"
+grep-matcher = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
 zide-index = { path = "../index" }
 zide-matcher = { path = "../matcher" }
 
