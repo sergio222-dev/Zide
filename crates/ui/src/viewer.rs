@@ -209,12 +209,9 @@ impl Viewer {
     /// `(first visible row, visible rows)` as of the last layout, if there was one.
     fn view_metrics(&self) -> Option<(usize, usize)> {
         let state = self.scroll.0.borrow();
-        let row = f32::from(state.last_item_size?.item.height);
-        if row <= 0. {
-            return None;
-        }
-        let top = (-f32::from(state.base_handle.offset().y) / row).max(0.) as usize;
-        let rows = (f32::from(state.base_handle.bounds().size.height) / row) as usize;
+        let viewport = f32::from(state.last_item_size?.item.height);
+        let top = (-f32::from(state.base_handle.offset().y) / ROW_HEIGHT).max(0.) as usize;
+        let rows = (viewport / ROW_HEIGHT) as usize;
         Some((top, rows.max(1)))
     }
 
