@@ -22,7 +22,15 @@ use zide_search::{
     FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_files_cancellable, search_text,
 };
 
-actions!(zide, [SwitchTab]);
+actions!(zide, [SwitchTab, ToggleRegex, ToggleCase, ToggleWord]);
+
+/// Text search toggles, like IntelliJ's Regex / Match Case / Words buttons.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct TextOptions {
+    regex: bool,
+    case_sensitive: bool,
+    whole_word: bool,
+}
 
 const MAX_FILE_RESULTS: usize = 200;
 const MAX_TEXT_RESULTS: usize = 1000;
@@ -55,6 +63,7 @@ struct Popup {
     files: Arc<Vec<FileHit>>,
     text: Arc<Vec<TextHit>>,
     text_status: String,
+    options: TextOptions,
     selected: usize,
     scroll: UniformListScrollHandle,
     opened_at: Option<Instant>,
@@ -146,11 +155,23 @@ impl Workspace {
             files: Arc::default(),
             text: Arc::default(),
             text_status: String::new(),
+            options: TextOptions::default(),
             selected: 0,
             scroll: UniformListScrollHandle::new(),
             opened_at: Some(Instant::now()),
             _subscription: subscription,
         });
+        self.search_again(cx);
+    }
+
+    fn toggle_option(&mut self, toggle: fn(&mut TextOptions), cx: &mut Context<Self>) {
+        let Some(popup) = &mut self.popup else {
+            return;
+        };
+        if popup.tab != Tab::Text {
+            return;
+        }
+        toggle(&mut popup.options);
         self.search_again(cx);
     }
 
@@ -235,7 +256,8 @@ impl Workspace {
                 popup.select(0);
                 cx.notify();
                 if !query.is_empty() {
-                    self.search_text(query, index, generation, cancel, cx);
+                    let options = popup.options;
+                    self.search_text(query, options, index, generation, cancel, cx);
                 }
             }
         }
@@ -287,6 +309,7 @@ impl Workspace {
     fn search_text(
         &mut self,
         pattern: String,
+        options: TextOptions,
         index: Arc<FileIndex>,
         generation: u64,
         cancel: Arc<AtomicBool>,
@@ -299,6 +322,9 @@ impl Workspace {
             .spawn(async move {
                 let query = TextQuery {
                     pattern,
+                    regex: options.regex,
+                    case_sensitive: options.case_sensitive,
+                    whole_word: options.whole_word,
                     ..Default::default()
                 };
                 let result =
@@ -379,6 +405,15 @@ impl Render for Workspace {
             .size_full()
             .key_context("Workspace")
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| {
+                this.toggle_option(|o| o.regex = !o.regex, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleCase, _, cx| {
+                this.toggle_option(|o| o.case_sensitive = !o.case_sensitive, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleWord, _, cx| {
+                this.toggle_option(|o| o.whole_word = !o.whole_word, cx)
+            }))
             .on_action(cx.listener(|this, _: &SwitchTab, _, cx| {
                 if this.popup.is_some() {
                     this.switch_tab(cx);
@@ -419,7 +454,33 @@ impl Render for Workspace {
         let Some(popup) = &self.popup else {
             return root;
         };
-        let mut frame = popup_frame(popup.tab, &popup.input, self.status(popup));
+        let options = (popup.tab == Tab::Text).then(|| {
+            let o = popup.options;
+            div()
+                .flex()
+                .gap_1()
+                .ml_auto()
+                .child(chip(
+                    "Cc",
+                    "Match case (Alt+C)",
+                    o.case_sensitive,
+                    "case",
+                    cx,
+                    |o| o.case_sensitive = !o.case_sensitive,
+                ))
+                .child(chip(
+                    "W",
+                    "Whole word (Alt+W)",
+                    o.whole_word,
+                    "word",
+                    cx,
+                    |o| o.whole_word = !o.whole_word,
+                ))
+                .child(chip(".*", "Regex (Alt+R)", o.regex, "regex", cx, |o| {
+                    o.regex = !o.regex
+                }))
+        });
+        let mut frame = popup_frame(popup.tab, &popup.input, self.status(popup), options);
         if let Some(index) = &self.index {
             let (index, selected) = (index.clone(), popup.selected);
             let list = match popup.tab {
@@ -506,7 +567,32 @@ fn highlighted_bytes(text: String, byte_ranges: Vec<Range<usize>>) -> StyledText
     StyledText::new(text).with_highlights(highlights)
 }
 
-fn popup_frame(tab: Tab, input: &Entity<InputState>, status: String) -> Div {
+/// A clickable toggle; `title` is informational only.
+fn chip(
+    label: &'static str,
+    _title: &'static str,
+    on: bool,
+    id: &'static str,
+    cx: &mut Context<Workspace>,
+    toggle: fn(&mut TextOptions),
+) -> Stateful<Div> {
+    let chip = div()
+        .id(id)
+        .px_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(0xc8c8c8))
+        .cursor_pointer()
+        .child(label);
+    let chip = if on {
+        chip.bg(rgb(0xd6e4ff)).border_color(rgb(0x1a5fd0))
+    } else {
+        chip
+    };
+    chip.on_click(cx.listener(move |this, _, _, cx| this.toggle_option(toggle, cx)))
+}
+
+fn popup_frame(tab: Tab, input: &Entity<InputState>, status: String, options: Option<Div>) -> Div {
     let tab_label = |label: &'static str, this: Tab| {
         let item = div().px_2().rounded_sm().child(label);
         if tab == this {
@@ -534,7 +620,8 @@ fn popup_frame(tab: Tab, input: &Entity<InputState>, status: String) -> Div {
                 .flex()
                 .gap_1()
                 .child(tab_label("Files", Tab::Files))
-                .child(tab_label("Text", Tab::Text)),
+                .child(tab_label("Text", Tab::Text))
+                .children(options),
         )
         .child(Input::new(input))
         .child(div().text_xs().text_color(rgb(0x777777)).child(status))
@@ -550,7 +637,12 @@ fn main() {
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
         // Root binds Tab to focus-next; a deeper context wins over it.
-        cx.bind_keys([KeyBinding::new("tab", SwitchTab, Some("Workspace"))]);
+        cx.bind_keys([
+            KeyBinding::new("tab", SwitchTab, Some("Workspace")),
+            KeyBinding::new("alt-r", ToggleRegex, Some("Workspace")),
+            KeyBinding::new("alt-c", ToggleCase, Some("Workspace")),
+            KeyBinding::new("alt-w", ToggleWord, Some("Workspace")),
+        ]);
         gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
             let workspace = cx.new(|cx| Workspace::new(root, cx));
             workspace.read(cx).focus.clone().focus(window, cx);
