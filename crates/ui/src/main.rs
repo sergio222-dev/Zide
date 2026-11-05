@@ -19,7 +19,8 @@ use gpui_kit::*;
 use zide_core::{DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
 use zide_index::FileIndex;
 use zide_search::{
-    FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_files_with_recent, search_text,
+    ActionHit, ActionText, FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_actions,
+    search_files_with_recent, search_text,
 };
 
 actions!(zide, [SwitchTab, ToggleRegex, ToggleCase, ToggleWord]);
@@ -40,15 +41,89 @@ const MAX_TEXT_RESULTS: usize = 1000;
 enum Tab {
     Files,
     Text,
+    Actions,
 }
 
 impl Tab {
-    fn toggled(self) -> Self {
+    fn next(self) -> Self {
         match self {
             Tab::Files => Tab::Text,
-            Tab::Text => Tab::Files,
+            Tab::Text => Tab::Actions,
+            Tab::Actions => Tab::Files,
         }
     }
+}
+
+/// A command of the IDE (ADR-011): searched by name and synonyms, run from the Actions tab.
+struct ActionDef {
+    name: &'static str,
+    synonyms: &'static [&'static str],
+    /// The GPUI action behind the command, when it has one: its keymap binding is shown.
+    action: Option<Box<dyn Action>>,
+    /// Commands that act on the popup itself keep it open; the others close it first.
+    closes_popup: bool,
+    run: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+}
+
+fn action_registry() -> Vec<ActionDef> {
+    vec![
+        ActionDef {
+            name: "Find Files",
+            synonyms: &["open file", "go to file"],
+            action: None,
+            closes_popup: false,
+            run: |ws, _, cx| ws.show_tab(Tab::Files, cx),
+        },
+        ActionDef {
+            name: "Find in Files",
+            synonyms: &["grep", "ripgrep", "search text"],
+            action: None,
+            closes_popup: false,
+            run: |ws, _, cx| ws.show_tab(Tab::Text, cx),
+        },
+        ActionDef {
+            name: "Switch Tab",
+            synonyms: &["next tab"],
+            action: Some(Box::new(SwitchTab)),
+            closes_popup: false,
+            run: |ws, _, cx| ws.switch_tab(cx),
+        },
+        ActionDef {
+            name: "Toggle Regex",
+            synonyms: &["regular expression"],
+            action: Some(Box::new(ToggleRegex)),
+            closes_popup: false,
+            run: |ws, _, cx| ws.toggle_text_option(|o| o.regex = !o.regex, cx),
+        },
+        ActionDef {
+            name: "Toggle Match Case",
+            synonyms: &["case sensitive"],
+            action: Some(Box::new(ToggleCase)),
+            closes_popup: false,
+            run: |ws, _, cx| ws.toggle_text_option(|o| o.case_sensitive = !o.case_sensitive, cx),
+        },
+        ActionDef {
+            name: "Toggle Whole Word",
+            synonyms: &["words"],
+            action: Some(Box::new(ToggleWord)),
+            closes_popup: false,
+            run: |ws, _, cx| ws.toggle_text_option(|o| o.whole_word = !o.whole_word, cx),
+        },
+        ActionDef {
+            name: "Reload Project",
+            synonyms: &["rescan", "refresh", "reindex"],
+            action: None,
+            closes_popup: true,
+            run: |ws, _, cx| ws.rescan(cx),
+        },
+        ActionDef {
+            name: "Quit",
+            synonyms: &["exit", "close ide"],
+            action: None,
+            closes_popup: true,
+            run: |_, _, cx| cx.quit(),
+        },
+    ]
 }
 
 /// What the background text search tells the UI.
@@ -64,6 +139,7 @@ struct Popup {
     files: Arc<Vec<FileHit>>,
     text: Arc<Vec<TextHit>>,
     text_status: String,
+    actions: Arc<Vec<ActionHit>>,
     options: TextOptions,
     selected: usize,
     scroll: UniformListScrollHandle,
@@ -79,6 +155,7 @@ impl Popup {
         match self.tab {
             Tab::Files => self.files.len(),
             Tab::Text => self.text.len(),
+            Tab::Actions => self.actions.len(),
         }
     }
 
@@ -111,6 +188,8 @@ struct Workspace {
     scan_generation: u64,
     changes_tx: async_channel::Sender<()>,
     _watcher: Option<ProjectWatcher>,
+    registry: std::rc::Rc<Vec<ActionDef>>,
+    action_texts: Vec<ActionText>,
 }
 
 impl Workspace {
@@ -126,6 +205,7 @@ impl Workspace {
         })
         .detach();
 
+        let registry = action_registry();
         let mut workspace = Self {
             focus: cx.focus_handle(),
             detector: DoubleShiftDetector::default(),
@@ -138,6 +218,14 @@ impl Workspace {
             scan_generation: 0,
             changes_tx,
             _watcher: None,
+            action_texts: registry
+                .iter()
+                .map(|def| ActionText {
+                    name: def.name.to_string(),
+                    synonyms: def.synonyms.iter().map(|s| s.to_string()).collect(),
+                })
+                .collect(),
+            registry: std::rc::Rc::new(registry),
         };
         workspace.rescan(cx);
         workspace
@@ -240,6 +328,7 @@ impl Workspace {
             files: Arc::default(),
             text: Arc::default(),
             text_status: String::new(),
+            actions: Arc::default(),
             options: TextOptions::default(),
             selected: 0,
             scroll: UniformListScrollHandle::new(),
@@ -267,14 +356,34 @@ impl Workspace {
 
     fn switch_tab(&mut self, cx: &mut Context<Self>) {
         if let Some(popup) = &mut self.popup {
-            popup.tab = popup.tab.toggled();
+            let next = popup.tab.next();
+            self.show_tab(next, cx);
+        }
+    }
+
+    fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        if let Some(popup) = &mut self.popup {
+            popup.tab = tab;
             popup.selected = 0;
         }
         self.search_again(cx);
     }
 
+    /// Flips a text option from the Actions tab: shows the Text tab and clears the query typed
+    /// to find the action, which would otherwise become the text pattern.
+    fn toggle_text_option(&mut self, toggle: fn(&mut TextOptions), cx: &mut Context<Self>) {
+        if let Some(popup) = &mut self.popup {
+            popup.tab = Tab::Text;
+            popup.selected = 0;
+        }
+        self.toggle_option(toggle, cx);
+    }
+
     /// There is no editor yet: "opening" a result logs it and closes the popup.
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popup.as_ref().is_some_and(|p| p.tab == Tab::Actions) {
+            return self.run_selected_action(window, cx);
+        }
         let (Some(popup), Some(index)) = (&self.popup, &self.index) else {
             return;
         };
@@ -287,6 +396,7 @@ impl Workspace {
                 .text
                 .get(popup.selected)
                 .map(|hit| (hit.file, Some(hit.line as u32))),
+            Tab::Actions => None,
         };
         if let Some((file, line)) = target {
             eprintln!("open {} line {line:?}", index.paths()[file]);
@@ -295,6 +405,28 @@ impl Workspace {
             self.recent.truncate(MAX_RECENT);
             self.close_popup(window, cx);
         }
+    }
+
+    fn run_selected_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(popup) = &mut self.popup else {
+            return;
+        };
+        let Some(hit) = popup.actions.get(popup.selected) else {
+            return;
+        };
+        let (run, closes_popup) = {
+            let def = &self.registry[hit.index];
+            (def.run, def.closes_popup)
+        };
+        if closes_popup {
+            self.close_popup(window, cx);
+        } else {
+            // the query was typed to find the action, not to search with
+            popup.query.clear();
+            let input = popup.input.clone();
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+        }
+        run(self, window, cx);
     }
 
     fn close_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -347,6 +479,11 @@ impl Workspace {
             Tab::Files => {
                 let recent = self.recent.clone();
                 self.search_files(query, recent, index, generation, cancel, cx)
+            }
+            Tab::Actions => {
+                popup.actions = Arc::new(search_actions(&self.action_texts, &query, usize::MAX));
+                popup.select(0);
+                cx.notify();
             }
             Tab::Text => {
                 popup.text = Arc::default();
@@ -485,6 +622,7 @@ impl Workspace {
 
     fn status(&self, popup: &Popup) -> String {
         match (&self.index, popup.tab) {
+            (_, Tab::Actions) => format!("{} actions", popup.actions.len()),
             (None, _) => format!("Indexing {}…", self.root.display()),
             (Some(index), Tab::Files) => format!("{} files · {}", index.len(), self.root.display()),
             (Some(_), Tab::Text) if popup.query.is_empty() => "Type text to search in files".into(),
@@ -596,30 +734,60 @@ impl Render for Workspace {
             options,
             filters,
         );
-        if let Some(index) = &self.index {
-            let (index, selected) = (index.clone(), popup.selected);
-            let list = match popup.tab {
-                Tab::Files => {
-                    let hits = popup.files.clone();
-                    uniform_list("files", hits.len(), move |range, _, _| {
+        let selected = popup.selected;
+        let list = match (popup.tab, &self.index) {
+            (Tab::Files, Some(index)) => {
+                let (index, hits) = (index.clone(), popup.files.clone());
+                Some(uniform_list("files", hits.len(), move |range, _, _| {
+                    range
+                        .map(|row| {
+                            let path = index.paths()[hits[row].index].clone();
+                            row_frame(row == selected)
+                                .child(highlighted(path, ranges_in_chars(&hits[row])))
+                        })
+                        .collect()
+                }))
+            }
+            (Tab::Text, Some(index)) => {
+                let (index, hits) = (index.clone(), popup.text.clone());
+                Some(uniform_list("text", hits.len(), move |range, _, _| {
+                    range
+                        .map(|row| text_row(&index, &hits[row], row == selected))
+                        .collect()
+                }))
+            }
+            (Tab::Actions, _) => {
+                let hits = popup.actions.clone();
+                let registry = self.registry.clone();
+                Some(uniform_list(
+                    "actions",
+                    hits.len(),
+                    move |range, window, cx| {
                         range
                             .map(|row| {
-                                let path = index.paths()[hits[row].index].clone();
+                                let def = &registry[hits[row].index];
+                                // the shortcut comes from the real keymap, so it always matches it
+                                let shortcut = def
+                                    .action
+                                    .as_ref()
+                                    .map(|a| window.keystroke_text_for(a.as_ref(), cx))
+                                    .unwrap_or_default();
                                 row_frame(row == selected)
-                                    .child(highlighted(path, ranges_in_chars(&hits[row])))
+                                    .child(highlighted(
+                                        def.name.to_string(),
+                                        hits[row].fragments.clone(),
+                                    ))
+                                    .child(
+                                        div().ml_auto().text_color(rgb(0x777777)).child(shortcut),
+                                    )
                             })
                             .collect()
-                    })
-                }
-                Tab::Text => {
-                    let hits = popup.text.clone();
-                    uniform_list("text", hits.len(), move |range, _, _| {
-                        range
-                            .map(|row| text_row(&index, &hits[row], row == selected))
-                            .collect()
-                    })
-                }
-            };
+                    },
+                ))
+            }
+            _ => None,
+        };
+        if let Some(list) = list {
             frame = frame.child(list.track_scroll(&popup.scroll).w_full().h(px(320.)));
         }
         root = root.child(frame);
@@ -742,6 +910,7 @@ fn popup_frame(
                 .gap_1()
                 .child(tab_label("Files", Tab::Files))
                 .child(tab_label("Text", Tab::Text))
+                .child(tab_label("Actions", Tab::Actions))
                 .children(options),
         )
         .child(Input::new(input))
