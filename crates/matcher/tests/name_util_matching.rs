@@ -1,23 +1,26 @@
 //! Port of IntelliJ's `NameUtilMatchingTest` (platform/util/text-matching/test).
 //!
-//! Not ported yet, they need other layers: `testCyrillicMatch` (keyboard-layout
-//! fixing matcher) and `testMatchingAllOccurrences` (all-occurrences matcher).
+//! Like the original, matchers are wrapped by the keyboard-layout fixing matcher.
+//! The Pinyin wrapper is not ported yet.
 
-use zide_matcher::{MatchedFragment, MatchingMode, MinusculeMatcher};
+use zide_matcher::{
+    AllOccurrencesMatcher, FixingLayoutMatcher, MatchedFragment, Matcher, MatchingMode, NoopLayout,
+    RussianToEnglish,
+};
 
-fn matcher(pattern: &str, mode: MatchingMode) -> MinusculeMatcher {
-    MinusculeMatcher::new(pattern, mode, "")
+fn matcher(pattern: &str, mode: MatchingMode) -> FixingLayoutMatcher {
+    FixingLayoutMatcher::new(pattern, mode, "", &RussianToEnglish)
 }
 
-fn case_sensitive(pattern: &str) -> MinusculeMatcher {
+fn case_sensitive(pattern: &str) -> FixingLayoutMatcher {
     matcher(pattern, MatchingMode::MatchCase)
 }
 
-fn case_insensitive(pattern: &str) -> MinusculeMatcher {
+fn case_insensitive(pattern: &str) -> FixingLayoutMatcher {
     matcher(pattern, MatchingMode::IgnoreCase)
 }
 
-fn first_letter(pattern: &str) -> MinusculeMatcher {
+fn first_letter(pattern: &str) -> FixingLayoutMatcher {
     matcher(pattern, MatchingMode::FirstLetter)
 }
 
@@ -810,5 +813,19 @@ fn test_properties() {
     assert_matches(
         "*pro",
         "spring.activemq.pool.configuration.reconnect-on-exception",
+    );
+}
+
+#[test]
+fn cyrillic_match() {
+    assert_matches("ыек", "String");
+}
+
+#[test]
+fn matching_all_occurrences() {
+    let m = AllOccurrencesMatcher::new("*e", MatchingMode::IgnoreCase, "", &NoopLayout);
+    assert_eq!(
+        m.match_fragments("some text"),
+        Some(frags(&[(3, 4), (6, 7)]))
     );
 }

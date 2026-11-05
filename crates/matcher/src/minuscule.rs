@@ -1,4 +1,5 @@
 use crate::fragment::MatchedFragment;
+use crate::matcher::Matcher;
 use crate::name_util::{
     eq_ignore_case, is_digit, is_letter_or_digit, is_word_start, next_word, to_lower, to_upper,
 };
@@ -110,17 +111,8 @@ impl MinusculeMatcher {
         self.pattern.iter().collect()
     }
 
-    pub fn matches(&self, name: &str) -> bool {
-        self.match_fragments(name).is_some()
-    }
-
     /// Fragments of `name` matched by the pattern, or `None` when it doesn't match.
-    pub fn match_fragments(&self, name: &str) -> Option<Fragments> {
-        let name: Vec<char> = name.chars().collect();
-        self.match_chars(&name)
-    }
-
-    pub fn match_chars(&self, name: &[char]) -> Option<Fragments> {
+    fn find_fragments(&self, name: &[char]) -> Option<Fragments> {
         if name.len() < self.meaningful.len() / 2 {
             return None;
         }
@@ -137,23 +129,7 @@ impl MinusculeMatcher {
         })
     }
 
-    pub fn is_start_match(&self, name: &str) -> bool {
-        self.match_fragments(name)
-            .is_some_and(|f| is_start_match(&f))
-    }
-
-    /// Higher is a better match. `i32::MIN` when `name` doesn't match.
-    pub fn matching_degree(&self, name: &str) -> i32 {
-        self.matching_degree_with_case(name, false)
-    }
-
-    pub fn matching_degree_with_case(&self, name: &str, value_start_case_match: bool) -> i32 {
-        let name: Vec<char> = name.chars().collect();
-        let fragments = self.match_chars(&name);
-        self.calculate_score(&name, value_start_case_match, fragments.as_deref())
-    }
-
-    fn calculate_score(
+    fn score(
         &self,
         name: &[char],
         value_start_case_match: bool,
@@ -604,6 +580,21 @@ impl MinusculeMatcher {
             tail.iter().position(|&c| eq_ignore_case(c, p))
         };
         found.map(|k| k + from)
+    }
+}
+
+impl Matcher for MinusculeMatcher {
+    fn match_chars(&self, name: &[char]) -> Option<Fragments> {
+        self.find_fragments(name)
+    }
+
+    fn degree_for_fragments(
+        &self,
+        name: &[char],
+        value_start_case_match: bool,
+        fragments: Option<&[MatchedFragment]>,
+    ) -> i32 {
+        self.score(name, value_start_case_match, fragments)
     }
 }
 
