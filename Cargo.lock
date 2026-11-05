@@ -8563,6 +8563,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zide-syntax"
+version = "0.0.0"
+dependencies = [
+ "streaming-iterator",
+ "tree-sitter",
+ "tree-sitter-javascript",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+]
+
+[[package]]
 name = "zide-text"
 version = "0.0.0"
 dependencies = [
