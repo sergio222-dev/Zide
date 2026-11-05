@@ -797,6 +797,7 @@ impl Render for Workspace {
                 if this.popup.is_none() {
                     this.open_popup(window, cx);
                 }
+                this.show_tab(Tab::Text, cx); // Find in Files
             }))
             .on_action(cx.listener(|this, _: &SwitchTab, _, cx| {
                 if this.popup.is_some() {
