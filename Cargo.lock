@@ -8458,6 +8458,7 @@ dependencies = [
  "zide-index",
  "zide-matcher",
  "zide-search",
+ "zide-symbols",
 ]
 
 [[package]]

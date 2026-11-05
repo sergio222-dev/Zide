@@ -22,6 +22,7 @@ use zide_search::{
     ActionHit, ActionText, FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_actions,
     search_files_with_recent, search_text,
 };
+use zide_symbols::{SymbolHit, SymbolIndex, SymbolKind, search_symbols};
 
 actions!(zide, [SwitchTab, ToggleRegex, ToggleCase, ToggleWord]);
 
@@ -34,12 +35,14 @@ struct TextOptions {
 }
 
 const MAX_FILE_RESULTS: usize = 200;
+const MAX_SYMBOL_RESULTS: usize = 200;
 const MAX_RECENT: usize = 50;
 const MAX_TEXT_RESULTS: usize = 1000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Files,
+    Symbols,
     Text,
     Actions,
 }
@@ -47,7 +50,8 @@ enum Tab {
 impl Tab {
     fn next(self) -> Self {
         match self {
-            Tab::Files => Tab::Text,
+            Tab::Files => Tab::Symbols,
+            Tab::Symbols => Tab::Text,
             Tab::Text => Tab::Actions,
             Tab::Actions => Tab::Files,
         }
@@ -140,6 +144,7 @@ struct Popup {
     text: Arc<Vec<TextHit>>,
     text_status: String,
     actions: Arc<Vec<ActionHit>>,
+    symbols: Arc<Vec<SymbolHit>>,
     options: TextOptions,
     selected: usize,
     scroll: UniformListScrollHandle,
@@ -154,6 +159,7 @@ impl Popup {
     fn len(&self) -> usize {
         match self.tab {
             Tab::Files => self.files.len(),
+            Tab::Symbols => self.symbols.len(),
             Tab::Text => self.text.len(),
             Tab::Actions => self.actions.len(),
         }
@@ -188,6 +194,8 @@ struct Workspace {
     scan_generation: u64,
     changes_tx: async_channel::Sender<()>,
     _watcher: Option<ProjectWatcher>,
+    /// `None` until the symbols of the current index are parsed.
+    symbols: Option<Arc<SymbolIndex>>,
     registry: std::rc::Rc<Vec<ActionDef>>,
     action_texts: Vec<ActionText>,
 }
@@ -218,6 +226,7 @@ impl Workspace {
             scan_generation: 0,
             changes_tx,
             _watcher: None,
+            symbols: None,
             action_texts: registry
                 .iter()
                 .map(|def| ActionText {
@@ -267,7 +276,40 @@ impl Workspace {
                 }
                 this.replace_index(FileIndex::new(paths));
                 this._watcher = watcher.ok();
+                this.symbols = None;
+                this.index_symbols(generation, cx);
                 this.search_again(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Parses the symbols of the current files in the background; stale results are dropped.
+    fn index_symbols(&mut self, generation: u64, cx: &mut Context<Self>) {
+        let Some(index) = self.index.clone() else {
+            return;
+        };
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            let symbols = cx
+                .background_executor()
+                .spawn(async move { SymbolIndex::build(&index, &root, &AtomicBool::new(false)) })
+                .await;
+            let Some(symbols) = symbols else {
+                return;
+            };
+            eprintln!(
+                "indexed {} symbols in {:?}",
+                symbols.len(),
+                started.elapsed()
+            );
+            this.update(cx, |this, cx| {
+                if this.scan_generation == generation {
+                    this.symbols = Some(Arc::new(symbols));
+                    this.search_again(cx);
+                }
             })
             .ok();
         })
@@ -329,6 +371,7 @@ impl Workspace {
             text: Arc::default(),
             text_status: String::new(),
             actions: Arc::default(),
+            symbols: Arc::default(),
             options: TextOptions::default(),
             selected: 0,
             scroll: UniformListScrollHandle::new(),
@@ -396,6 +439,10 @@ impl Workspace {
                 .text
                 .get(popup.selected)
                 .map(|hit| (hit.file, Some(hit.line as u32))),
+            Tab::Symbols => popup.symbols.get(popup.selected).and_then(|hit| {
+                let entry = &self.symbols.as_ref()?.entries()[hit.entry];
+                Some((entry.file, Some(entry.line)))
+            }),
             Tab::Actions => None,
         };
         if let Some((file, line)) = target {
@@ -480,6 +527,14 @@ impl Workspace {
                 let recent = self.recent.clone();
                 self.search_files(query, recent, index, generation, cancel, cx)
             }
+            Tab::Symbols => {
+                popup.symbols = Arc::default();
+                popup.select(0);
+                cx.notify();
+                if let (false, Some(symbols)) = (query.trim().is_empty(), self.symbols.clone()) {
+                    self.search_symbols(query, symbols, generation, cancel, cx);
+                }
+            }
             Tab::Actions => {
                 popup.actions = Arc::new(search_actions(&self.action_texts, &query, usize::MAX));
                 popup.select(0);
@@ -507,6 +562,44 @@ impl Workspace {
                 }
             }
         }
+    }
+
+    fn search_symbols(
+        &mut self,
+        query: String,
+        symbols: Arc<SymbolIndex>,
+        generation: u64,
+        cancel: Arc<AtomicBool>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            let label = query.clone();
+            let hits = cx
+                .background_executor()
+                .spawn(async move { search_symbols(&symbols, &query, MAX_SYMBOL_RESULTS, &cancel) })
+                .await;
+            let Some(hits) = hits else {
+                return; // cancelled by a newer search
+            };
+            this.update(cx, |this, cx| {
+                if this.search_generation != generation {
+                    return;
+                }
+                eprintln!(
+                    "symbols {label:?}: {} hits in {:?}",
+                    hits.len(),
+                    started.elapsed()
+                );
+                if let Some(popup) = &mut this.popup {
+                    popup.symbols = Arc::new(hits);
+                    popup.select(0);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn search_files(
@@ -624,6 +717,10 @@ impl Workspace {
         match (&self.index, popup.tab) {
             (_, Tab::Actions) => format!("{} actions", popup.actions.len()),
             (None, _) => format!("Indexing {}…", self.root.display()),
+            (Some(_), Tab::Symbols) => match &self.symbols {
+                None => "Indexing symbols…".into(),
+                Some(symbols) => format!("{} symbols", symbols.len()),
+            },
             (Some(index), Tab::Files) => format!("{} files · {}", index.len(), self.root.display()),
             (Some(_), Tab::Text) if popup.query.is_empty() => "Type text to search in files".into(),
             (Some(_), Tab::Text) => popup.text_status.clone(),
@@ -748,6 +845,35 @@ impl Render for Workspace {
                         .collect()
                 }))
             }
+            (Tab::Symbols, Some(index)) => {
+                let (index, hits) = (index.clone(), popup.symbols.clone());
+                let symbols = self.symbols.clone();
+                Some(uniform_list("symbols", hits.len(), move |range, _, _| {
+                    let Some(symbols) = &symbols else {
+                        return Vec::new();
+                    };
+                    range
+                        .map(|row| {
+                            let entry = &symbols.entries()[hits[row].entry];
+                            let ranges = hits[row].fragments.iter().map(|f| f.start..f.end);
+                            row_frame(row == selected)
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .w(px(64.))
+                                        .text_color(rgb(0x777777))
+                                        .child(kind_label(entry.kind)),
+                                )
+                                .child(highlighted(entry.name.clone(), ranges.collect()))
+                                .child(div().ml_auto().text_color(rgb(0x777777)).child(format!(
+                                    "{}:{}",
+                                    index.paths()[entry.file],
+                                    entry.line
+                                )))
+                        })
+                        .collect()
+                }))
+            }
             (Tab::Text, Some(index)) => {
                 let (index, hits) = (index.clone(), popup.text.clone());
                 Some(uniform_list("text", hits.len(), move |range, _, _| {
@@ -792,6 +918,19 @@ impl Render for Workspace {
         }
         root = root.child(frame);
         root
+    }
+}
+
+fn kind_label(kind: SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::Function => "fn",
+        SymbolKind::Method => "method",
+        SymbolKind::Class => "type",
+        SymbolKind::Interface => "trait",
+        SymbolKind::Module => "mod",
+        SymbolKind::Macro => "macro",
+        SymbolKind::Type => "alias",
+        SymbolKind::Constant => "const",
     }
 }
 
@@ -909,6 +1048,7 @@ fn popup_frame(
                 .flex()
                 .gap_1()
                 .child(tab_label("Files", Tab::Files))
+                .child(tab_label("Symbols", Tab::Symbols))
                 .child(tab_label("Text", Tab::Text))
                 .child(tab_label("Actions", Tab::Actions))
                 .children(options),
