@@ -134,6 +134,17 @@ impl Vim {
             .then(|| (self.selection_range(buffer), self.mode == Mode::VisualLine))
     }
 
+    /// Selects `range` in Visual mode, the cursor on its last character: what Extend Selection
+    /// does. An empty range selects nothing.
+    pub fn select(&mut self, buffer: &Buffer, range: Range<usize>) {
+        if range.is_empty() {
+            return;
+        }
+        self.mode = Mode::Visual;
+        self.anchor = range.start;
+        self.set_cursor(buffer, range.end - 1);
+    }
+
     fn idle(&self) -> bool {
         self.count == 0 && self.operator.is_none() && !self.g_prefix && self.object.is_none()
     }

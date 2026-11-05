@@ -1,6 +1,8 @@
 //! Layer 1: local syntactic analysis for the editor (highlighting for now). Tree-sitter stays
 //! behind this crate's API; it never resolves types or references.
 
+mod select;
+
 use std::{ops::Range, path::Path, sync::OnceLock};
 
 use streaming_iterator::StreamingIterator;
@@ -68,6 +70,8 @@ fn grammars() -> &'static [Grammar] {
         ]
     })
 }
+
+pub use select::extend_selection;
 
 /// A language with highlighting, by file extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

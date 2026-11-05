@@ -139,6 +139,15 @@ pub struct FormatRequest {
     pub range: Option<zide_lsp::Range>,
 }
 
+/// The selections Extend Selection went through, so Shrink Selection can walk back.
+struct SelectionTrail {
+    revision: Revision,
+    /// What the last extend selected; anything else selected since breaks the trail.
+    current: Range<usize>,
+    /// What was selected before each step (`None`: nothing, only the caret), and the caret.
+    history: Vec<(Option<Range<usize>>, usize)>,
+}
+
 pub struct Viewer {
     find: Option<FindState>,
     path: String,
@@ -152,6 +161,7 @@ pub struct Viewer {
     buffer: Buffer,
     vim: Vim,
     language: Option<LanguageId>,
+    trail: Option<SelectionTrail>,
     /// Display lines of `buffer` as of `built_at`.
     lines: Arc<Vec<Line>>,
     built_at: Revision,
@@ -192,6 +202,7 @@ impl Viewer {
             notice: None,
             vim: Vim::default(),
             language,
+            trail: None,
             lines: Arc::default(),
             built_at: buffer.revision(),
             buffer,
@@ -473,6 +484,65 @@ impl Viewer {
     }
 
     /// The text selected in Visual mode, when it is a single line: what the panel starts with.
+    /// The selection in chars: the Visual one, or the empty range at the caret.
+    fn current_selection(&self) -> Range<usize> {
+        self.vim
+            .selection(&self.buffer)
+            .map_or(self.vim.cursor()..self.vim.cursor(), |(range, _)| range)
+    }
+
+    /// Ctrl+W: selects the word at the caret, then each enclosing construct, up to the file.
+    pub fn extend_selection(&mut self) {
+        let current = self.current_selection();
+        let text = self.buffer.text();
+        let bytes = self.buffer.byte_of(current.start)..self.buffer.byte_of(current.end);
+        let Some(next) = zide_syntax::extend_selection(self.language, &text, bytes) else {
+            return;
+        };
+        let next = self.buffer.offset_of_byte(next.start)..self.buffer.offset_of_byte(next.end);
+        let revision = self.buffer.revision();
+        let mut trail = self
+            .trail
+            .take()
+            .filter(|t| t.revision == revision && t.current == current)
+            .unwrap_or(SelectionTrail {
+                revision,
+                current: current.clone(),
+                history: Vec::new(),
+            });
+        let before = self.vim.selection(&self.buffer).map(|_| current);
+        trail.history.push((before, self.vim.cursor()));
+        trail.current = next.clone();
+        self.trail = Some(trail);
+        self.vim.select(&self.buffer, next);
+    }
+
+    /// Ctrl+Shift+W: undoes the last Extend Selection.
+    pub fn shrink_selection(&mut self) {
+        let current = self.current_selection();
+        let Some(mut trail) = self
+            .trail
+            .take()
+            .filter(|t| t.revision == self.buffer.revision() && t.current == current)
+        else {
+            return;
+        };
+        let Some((before, cursor)) = trail.history.pop() else {
+            return;
+        };
+        match before {
+            Some(range) => {
+                trail.current = range.clone();
+                self.vim.select(&self.buffer, range);
+                self.trail = Some(trail).filter(|t| !t.history.is_empty());
+            }
+            None => {
+                self.vim.handle(&mut self.buffer, Key::Esc);
+                self.vim.set_cursor(&self.buffer, cursor);
+            }
+        }
+    }
+
     /// The cursor as a language server wants it: 0-based line and UTF-16 column.
     pub fn lsp_position(&self) -> (u32, u32) {
         let position = self.lsp_position_at(self.vim.cursor());
@@ -1092,11 +1162,15 @@ mod tests {
     }
 
     fn temp_file(name: &str, content: &str) -> (PathBuf, String) {
+        temp_file_as(name, "a.txt", content)
+    }
+
+    fn temp_file_as(name: &str, file: &str, content: &str) -> (PathBuf, String) {
         let dir = std::env::temp_dir().join(format!("zide-viewer-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("a.txt"), content).unwrap();
-        (dir, "a.txt".into())
+        fs::write(dir.join(file), content).unwrap();
+        (dir, file.into())
     }
 
     fn type_keys(viewer: &mut Viewer, keys: &str) {
@@ -1208,6 +1282,37 @@ mod tests {
         let edits = vec![edit_at(0, 1, 1, "1"), edit_at(0, 1, 1, "2")];
         assert!(viewer.apply_format(revision, edits));
         assert_eq!(viewer.text(), "a12b\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn extend_selection_grows_and_shrink_walks_back() {
+        let (dir, file) = temp_file_as("extend", "a.rs", "fn m() { f(one, two); }\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "lllllllllll"); // on the `o` of "one"
+        let selected = |v: &Viewer| v.selected_text();
+        viewer.extend_selection();
+        assert_eq!(selected(&viewer).as_deref(), Some("one"));
+        viewer.extend_selection();
+        assert_eq!(selected(&viewer).as_deref(), Some("one, two"));
+        viewer.shrink_selection();
+        assert_eq!(selected(&viewer).as_deref(), Some("one"));
+        viewer.shrink_selection();
+        assert_eq!(viewer.vim.mode(), Mode::Normal);
+        assert_eq!(viewer.vim.cursor(), 11); // the `o` it started on
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn shrink_does_nothing_after_the_selection_was_changed_by_hand() {
+        let (dir, file) = temp_file_as("shrink-broken", "a.rs", "fn m() { f(one, two); }\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "lllllllllll"); // on the `o` of "one"
+        viewer.extend_selection();
+        type_keys(&mut viewer, "l"); // moves the end of the selection
+        viewer.shrink_selection();
+        assert_ne!(viewer.selected_text().as_deref(), Some("o"));
+        assert_eq!(viewer.vim.mode(), Mode::Visual);
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -51,6 +51,8 @@ actions!(
         ToggleProjectTree,
         FindUsages,
         ReformatCode,
+        ExtendSelection,
+        ShrinkSelection,
     ]
 );
 
@@ -699,6 +701,21 @@ impl Workspace {
         self.show_tab(Tab::Text, cx);
         // the text matches above are shown at once; a language server refines them
         self.semantic_usages(word, cx);
+    }
+
+    /// Ctrl+W / Ctrl+Shift+W in the editor.
+    fn change_selection(&mut self, extend: bool, cx: &mut Context<Self>) {
+        if self.popup.is_some() || self.tree_focused {
+            return;
+        }
+        if let Some(viewer) = &mut self.viewer {
+            if extend {
+                viewer.extend_selection();
+            } else {
+                viewer.shrink_selection();
+            }
+            cx.notify();
+        }
     }
 
     /// Reformat Code (IntelliJ's Ctrl+Alt+L): the Visual selection if there is one, else the
@@ -1531,6 +1548,12 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleProjectTree, _, cx| this.toggle_tree(cx)))
             .on_action(cx.listener(|this, _: &FindUsages, window, cx| this.find_usages(window, cx)))
             .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
+            .on_action(
+                cx.listener(|this, _: &ExtendSelection, _, cx| this.change_selection(true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ShrinkSelection, _, cx| this.change_selection(false, cx)),
+            )
             .on_action(cx.listener(|this, _: &SwitchTab, _, cx| {
                 if this.popup.is_some() {
                     this.switch_tab(cx);
@@ -2029,6 +2052,8 @@ fn main() {
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
             KeyBinding::new("alt-f7", FindUsages, Some("Workspace")),
             KeyBinding::new("ctrl-alt-l", ReformatCode, Some("Workspace")),
+            KeyBinding::new("ctrl-w", ExtendSelection, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-w", ShrinkSelection, Some("Workspace")),
             KeyBinding::new("ctrl-shift-n", GoToFile, Some("Workspace")),
             KeyBinding::new("ctrl-alt-shift-n", GoToSymbol, Some("Workspace")),
             KeyBinding::new("ctrl-shift-a", FindAction, Some("Workspace")),

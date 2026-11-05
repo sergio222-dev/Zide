@@ -294,3 +294,14 @@ fn move_to_line_keeps_the_wanted_column_and_clamps() {
     vim.move_to_line(&buffer, 99);
     assert_eq!(vim.cursor(), 7 + 3); // clamped to the last line
 }
+
+#[test]
+fn select_puts_the_range_in_visual_mode() {
+    let mut buffer = Buffer::new("hello world\n");
+    let mut vim = Vim::default();
+    vim.select(&buffer, 6..11);
+    assert_eq!(vim.mode(), Mode::Visual);
+    assert_eq!(vim.selection(&buffer), Some((6..11, false)));
+    vim.handle(&mut buffer, Key::Esc);
+    assert_eq!(vim.mode(), Mode::Normal);
+}
