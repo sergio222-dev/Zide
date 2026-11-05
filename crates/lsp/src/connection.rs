@@ -28,6 +28,8 @@ pub enum Error {
     Timeout,
     /// The server went away before answering.
     Closed,
+    /// The server program is not on the PATH.
+    NotInstalled(&'static str),
 }
 
 impl std::fmt::Display for Error {
@@ -37,6 +39,7 @@ impl std::fmt::Display for Error {
             Error::Server { message, .. } => write!(f, "{message}"),
             Error::Timeout => write!(f, "the server did not answer in time"),
             Error::Closed => write!(f, "the server closed the connection"),
+            Error::NotInstalled(command) => write!(f, "{command} is not installed"),
         }
     }
 }
@@ -177,13 +180,13 @@ fn handle_incoming(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use std::{io::Cursor, sync::mpsc::Receiver, time::Instant};
 
     use super::*;
 
     /// A reader fed from the test, blocking like a pipe; dropping the sender ends the stream.
-    struct ChannelReader {
+    pub struct ChannelReader {
         rx: Receiver<Vec<u8>>,
         current: Cursor<Vec<u8>>,
     }
@@ -204,7 +207,7 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct Wire(Arc<Mutex<Vec<u8>>>);
+    pub struct Wire(Arc<Mutex<Vec<u8>>>);
 
     impl Write for Wire {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -219,7 +222,7 @@ mod tests {
 
     impl Wire {
         /// Every message written so far.
-        fn messages(&self) -> Vec<Value> {
+        pub fn messages(&self) -> Vec<Value> {
             let bytes = self.0.lock().unwrap().clone();
             let mut reader = BufReader::new(bytes.as_slice());
             let mut found = Vec::new();
@@ -229,7 +232,7 @@ mod tests {
             found
         }
 
-        fn wait_for(&self, count: usize) -> Vec<Value> {
+        pub fn wait_for(&self, count: usize) -> Vec<Value> {
             let started = Instant::now();
             loop {
                 let messages = self.messages();
@@ -241,13 +244,13 @@ mod tests {
         }
     }
 
-    fn frame(message: Value) -> Vec<u8> {
+    pub fn frame(message: Value) -> Vec<u8> {
         let mut bytes = Vec::new();
         write_message(&mut bytes, &serde_json::to_vec(&message).unwrap()).unwrap();
         bytes
     }
 
-    fn connect(
+    pub fn connect(
         on_notification: impl Fn(&str, Value) + Send + 'static,
     ) -> (Arc<Connection>, Wire, Sender<Vec<u8>>) {
         let (tx, rx) = mpsc::channel();
@@ -259,6 +262,12 @@ mod tests {
         let connection = Arc::new(Connection::new(reader, wire.clone(), on_notification));
         (connection, wire, tx)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::testing::*;
 
     #[test]
     fn a_response_reaches_the_request_it_answers() {

@@ -10,7 +10,7 @@ S4. The UI never blocks on the server: start and requests run in the background.
 
 ## Tasks
 - [x] T1 (S1) zide-lsp: framing, connection with request/response correlation, tests with in-memory pipes.
-- [ ] T2 (S1,S2) zide-lsp: client handshake, didOpen/didChange/didClose, references, server table by extension.
+- [x] T2 (S1,S2) zide-lsp: client handshake, didOpen/didChange/didClose, references, server table by extension.
 - [ ] T3 (S3,S4) UI: lazy server start, document sync before request, references into the Text list, fallback + status.
 
 ## Log
