@@ -651,12 +651,24 @@ impl Workspace {
         cx.notify();
     }
 
-    /// F3 / Shift+F3: the next match of the last search, or the panel when there was none.
+    /// F3 / Shift+F3: the next match of what is being searched. With the caret on a word that
+    /// is not a match of the current search, that word is searched instead, without opening the
+    /// panel. With neither, the panel opens.
     fn step_or_open_find(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        match &self.viewer {
-            Some(viewer) if viewer.has_find() => self.find_step(forward, cx),
-            Some(_) => self.open_find(false, window, cx),
-            None => {}
+        let panel_open = self.find.is_some();
+        let Some(viewer) = &mut self.viewer else {
+            return;
+        };
+        if viewer.has_find() && (panel_open || viewer.cursor_on_match()) {
+            return self.find_step(forward, cx);
+        }
+        match viewer.word_to_search() {
+            Some(word) => {
+                viewer.search_word(&word, forward);
+                cx.notify();
+            }
+            None if viewer.has_find() => self.find_step(forward, cx),
+            None => self.open_find(false, window, cx),
         }
     }
 
@@ -1768,19 +1780,21 @@ impl Render for Workspace {
                                     div()
                                         .flex_shrink_0()
                                         .w(px(64.))
-                                        .text_color(rgb(0x777777))
+                                        .text_color(rgb(theme::MUTED))
                                         .child(kind_label(symbol.node.kind)),
                                 )
                                 .child(highlighted(
                                     symbol.node.name.as_deref().unwrap_or_default().to_string(),
                                     ranges.collect(),
                                 ))
-                                .child(div().ml_auto().text_color(rgb(0x777777)).child(format!(
+                                .child(div().ml_auto().text_color(rgb(theme::MUTED)).child(
+                                    format!(
                                     "{}{}:{}",
                                     symbol.container.map_or(String::new(), |c| format!("{c} · ")),
                                     index.paths()[symbol.file],
                                     symbol.node.line
-                                )))
+                                ),
+                                ))
                         })
                         .collect()
                 }))
@@ -1815,7 +1829,10 @@ impl Render for Workspace {
                                         hits[row].fragments.clone(),
                                     ))
                                     .child(
-                                        div().ml_auto().text_color(rgb(0x777777)).child(shortcut),
+                                        div()
+                                            .ml_auto()
+                                            .text_color(rgb(theme::MUTED))
+                                            .child(shortcut),
                                     )
                             })
                             .collect()
@@ -1861,7 +1878,7 @@ impl Workspace {
                 .px_3()
                 .py_1()
                 .border_b_1()
-                .border_color(rgb(0xd0d0d0))
+                .border_color(rgb(theme::CONTROL_BORDER))
                 .child(
                     div()
                         .flex()
@@ -1871,7 +1888,7 @@ impl Workspace {
                         .child(
                             div()
                                 .min_w(px(90.))
-                                .text_color(rgb(if failed { 0xc02020 } else { 0x777777 }))
+                                .text_color(rgb(if failed { theme::ERROR } else { theme::MUTED }))
                                 .child(summary),
                         )
                         .child(
@@ -1933,11 +1950,13 @@ fn small_button(id: &'static str, label: &'static str, on: bool) -> Stateful<Div
         .px_2()
         .rounded_sm()
         .border_1()
-        .border_color(rgb(0xc8c8c8))
+        .border_color(rgb(theme::CONTROL_BORDER))
         .cursor_pointer()
         .child(label);
     if on {
-        button.bg(rgb(0xd6e4ff)).border_color(rgb(0x1a5fd0))
+        button
+            .bg(rgb(theme::ACTIVE_BG))
+            .border_color(rgb(theme::ACTIVE_BORDER))
     } else {
         button
     }
@@ -2009,7 +2028,11 @@ fn ranges_in_chars(hit: &FileHit) -> Vec<Range<usize>> {
 
 fn row_frame(selected: bool) -> Div {
     let row = div().h(px(24.)).px_2().flex().gap_2().overflow_hidden();
-    if selected { row.bg(rgb(0xd6e4ff)) } else { row }
+    if selected {
+        row.bg(rgb(theme::ACTIVE_BG))
+    } else {
+        row
+    }
 }
 
 fn text_row(index: &FileIndex, hit: &TextHit, selected: bool) -> Div {
@@ -2026,14 +2049,14 @@ fn text_row(index: &FileIndex, hit: &TextHit, selected: bool) -> Div {
         .child(
             div()
                 .flex_shrink_0()
-                .text_color(rgb(0x777777))
+                .text_color(rgb(theme::MUTED))
                 .child(format!("{}:{}", index.paths()[hit.file], hit.line)),
         )
         .child(highlighted_bytes(text.to_string(), ranges))
 }
 
 const HIGHLIGHT: fn() -> HighlightStyle = || HighlightStyle {
-    color: Some(rgb(0x1a5fd0).into()),
+    color: Some(rgb(theme::ACTIVE_BORDER).into()),
     font_weight: Some(FontWeight::BOLD),
     ..Default::default()
 };
@@ -2072,11 +2095,12 @@ fn chip(
         .px_1()
         .rounded_sm()
         .border_1()
-        .border_color(rgb(0xc8c8c8))
+        .border_color(rgb(theme::CONTROL_BORDER))
         .cursor_pointer()
         .child(label);
     let chip = if on {
-        chip.bg(rgb(0xd6e4ff)).border_color(rgb(0x1a5fd0))
+        chip.bg(rgb(theme::ACTIVE_BG))
+            .border_color(rgb(theme::ACTIVE_BORDER))
     } else {
         chip
     };
@@ -2093,7 +2117,7 @@ fn popup_frame(
     let tab_label = |label: &'static str, this: Tab| {
         let item = div().px_2().rounded_sm().child(label);
         if tab == this {
-            item.bg(rgb(0xd6e4ff)).font_weight(FontWeight::BOLD)
+            item.bg(rgb(theme::ACTIVE_BG)).font_weight(FontWeight::BOLD)
         } else {
             item
         }
@@ -2108,9 +2132,9 @@ fn popup_frame(
         .gap_2()
         .flex()
         .flex_col()
-        .bg(rgb(0xffffff))
+        .bg(rgb(theme::POPUP))
         .border_1()
-        .border_color(rgb(0xc8c8c8))
+        .border_color(rgb(theme::CONTROL_BORDER))
         .rounded_md()
         .child(
             div()
@@ -2125,7 +2149,7 @@ fn popup_frame(
         )
         .child(Input::new(input))
         .children(filters)
-        .child(div().text_xs().text_color(rgb(0x777777)).child(status))
+        .child(div().text_xs().text_color(rgb(theme::MUTED)).child(status))
 }
 
 fn main() {
@@ -2137,6 +2161,7 @@ fn main() {
 
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         // Root binds Tab to focus-next; a deeper context wins over it.
         cx.bind_keys([
             KeyBinding::new("tab", SwitchTab, Some("Workspace")),

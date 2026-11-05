@@ -20,3 +20,10 @@ pub const CARET_BAR: u32 = 0x61afef;
 
 pub const TREE_SELECTED: u32 = 0x2c313a;
 pub const TREE_FOCUSED: u32 = 0x2f4a73;
+
+/// The popup, the find panel and their controls.
+pub const POPUP: u32 = 0x25262b;
+pub const CONTROL_BORDER: u32 = 0x3a3c42;
+pub const ACTIVE_BG: u32 = 0x2f4a73;
+pub const ACTIVE_BORDER: u32 = 0x61afef;
+pub const ERROR: u32 = 0xe06c75;

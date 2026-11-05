@@ -521,6 +521,42 @@ impl Viewer {
         }
     }
 
+    /// Whether the caret is at the start of a match of the current search.
+    pub fn cursor_on_match(&mut self) -> bool {
+        self.refresh_matches();
+        self.match_at_cursor().is_some()
+    }
+
+    /// What F3 searches when nothing is being searched at the caret: the selected word, or the
+    /// identifier under the caret.
+    pub fn word_to_search(&self) -> Option<String> {
+        self.selected_text().or_else(|| self.word_at_cursor())
+    }
+
+    /// Searches `word` as a whole word, case-sensitively, and moves to its next (or previous)
+    /// occurrence. The highlights stay hidden; `n`, `N` and F3 go on with it.
+    pub fn search_word(&mut self, word: &str, forward: bool) {
+        // start from the word itself, wherever in it the caret is, so "next" means the one after
+        let start = match self.vim.selection(&self.buffer) {
+            Some((range, _)) => Some(range.start),
+            None => self.word_range_at_cursor().map(|range| range.start),
+        };
+        if let Some(start) = start {
+            if self.vim.mode() != Mode::Normal {
+                self.vim.handle(&mut self.buffer, Key::Esc);
+            }
+            self.vim.set_cursor(&self.buffer, start);
+        }
+        self.set_find(&FindQuery {
+            pattern: word.to_string(),
+            case_sensitive: true,
+            whole_word: true,
+            regex: false,
+        });
+        self.hide_find();
+        self.jump(forward, false);
+    }
+
     pub fn has_find(&self) -> bool {
         self.find.is_some()
     }
@@ -1451,6 +1487,27 @@ mod tests {
         // an answer for a revision that is gone is ignored
         viewer.set_semantic(target.key, vec![only_second]);
         assert_eq!(*viewer.word_highlights(), [0..2]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn searching_the_word_under_the_caret_steps_to_the_next_one() {
+        let (dir, file) = temp_file("f3", "foo bar foo foobar foo\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "l"); // inside the word, not at its start
+        let word = viewer.word_to_search().unwrap();
+        viewer.search_word(&word, true);
+        assert_eq!(viewer.vim.cursor(), 8); // whole words only: `foobar` is skipped
+        assert!(viewer.cursor_on_match());
+        viewer.jump(true, false);
+        assert_eq!(viewer.vim.cursor(), 19);
+        viewer.jump(false, false);
+        assert_eq!(viewer.vim.cursor(), 8);
+        viewer.search_word("foo", false); // Shift+F3 from the second one goes back
+        assert_eq!(viewer.vim.cursor(), 0);
+        // moved off the matches: a different word would be searched instead
+        type_keys(&mut viewer, "l");
+        assert!(!viewer.cursor_on_match());
         fs::remove_dir_all(dir).unwrap();
     }
 
