@@ -19,7 +19,7 @@ mod viewer;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
-use viewer::{Effect, FindStatus, Viewer};
+use viewer::{Effect, FindStatus, FormatRequest, Viewer};
 use zide_core::{Change, DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
 use zide_index::FileIndex;
 use zide_lsp::{Client, Error as LspError, server_for};
@@ -50,6 +50,7 @@ actions!(
         RecentFiles,
         ToggleProjectTree,
         FindUsages,
+        ReformatCode,
     ]
 );
 
@@ -106,6 +107,13 @@ fn action_registry() -> Vec<ActionDef> {
             action: Some(Box::new(GoToFile)),
             closes_popup: false,
             run: |ws, _, cx| ws.show_tab(Tab::Files, cx),
+        },
+        ActionDef {
+            name: "Reformat Code",
+            synonyms: &["format", "beautify", "prettify", "indent"],
+            action: Some(Box::new(ReformatCode)),
+            closes_popup: true,
+            run: |ws, _, cx| ws.reformat(cx),
         },
         ActionDef {
             name: "Find Usages",
@@ -691,6 +699,69 @@ impl Workspace {
         self.show_tab(Tab::Text, cx);
         // the text matches above are shown at once; a language server refines them
         self.semantic_usages(word, cx);
+    }
+
+    /// Reformat Code (IntelliJ's Ctrl+Alt+L): the Visual selection if there is one, else the
+    /// whole file, as its language server formats it.
+    fn reformat(&mut self, cx: &mut Context<Self>) {
+        let Some(viewer) = self.viewer.as_mut() else {
+            return;
+        };
+        let relative = viewer.path().to_string();
+        let Some((spec, language)) = server_for(&relative) else {
+            viewer.set_notice(Some("no formatter for this file".into()));
+            return cx.notify();
+        };
+        let Some(request) = viewer.format_request() else {
+            return;
+        };
+        let client = match self.lsp.get(spec.name) {
+            Some(LspState::Ready(client)) => client.clone(),
+            Some(LspState::Unavailable(why)) => {
+                viewer.set_notice(Some(format!("not formatted: {why}")));
+                return cx.notify();
+            }
+            Some(LspState::Starting) | None => {
+                viewer.set_notice(Some("not formatted: the formatter is starting".into()));
+                self.warm_server(&relative, cx);
+                return cx.notify();
+            }
+        };
+        let path = self.root.join(&relative);
+        cx.spawn(async move |this, cx| {
+            let FormatRequest {
+                revision,
+                text,
+                range,
+            } = request;
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    client.sync(&path, language, &text)?;
+                    client.format(&path, range)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if matches!(outcome, Err(LspError::Closed | LspError::Io(_))) {
+                    this.lsp.remove(spec.name);
+                }
+                let Some(viewer) = this.viewer.as_mut().filter(|v| v.path() == relative) else {
+                    return;
+                };
+                match outcome {
+                    Ok(edits) => {
+                        // false: typed meanwhile, the edits no longer fit
+                        if viewer.apply_format(revision, edits) {
+                            viewer.set_notice(None);
+                        }
+                    }
+                    Err(e) => viewer.set_notice(Some(format!("not formatted: {e}"))),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Starts the language server of `path`'s language in the background, once, so it has
@@ -1459,6 +1530,7 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|this, _: &ToggleProjectTree, _, cx| this.toggle_tree(cx)))
             .on_action(cx.listener(|this, _: &FindUsages, window, cx| this.find_usages(window, cx)))
+            .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
             .on_action(cx.listener(|this, _: &SwitchTab, _, cx| {
                 if this.popup.is_some() {
                     this.switch_tab(cx);
@@ -1956,6 +2028,7 @@ fn main() {
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
             KeyBinding::new("alt-f7", FindUsages, Some("Workspace")),
+            KeyBinding::new("ctrl-alt-l", ReformatCode, Some("Workspace")),
             KeyBinding::new("ctrl-shift-n", GoToFile, Some("Workspace")),
             KeyBinding::new("ctrl-alt-shift-n", GoToSymbol, Some("Workspace")),
             KeyBinding::new("ctrl-shift-a", FindAction, Some("Workspace")),

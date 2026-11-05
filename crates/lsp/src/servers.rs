@@ -135,7 +135,9 @@ mod tests {
             "aarch64" => "arm64",
             other => other,
         };
-        let lib = dir.join(format!("node_modules/@typescript/typescript-{os}-{arch}/lib"));
+        let lib = dir.join(format!(
+            "node_modules/@typescript/typescript-{os}-{arch}/lib"
+        ));
         fs::create_dir_all(&lib).unwrap();
         let exe = lib.join(if cfg!(windows) { "tsc.exe" } else { "tsc" });
         fs::write(&exe, "").unwrap();

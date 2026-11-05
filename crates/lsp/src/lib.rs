@@ -8,6 +8,6 @@ mod text;
 
 pub use client::{Client, ServerSpec, server_for};
 pub use connection::{Connection, Error};
-pub use lsp_types::{Location, Position, Range};
+pub use lsp_types::{Location, Position, Range, TextEdit};
 pub use servers::servers_dir;
 pub use text::{char_column, path_to_uri, uri_to_path, utf16_column};

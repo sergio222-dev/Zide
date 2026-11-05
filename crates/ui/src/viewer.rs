@@ -132,6 +132,13 @@ struct ScrollAnim {
 
 const SCROLL_DURATION: Duration = Duration::from_millis(160);
 
+/// What a formatter is asked for, see [`Viewer::format_request`].
+pub struct FormatRequest {
+    pub revision: Revision,
+    pub text: String,
+    pub range: Option<zide_lsp::Range>,
+}
+
 pub struct Viewer {
     find: Option<FindState>,
     path: String,
@@ -210,6 +217,11 @@ impl Viewer {
         self.vim.set_cursor(&self.buffer, offset);
         self.vim.handle(&mut self.buffer, Key::Char('^')); // first non-blank of the line
         self.scroll.scroll_to_item(row, ScrollStrategy::Top);
+    }
+
+    /// Shows `notice` in the status line (`None` clears it).
+    pub fn set_notice(&mut self, notice: Option<String>) {
+        self.notice = notice;
     }
 
     pub fn path(&self) -> &str {
@@ -463,12 +475,87 @@ impl Viewer {
     /// The text selected in Visual mode, when it is a single line: what the panel starts with.
     /// The cursor as a language server wants it: 0-based line and UTF-16 column.
     pub fn lsp_position(&self) -> (u32, u32) {
-        let position = self.buffer.position_of(self.vim.cursor());
+        let position = self.lsp_position_at(self.vim.cursor());
+        (position.line, position.character)
+    }
+
+    fn lsp_position_at(&self, offset: usize) -> zide_lsp::Position {
+        let position = self.buffer.position_of(offset);
         let line = self.buffer.line(position.line);
-        (
+        zide_lsp::Position::new(
             position.line as u32,
             zide_lsp::utf16_column(&line, position.column),
         )
+    }
+
+    /// What to ask a formatter: the Visual selection, or the whole document when nothing is
+    /// selected (IntelliJ's Reformat Code). `None` when the file cannot be edited.
+    pub fn format_request(&self) -> Option<FormatRequest> {
+        if !self.editable {
+            return None;
+        }
+        let range = self.vim.selection(&self.buffer).map(|(range, _)| {
+            zide_lsp::Range::new(
+                self.lsp_position_at(range.start),
+                self.lsp_position_at(range.end),
+            )
+        });
+        Some(FormatRequest {
+            revision: self.buffer.revision(),
+            text: self.buffer.text(),
+            range,
+        })
+    }
+
+    /// Applies the edits a formatter answered for the text of `revision` as one undo step, and
+    /// leaves Visual mode. Returns false (touching nothing) when the text changed meanwhile.
+    pub fn apply_format(&mut self, revision: Revision, edits: Vec<zide_lsp::TextEdit>) -> bool {
+        if self.buffer.revision() != revision {
+            return false;
+        }
+        let cursor = self.buffer.position_of(self.vim.cursor());
+        let mut edits: Vec<(usize, Range<usize>, String)> = edits
+            .into_iter()
+            .enumerate()
+            .map(|(order, edit)| {
+                let start = self.offset_of_lsp(edit.range.start);
+                let end = self.offset_of_lsp(edit.range.end).max(start);
+                (order, start..end, edit.new_text)
+            })
+            .collect();
+        // from the end, so earlier offsets stay valid; inserts at one place keep their order
+        edits.sort_by_key(|(order, range, _)| std::cmp::Reverse((range.start, *order)));
+        if edits
+            .iter()
+            .all(|(_, range, text)| self.buffer.slice(range.clone()) == *text)
+        {
+            return true; // already formatted
+        }
+        if matches!(self.vim.mode(), Mode::Visual | Mode::VisualLine) {
+            self.vim.handle(&mut self.buffer, Key::Esc);
+        }
+        for (_, range, text) in &edits {
+            self.buffer.edit(range.clone(), text);
+        }
+        self.buffer.commit();
+        self.rebuild();
+        let line = cursor.line.min(self.buffer.line_count().saturating_sub(1));
+        let column = cursor.column.min(self.buffer.line_len(line));
+        let offset = self.buffer.offset_of(Position { line, column });
+        self.vim.set_cursor(&self.buffer, offset);
+        true
+    }
+
+    fn offset_of_lsp(&self, position: zide_lsp::Position) -> usize {
+        let line = position.line as usize;
+        if line >= self.buffer.line_count() {
+            return self.buffer.len();
+        }
+        let column = zide_lsp::char_column(&self.buffer.line(line), position.character);
+        self.buffer.offset_of(Position {
+            line,
+            column: column.min(self.buffer.line_len(line)),
+        })
     }
 
     /// The whole text, as of now (saved or not).
@@ -1044,6 +1131,94 @@ mod tests {
         type_keys(&mut viewer, "e");
         type_keys(&mut viewer, "l"); // on the space
         assert_eq!(viewer.word_at_cursor(), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn edit_at(line: u32, from: u32, to: u32, text: &str) -> zide_lsp::TextEdit {
+        zide_lsp::TextEdit {
+            range: zide_lsp::Range::new(
+                zide_lsp::Position::new(line, from),
+                zide_lsp::Position::new(line, to),
+            ),
+            new_text: text.into(),
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn formatting_without_a_selection_asks_for_everything() {
+        let (dir, file) = temp_file("fmt-all", "a\nb\n");
+        let viewer = Viewer::open(&dir, &file);
+        let request = viewer.format_request().unwrap();
+        assert!(request.range.is_none());
+        assert_eq!(request.text, "a\nb\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn formatting_a_selection_asks_for_its_range() {
+        let (dir, file) = temp_file("fmt-sel", "one\ntwo\nthree\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "jVj");
+        let range = viewer.format_request().unwrap().range.unwrap();
+        // whole lines 1 and 2: from the start of "two" to the start of the line after "three"
+        assert_eq!(
+            (
+                range.start.line,
+                range.start.character,
+                range.end.line,
+                range.end.character
+            ),
+            (1, 0, 3, 0)
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn formatted_edits_apply_as_one_undo_step_and_leave_visual() {
+        let (dir, file) = temp_file("fmt-apply", "a  =1\nb  =2\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "Vj");
+        let request = viewer.format_request().unwrap();
+        let edits = vec![edit_at(0, 0, 5, "a = 1"), edit_at(1, 0, 5, "b = 2")];
+        assert!(viewer.apply_format(request.revision, edits));
+        assert_eq!(viewer.text(), "a = 1\nb = 2\n");
+        assert_eq!(viewer.vim.mode(), Mode::Normal);
+        type_keys(&mut viewer, "u");
+        assert_eq!(viewer.text(), "a  =1\nb  =2\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_format_answer_for_older_text_is_dropped() {
+        let (dir, file) = temp_file("fmt-stale", "a\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let request = viewer.format_request().unwrap();
+        type_keys(&mut viewer, "ix");
+        viewer.handle_key(Key::Esc);
+        assert!(!viewer.apply_format(request.revision, vec![edit_at(0, 0, 1, "zzz")]));
+        assert_eq!(viewer.text(), "xa\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn inserts_at_the_same_place_keep_the_answer_order() {
+        let (dir, file) = temp_file("fmt-order", "ab\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let revision = viewer.format_request().unwrap().revision;
+        let edits = vec![edit_at(0, 1, 1, "1"), edit_at(0, 1, 1, "2")];
+        assert!(viewer.apply_format(revision, edits));
+        assert_eq!(viewer.text(), "a12b\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn edits_count_utf16_columns() {
+        let (dir, file) = temp_file("fmt-utf16", "😀x\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let revision = viewer.format_request().unwrap().revision;
+        // the emoji is two UTF-16 units: column 2 is the `x`
+        assert!(viewer.apply_format(revision, vec![edit_at(0, 2, 3, "y")]));
+        assert_eq!(viewer.text(), "😀y\n");
         fs::remove_dir_all(dir).unwrap();
     }
 

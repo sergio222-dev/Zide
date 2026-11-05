@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use lsp_types::Location;
+use lsp_types::{Location, Range, TextEdit};
 use serde_json::{Value, json};
 
 use crate::{
@@ -291,6 +291,30 @@ impl Client {
             message: format!("unexpected references answer: {e}"),
         })
     }
+
+    /// The edits that format the document at `path`, or only `range` of it. Positions in the
+    /// edits are in the document as last synced.
+    pub fn format(&self, path: &Path, range: Option<Range>) -> Result<Vec<TextEdit>, Error> {
+        let options = json!({"tabSize": 4, "insertSpaces": true});
+        let (method, params) = match range {
+            Some(range) => (
+                "textDocument/rangeFormatting",
+                json!({"textDocument": {"uri": path_to_uri(path)}, "range": range, "options": options}),
+            ),
+            None => (
+                "textDocument/formatting",
+                json!({"textDocument": {"uri": path_to_uri(path)}, "options": options}),
+            ),
+        };
+        let result = self.connection.request(method, params, REQUEST_TIMEOUT)?;
+        if result.is_null() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_value(result).map_err(|e| Error::Server {
+            code: 0,
+            message: format!("unexpected formatting answer: {e}"),
+        })
+    }
 }
 
 impl Drop for Client {
@@ -417,6 +441,51 @@ mod tests {
             .find(|m| m["method"] == "textDocument/references")
             .unwrap();
         assert_eq!(request["params"]["context"]["includeDeclaration"], true);
+        drop(client);
+    }
+
+    #[test]
+    fn formatting_asks_for_the_whole_document_or_a_range() {
+        let (connection, wire, server) = connect(|_, _| {});
+        let _server = serve(wire.clone(), server, |_| {
+            json!([{"range": {
+                "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}},
+                "newText": "fn"}])
+        });
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        let path = Path::new("/w/a.rs");
+        let edits = client.format(path, None).unwrap();
+        assert_eq!((edits.len(), edits[0].new_text.as_str()), (1, "fn"));
+        let range = Range::new(
+            lsp_types::Position::new(2, 0),
+            lsp_types::Position::new(4, 1),
+        );
+        client.format(path, Some(range)).unwrap();
+        let sent = wire.messages();
+        let whole = sent
+            .iter()
+            .find(|m| m["method"] == "textDocument/formatting")
+            .unwrap();
+        assert_eq!(whole["params"]["options"]["insertSpaces"], true);
+        let part = sent
+            .iter()
+            .find(|m| m["method"] == "textDocument/rangeFormatting")
+            .unwrap();
+        assert_eq!(part["params"]["range"]["end"]["line"], 4);
+        drop(client);
+    }
+
+    #[test]
+    fn a_null_formatting_answer_means_nothing_to_change() {
+        let (connection, wire, server) = connect(|_, _| {});
+        let _server = serve(wire.clone(), server, |_| Value::Null);
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        assert!(
+            client
+                .format(Path::new("/w/a.rs"), None)
+                .unwrap()
+                .is_empty()
+        );
         drop(client);
     }
 
