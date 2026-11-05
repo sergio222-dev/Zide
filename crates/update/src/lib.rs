@@ -12,7 +12,7 @@ use std::{
 };
 
 use minisign_verify::{PublicKey, Signature};
-use semver::Version;
+pub use semver::Version;
 use serde::Deserialize;
 
 /// The public key releases are signed with, as written by `minisign -G`.

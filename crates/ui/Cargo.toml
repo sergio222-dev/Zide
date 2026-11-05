@@ -20,6 +20,7 @@ zide-stubs = { path = "../stubs" }
 zide-syntax = { path = "../syntax" }
 zide-text = { path = "../text" }
 zide-tree = { path = "../tree" }
+zide-update = { path = "../update" }
 zide-vim = { path = "../vim" }
 async-channel = "2"
 dirs = "6"
