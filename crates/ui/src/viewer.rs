@@ -10,7 +10,7 @@ use std::{
 
 use gpui_kit::*;
 use zide_syntax::{Class, LanguageId, Span, highlight, language_for_path};
-use zide_text::{Buffer, Revision};
+use zide_text::{Buffer, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
 /// Files larger than this are not opened.
@@ -21,6 +21,55 @@ const ROW_HEIGHT: f32 = 20.;
 struct Line {
     text: String,
     colors: Vec<(Range<usize>, HighlightStyle)>,
+    /// Display byte of each `char` of the line (and of its end), when that is not the identity
+    /// (tabs, multi-byte characters).
+    cols: Option<Vec<usize>>,
+}
+
+impl Line {
+    fn display_byte(&self, column: usize) -> usize {
+        match &self.cols {
+            Some(cols) => cols[column.min(cols.len() - 1)],
+            None => column.min(self.text.len()),
+        }
+    }
+}
+
+/// The part of the buffer that Visual mode selected, in lines and columns.
+#[derive(Clone, Copy)]
+struct Selection {
+    start: Position,
+    /// Exclusive.
+    end: Position,
+    linewise: bool,
+}
+
+impl Selection {
+    /// The display bytes of `row` that are selected, if any.
+    fn on_line(&self, row: usize, line: &Line) -> Option<Range<usize>> {
+        let last_row = if self.end.column == 0 && self.end.line > self.start.line {
+            self.end.line - 1
+        } else {
+            self.end.line
+        };
+        if row < self.start.line || row > last_row {
+            return None;
+        }
+        if self.linewise {
+            return Some(0..line.text.len());
+        }
+        let from = if row == self.start.line {
+            self.start.column
+        } else {
+            0
+        };
+        let to = if row == self.end.line {
+            line.display_byte(self.end.column)
+        } else {
+            line.text.len()
+        };
+        Some(line.display_byte(from)..to)
+    }
 }
 
 /// What the file looked like on disk when it was read or last written.
@@ -162,15 +211,30 @@ impl Viewer {
         let digits = lines.len().to_string().len();
         let (cursor_line, cursor_cell) = self.cursor_cell();
         let insert = self.vim.mode() == Mode::Insert;
+        let selection = self
+            .vim
+            .selection(&self.buffer)
+            .map(|(range, linewise)| Selection {
+                start: self.buffer.position_of(range.start),
+                end: self.buffer.position_of(range.end),
+                linewise,
+            });
         let list = uniform_list("viewer", lines.len(), move |range, _, _| {
             range
                 .map(|row| {
                     let line = &lines[row];
-                    let (text, colors) = if row == cursor_line {
-                        with_cursor(line, cursor_cell.clone(), insert)
-                    } else {
-                        (line.text.clone(), line.colors.clone())
-                    };
+                    let mut text = line.text.clone();
+                    let mut colors = line.colors.clone();
+                    if let Some(range) = selection.and_then(|s| s.on_line(row, line)) {
+                        colors = paint(&colors, range, rgb(0xcfe3ff).into());
+                    }
+                    if row == cursor_line {
+                        if cursor_cell.start >= text.len() {
+                            text.push(' '); // the cursor at the end of the line needs a cell
+                        }
+                        let bg = if insert { 0xb3d4ff } else { 0xb0b0b0 };
+                        colors = paint(&colors, cursor_cell.clone(), rgb(bg).into());
+                    }
                     div()
                         .flex()
                         .h(px(ROW_HEIGHT))
@@ -217,6 +281,8 @@ impl Viewer {
                     .child(match self.vim.mode() {
                         Mode::Normal => "NORMAL",
                         Mode::Insert => "INSERT",
+                        Mode::Visual => "VISUAL",
+                        Mode::VisualLine => "VISUAL LINE",
                     })
                     .child(self.vim.pending())
                     .child(if self.is_dirty() { "[+]" } else { "" })
@@ -229,41 +295,44 @@ impl Viewer {
     }
 }
 
-/// The text of `line` with the cursor cell painted over its colors. At the end of the line
-/// the cell is an extra space.
-fn with_cursor(
-    line: &Line,
-    cell: Range<usize>,
-    insert: bool,
-) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
-    let mut text = line.text.clone();
-    if cell.start >= text.len() {
-        text.push(' ');
+/// `colors` with `bg` as the background of `range`; the rest is unchanged.
+fn paint(
+    colors: &[(Range<usize>, HighlightStyle)],
+    range: Range<usize>,
+    bg: Hsla,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    if range.is_empty() {
+        return colors.to_vec();
     }
-    let paint = |mut style: HighlightStyle| {
-        style.background_color = Some(rgb(if insert { 0xb3d4ff } else { 0xc8c8c8 }).into());
-        style
+    let with_bg = |style: HighlightStyle| HighlightStyle {
+        background_color: Some(bg),
+        ..style
     };
-    let mut colors = Vec::new();
-    let mut under = HighlightStyle::default();
-    let mut right = None;
-    for (range, style) in &line.colors {
-        if range.end <= cell.start || range.start >= cell.end {
-            colors.push((range.clone(), *style));
+    let mut out = Vec::with_capacity(colors.len() + 3);
+    let mut painted_to = range.start;
+    for (span, style) in colors {
+        if span.end <= range.start || span.start >= range.end {
+            out.push((span.clone(), *style));
             continue;
         }
-        under = *style;
-        if range.start < cell.start {
-            colors.push((range.start..cell.start, *style));
+        if span.start < range.start {
+            out.push((span.start..range.start, *style));
         }
-        if range.end > cell.end {
-            right = Some((cell.end..range.end, *style));
+        let middle = span.start.max(range.start)..span.end.min(range.end);
+        if middle.start > painted_to {
+            out.push((painted_to..middle.start, with_bg(HighlightStyle::default())));
+        }
+        painted_to = middle.end;
+        out.push((middle, with_bg(*style)));
+        if span.end > range.end {
+            out.push((range.end..span.end, *style));
         }
     }
-    colors.push((cell.start..cell.end, paint(under)));
-    colors.extend(right);
-    colors.sort_by_key(|(range, _)| range.start);
-    (text, colors)
+    if painted_to < range.end {
+        out.push((painted_to..range.end, with_bg(HighlightStyle::default())));
+    }
+    out.sort_by_key(|(span, _)| span.start);
+    out
 }
 
 fn style(class: Class) -> HighlightStyle {
@@ -305,7 +374,14 @@ fn build_lines(buffer: &Buffer, spans: &[Span]) -> Vec<Line> {
                 let to = span.range.end.min(end) - start;
                 colors.push((map[from]..map[to], style(span.class)));
             }
-            Line { text, colors }
+            let cols =
+                (text.len() != raw.len() || !raw.is_ascii() || raw.contains('\t')).then(|| {
+                    raw.char_indices()
+                        .map(|(byte, _)| map[byte])
+                        .chain(std::iter::once(map[raw.len()]))
+                        .collect()
+                });
+            Line { text, colors, cols }
         })
         .collect()
 }
@@ -410,5 +486,58 @@ mod tests {
         assert!(!viewer.is_dirty());
         viewer.save();
         assert!(!dir.join("nope.txt").exists());
+    }
+
+    fn plain(text: &str) -> Line {
+        let (text, _) = expand_tabs(text);
+        Line {
+            text,
+            colors: Vec::new(),
+            cols: None,
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn selection_covers_the_right_part_of_each_line() {
+        let selection = Selection {
+            start: Position { line: 1, column: 2 },
+            end: Position { line: 3, column: 1 },
+            linewise: false,
+        };
+        let line = plain("abcdef");
+        assert_eq!(selection.on_line(0, &line), None);
+        assert_eq!(selection.on_line(1, &line), Some(2..6));
+        assert_eq!(selection.on_line(2, &line), Some(0..6));
+        assert_eq!(selection.on_line(3, &line), Some(0..1));
+        assert_eq!(selection.on_line(4, &line), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_selection_ending_at_a_line_start_leaves_that_line_out() {
+        let selection = Selection {
+            start: Position { line: 0, column: 0 },
+            end: Position { line: 2, column: 0 },
+            linewise: true,
+        };
+        let line = plain("abc");
+        assert_eq!(selection.on_line(1, &line), Some(0..3));
+        assert_eq!(selection.on_line(2, &line), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn paint_splits_spans_and_fills_gaps() {
+        let red = HighlightStyle {
+            color: Some(rgb(0xff0000).into()),
+            ..Default::default()
+        };
+        let colors = vec![(0..4, red), (6..8, red)];
+        let painted = paint(&colors, 2..7, rgb(0x00ff00).into());
+        let ranges: Vec<_> = painted.iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(ranges, [0..2, 2..4, 4..6, 6..7, 7..8]);
+        assert!(painted[0].1.background_color.is_none());
+        assert!(painted[1].1.background_color.is_some());
+        assert_eq!(painted[1].1.color, red.color); // keeps its color
+        assert!(painted[2].1.background_color.is_some()); // the gap is painted too
+        assert!(painted[4].1.background_color.is_none());
     }
 }

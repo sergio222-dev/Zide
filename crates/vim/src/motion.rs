@@ -11,13 +11,13 @@ pub(crate) struct Motion {
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
-enum Class {
+pub(crate) enum Class {
     Space,
     Word,
     Punct,
 }
 
-fn class(c: char) -> Class {
+pub(crate) fn class(c: char) -> Class {
     if c.is_whitespace() {
         Class::Space
     } else if c.is_alphanumeric() || c == '_' {

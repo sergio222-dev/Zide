@@ -1,18 +1,27 @@
+use std::ops::Range;
+
 use zide_text::Buffer;
 
 use crate::{
     Key, Mode, Operator, Register, Vim,
     motion::{Motion, first_non_blank, last_line, line_end, motion},
+    objects::text_object,
 };
 
 impl Vim {
     pub(crate) fn normal(&mut self, buffer: &mut Buffer, key: Key) {
         match key {
-            Key::Esc => self.reset_pending(),
+            Key::Esc => {
+                self.reset_pending();
+                if self.is_visual() {
+                    self.mode = Mode::Normal;
+                    self.clamp(buffer);
+                }
+            }
             Key::Ctrl('r') => {
                 self.reset_pending();
                 if let Some(at) = buffer.redo() {
-                    self.jump(buffer, at);
+                    self.set_cursor(buffer, at);
                 }
             }
             Key::Char(c) => self.normal_char(buffer, c),
@@ -23,17 +32,17 @@ impl Vim {
         }
     }
 
-    fn reset_pending(&mut self) {
+    pub(crate) fn reset_pending(&mut self) {
         self.count = 0;
         self.operator = None;
         self.g_prefix = false;
-    }
-
-    fn jump(&mut self, buffer: &Buffer, offset: usize) {
-        self.set_cursor(buffer, offset);
+        self.object = None;
     }
 
     fn normal_char(&mut self, buffer: &mut Buffer, c: char) {
+        if let Some(inner) = self.object.take() {
+            return self.object_command(buffer, inner, c);
+        }
         if self.g_prefix {
             self.g_prefix = false;
             if c == 'g' {
@@ -45,13 +54,16 @@ impl Vim {
             self.count = self.count * 10 + c.to_digit(10).unwrap() as usize;
             return;
         }
+        if self.is_visual() && self.visual_command(buffer, c) {
+            return;
+        }
         let operator = match c {
             'd' => Some(Operator::Delete),
             'c' => Some(Operator::Change),
             'y' => Some(Operator::Yank),
             _ => None,
         };
-        if let Some(operator) = operator {
+        if let Some(operator) = operator.filter(|_| !self.is_visual()) {
             return match self.operator {
                 None => {
                     self.operator = Some((operator, self.count.max(1)));
@@ -66,6 +78,10 @@ impl Vim {
                 Some(_) => self.reset_pending(),
             };
         }
+        if (c == 'i' || c == 'a') && (self.operator.is_some() || self.is_visual()) {
+            self.object = Some(c == 'i');
+            return;
+        }
         if c == 'g' {
             self.g_prefix = true;
             return;
@@ -73,12 +89,100 @@ impl Vim {
         if "hjklwbe0^$G".contains(c) {
             return self.run_motion(buffer, c);
         }
-        if self.operator.is_some() {
-            return self.reset_pending(); // an operator followed by something that is no motion
+        if self.operator.is_some() || self.is_visual() {
+            return self.reset_pending(); // something that is no motion
         }
         let count = self.count.max(1);
         self.reset_pending();
         self.command(buffer, c, count);
+    }
+
+    fn is_visual(&self) -> bool {
+        matches!(self.mode, Mode::Visual | Mode::VisualLine)
+    }
+
+    /// Commands that only exist in Visual mode; `false` leaves the key to the motions.
+    fn visual_command(&mut self, buffer: &mut Buffer, c: char) -> bool {
+        match c {
+            'v' | 'V' => {
+                let target = if c == 'v' {
+                    Mode::Visual
+                } else {
+                    Mode::VisualLine
+                };
+                self.mode = if self.mode == target {
+                    Mode::Normal
+                } else {
+                    target
+                };
+                self.reset_pending();
+            }
+            'o' => {
+                std::mem::swap(&mut self.anchor, &mut self.cursor);
+                self.reset_pending();
+            }
+            'd' | 'x' => self.visual_operator(buffer, Operator::Delete),
+            'y' => self.visual_operator(buffer, Operator::Yank),
+            'c' | 's' => self.visual_operator(buffer, Operator::Change),
+            _ => return false,
+        }
+        true
+    }
+
+    fn visual_operator(&mut self, buffer: &mut Buffer, op: Operator) {
+        let linewise = self.mode == Mode::VisualLine;
+        let selection = self.selection_range(buffer);
+        self.mode = Mode::Normal;
+        self.reset_pending();
+        if linewise {
+            let a = buffer.position_of(selection.start).line;
+            let b = buffer.position_of(selection.end.saturating_sub(1)).line;
+            self.lines(buffer, op, a, b);
+            if op == Operator::Yank {
+                self.cursor = buffer.line_start(a);
+            }
+        } else {
+            self.operate_chars(buffer, op, selection.start, selection.end);
+        }
+        self.clamp(buffer);
+        self.want_column = buffer.position_of(self.cursor).column;
+    }
+
+    /// The selected text as a char range, whole lines included in line-wise Visual mode.
+    pub(crate) fn selection_range(&self, buffer: &Buffer) -> Range<usize> {
+        let (low, high) = (self.anchor.min(self.cursor), self.anchor.max(self.cursor));
+        if self.mode == Mode::VisualLine {
+            let a = buffer.position_of(low).line;
+            let b = buffer.position_of(high).line;
+            let end = if b + 1 < buffer.line_count() {
+                buffer.line_start(b + 1)
+            } else {
+                buffer.len()
+            };
+            buffer.line_start(a)..end
+        } else {
+            low..(high + 1).min(buffer.len())
+        }
+    }
+
+    fn object_command(&mut self, buffer: &mut Buffer, inner: bool, kind: char) {
+        let range = text_object(buffer, self.cursor, inner, kind);
+        let operator = self.operator.take().map(|(op, _)| op);
+        self.reset_pending();
+        let Some(range) = range else {
+            return;
+        };
+        match operator {
+            Some(op) => self.operate_chars(buffer, op, range.start, range.end),
+            None => {
+                // Visual mode: the object becomes the selection
+                if self.mode == Mode::VisualLine {
+                    self.mode = Mode::Visual;
+                }
+                self.anchor = range.start;
+                self.cursor = range.end.saturating_sub(1).max(range.start);
+            }
+        }
     }
 
     fn run_motion(&mut self, buffer: &mut Buffer, key: char) {
@@ -130,7 +234,17 @@ impl Vim {
         if found.inclusive {
             end = (end + 1).min(buffer.len());
         }
+        self.operate_chars(buffer, op, start, end);
+    }
+
+    /// Applies `op` to the characters `start..end`.
+    fn operate_chars(&mut self, buffer: &mut Buffer, op: Operator, start: usize, end: usize) {
         if start == end {
+            // `ci"` on `""` has nothing to remove but still starts typing there
+            if op == Operator::Change {
+                self.cursor = start;
+                self.mode = Mode::Insert;
+            }
             return;
         }
         self.register = Register {
@@ -168,7 +282,8 @@ impl Vim {
             buffer.len()
         };
         let mut text = buffer.slice(start..end);
-        if !text.ends_with('\n') {
+        let had_break = text.ends_with('\n');
+        if !had_break {
             text.push('\n');
         }
         self.register = Register {
@@ -184,10 +299,7 @@ impl Vim {
             }
             Operator::Delete => {
                 // the last line has no break after it: take the one before it instead
-                let from = if end == buffer.len()
-                    && start > 0
-                    && !buffer.slice(start..end).ends_with('\n')
-                {
+                let from = if !had_break && start > 0 {
                     start - 1
                 } else {
                     start
@@ -231,30 +343,16 @@ impl Vim {
             'x' => {
                 let length = buffer.line_len(position.line);
                 let end = self.cursor + count.min(length - position.column.min(length));
-                if end > self.cursor {
-                    self.register = Register {
-                        text: buffer.slice(self.cursor..end),
-                        linewise: false,
-                    };
-                    buffer.delete(self.cursor..end);
-                    self.clamp(buffer);
-                }
+                self.delete_to(buffer, end);
             }
-            'D' => {
-                let end = line_end(buffer, position.line);
-                if end > self.cursor {
-                    self.register = Register {
-                        text: buffer.slice(self.cursor..end),
-                        linewise: false,
-                    };
-                    buffer.delete(self.cursor..end);
-                    self.clamp(buffer);
-                }
-            }
+            'D' => self.delete_to(buffer, line_end(buffer, position.line)),
             'p' | 'P' => self.paste(buffer, c == 'p', count),
+            'v' => self.start_visual(Mode::Visual),
+            'V' => self.start_visual(Mode::VisualLine),
+            '.' => self.repeat(buffer),
             'u' => {
                 if let Some(at) = buffer.undo() {
-                    self.jump(buffer, at);
+                    self.set_cursor(buffer, at);
                 }
             }
             _ => {}
@@ -262,6 +360,38 @@ impl Vim {
         if self.mode == Mode::Normal {
             self.want_column = buffer.position_of(self.cursor).column;
         }
+    }
+
+    fn start_visual(&mut self, mode: Mode) {
+        self.mode = mode;
+        self.anchor = self.cursor;
+    }
+
+    /// Deletes from the cursor to `end` (exclusive) into the register.
+    fn delete_to(&mut self, buffer: &mut Buffer, end: usize) {
+        if end > self.cursor {
+            self.register = Register {
+                text: buffer.slice(self.cursor..end),
+                linewise: false,
+            };
+            buffer.delete(self.cursor..end);
+            self.clamp(buffer);
+        }
+    }
+
+    /// `.`: types the keys of the last change again.
+    fn repeat(&mut self, buffer: &mut Buffer) {
+        if self.replaying {
+            return;
+        }
+        self.replaying = true;
+        for key in self.last_change.clone() {
+            self.handle(buffer, key);
+        }
+        self.replaying = false;
+        // the replay rewrote the command log; `.` itself is not a change
+        self.current.clear();
+        self.start_revision = buffer.revision();
     }
 
     fn paste(&mut self, buffer: &mut Buffer, after: bool, count: usize) {

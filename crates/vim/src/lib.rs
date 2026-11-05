@@ -3,8 +3,11 @@
 
 mod motion;
 mod normal;
+mod objects;
 
-use zide_text::Buffer;
+use std::ops::Range;
+
+use zide_text::{Buffer, Revision};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -19,6 +22,8 @@ pub enum Key {
 pub enum Mode {
     Normal,
     Insert,
+    Visual,
+    VisualLine,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +50,15 @@ pub struct Vim {
     pub(crate) operator: Option<(Operator, usize)>,
     /// A `g` was typed and waits for its second key.
     pub(crate) g_prefix: bool,
+    /// `i` (true) or `a` (false) was typed and waits for the object key.
+    pub(crate) object: Option<bool>,
+    /// Where the Visual selection started.
+    pub(crate) anchor: usize,
+    /// Keys of the command being typed; becomes `last_change` if it edited the text.
+    current: Vec<Key>,
+    start_revision: Revision,
+    last_change: Vec<Key>,
+    pub(crate) replaying: bool,
     pub(crate) register: Register,
 }
 
@@ -57,6 +71,12 @@ impl Default for Vim {
             count: 0,
             operator: None,
             g_prefix: false,
+            object: None,
+            anchor: 0,
+            current: Vec::new(),
+            start_revision: Revision::default(),
+            last_change: Vec::new(),
+            replaying: false,
             register: Register::default(),
         }
     }
@@ -93,13 +113,45 @@ impl Vim {
         if self.g_prefix {
             out.push('g');
         }
+        match self.object {
+            Some(true) => out.push('i'),
+            Some(false) => out.push('a'),
+            None => {}
+        }
         out
     }
 
+    /// The selected range while in Visual mode (whole lines in line-wise Visual).
+    pub fn selection(&self, buffer: &Buffer) -> Option<(Range<usize>, bool)> {
+        matches!(self.mode, Mode::Visual | Mode::VisualLine)
+            .then(|| (self.selection_range(buffer), self.mode == Mode::VisualLine))
+    }
+
+    fn idle(&self) -> bool {
+        self.count == 0 && self.operator.is_none() && !self.g_prefix && self.object.is_none()
+    }
+
     pub fn handle(&mut self, buffer: &mut Buffer, key: Key) {
+        if self.mode == Mode::Normal && self.idle() {
+            self.current.clear();
+            self.start_revision = buffer.revision();
+        }
+        self.current.push(key);
         match self.mode {
-            Mode::Normal => self.normal(buffer, key),
             Mode::Insert => self.insert(buffer, key),
+            _ => self.normal(buffer, key),
+        }
+        if self.mode == Mode::Normal && self.idle() && !self.replaying {
+            // undo, redo and `.` itself are not changes to repeat
+            let history = matches!(
+                self.current.first(),
+                Some(Key::Char('u' | '.') | Key::Ctrl('r'))
+            );
+            if buffer.revision() != self.start_revision && !history {
+                self.last_change = std::mem::take(&mut self.current);
+            } else {
+                self.current.clear();
+            }
         }
     }
 

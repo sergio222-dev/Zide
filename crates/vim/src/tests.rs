@@ -171,3 +171,111 @@ fn pending_shows_what_was_typed() {
     vim.handle(&mut buffer, Key::Esc);
     assert_eq!(vim.pending(), "");
 }
+
+#[test]
+fn visual_mode_selects_with_motions_and_operates() {
+    assert_eq!(run("hello world", "vlld").0, "lo world");
+    assert_eq!(
+        run("hello world", "vey$p").0,
+        "hellohello  worldo".replace("hellohello  worldo", "hello worldhello")
+    );
+    assert_eq!(run("hello world", "vwy$p").0, "hello worldhello w");
+    assert_eq!(run("ab cd", "vex").0, " cd");
+    assert_eq!(run("hello world", "vecX<Esc>").0, "X world");
+}
+
+#[test]
+fn visual_line_mode_works_on_whole_lines() {
+    assert_eq!(run("a\nb\nc\n", "Vjd").0, "c\n");
+    assert_eq!(run("a\nb\nc\n", "Vjyjp").0, "a\nb\na\nb\nc\n");
+    assert_eq!(run("a\nb\nc\n", "Vd").0, "b\nc\n");
+    assert_eq!(run("a\nb\nc\n", "jVcx<Esc>").0, "a\nx\nc\n");
+}
+
+#[test]
+fn visual_o_swaps_the_ends_and_escape_leaves() {
+    assert_eq!(run_at("abcdef", 2, "vlohd").0, "aef");
+    let mut buffer = Buffer::new("abc");
+    let mut vim = Vim::default();
+    vim.handle(&mut buffer, Key::Char('v'));
+    assert_eq!(vim.mode(), Mode::Visual);
+    assert_eq!(vim.selection(&buffer), Some((0..1, false)));
+    vim.handle(&mut buffer, Key::Esc);
+    assert_eq!(vim.mode(), Mode::Normal);
+    assert_eq!(vim.selection(&buffer), None);
+}
+
+#[test]
+fn v_twice_leaves_visual_mode() {
+    let mut buffer = Buffer::new("abc");
+    let mut vim = Vim::default();
+    vim.handle(&mut buffer, Key::Char('v'));
+    vim.handle(&mut buffer, Key::Char('v'));
+    assert_eq!(vim.mode(), Mode::Normal);
+}
+
+#[test]
+fn word_objects() {
+    assert_eq!(run_at("foo bar baz", 5, "diw").0, "foo  baz");
+    assert_eq!(run_at("foo bar baz", 5, "daw").0, "foo baz");
+    assert_eq!(run_at("foo bar", 5, "daw").0, "foo");
+    assert_eq!(run_at("foo bar baz", 5, "ciwX<Esc>").0, "foo X baz");
+    assert_eq!(run_at("foo.bar", 4, "diw").0, "foo.");
+    assert_eq!(run_at("foo bar baz", 5, "viwd").0, "foo  baz");
+}
+
+#[test]
+fn quote_objects() {
+    assert_eq!(
+        run_at(r#"say "hi there" now"#, 7, r#"ci"X<Esc>"#).0,
+        r#"say "X" now"#
+    );
+    assert_eq!(run_at(r#"say "hi there" now"#, 7, r#"da""#).0, "say  now");
+    // before the first quote: the next pair on the line
+    assert_eq!(run(r#"x = "a""#, r#"di""#).0, r#"x = """#);
+    assert_eq!(run_at("it's 'ok'", 6, "di'").0, "it's ''");
+    assert_eq!(run_at(r#""""#, 0, r#"ci"x<Esc>"#).0, r#""x""#);
+    assert_eq!(run("no quotes", r#"di""#).0, "no quotes");
+}
+
+#[test]
+fn bracket_objects() {
+    assert_eq!(run_at("f(a, g(b), c)", 3, "ci(X<Esc>").0, "f(X)");
+    assert_eq!(run_at("f(a, g(b), c)", 8, "di(").0, "f(a, g(), c)");
+    assert_eq!(run_at("f(a, g(b), c)", 3, "da(").0, "f");
+    assert_eq!(run_at("f(a)", 1, "di)").0, "f()");
+    assert_eq!(run_at("x[1] y", 2, "di[").0, "x[] y");
+    assert_eq!(run_at("<a>", 1, "di>").0, "<>");
+    assert_eq!(run_at("f(a)", 0, "di(").0, "f(a)"); // not inside brackets
+}
+
+#[test]
+fn braces_over_several_lines_take_the_lines_between() {
+    assert_eq!(
+        run_at("fn f() {\n    a;\n    b;\n}\n", 15, "di{").0,
+        "fn f() {\n}\n"
+    );
+    assert_eq!(run_at("{ a }", 2, "di{").0, "{}");
+}
+
+#[test]
+fn dot_repeats_the_last_change() {
+    assert_eq!(run("a b c d", "dw.").0, "c d");
+    assert_eq!(run("a b c d", "dw..").0, "d");
+    assert_eq!(run("foo bar baz", "cwX<Esc>w.").0, "X X baz");
+    assert_eq!(run("abc", "x.").0, "c");
+    assert_eq!(run("a\nb\nc\n", "dd.").0, "c\n");
+    assert_eq!(run("a b", "ix<Esc>.").0, "xxa b");
+}
+
+#[test]
+fn dot_ignores_motions_undo_and_itself() {
+    assert_eq!(run("a b c d", "dwwu.").0, "b c d");
+    assert_eq!(run("abcd", "xlh.").0, "cd");
+    assert_eq!(run("abc", ".").0, "abc"); // nothing to repeat
+}
+
+#[test]
+fn a_repeated_change_is_one_undo_step() {
+    assert_eq!(run("a b c d", "dw.u").0, "b c d");
+}
