@@ -12,4 +12,6 @@ zide-matcher = { path = "../matcher" }
 zide-index = { path = "../index" }
 zide-search = { path = "../search" }
 zide-stubs = { path = "../stubs" }
+zide-syntax = { path = "../syntax" }
+zide-text = { path = "../text" }
 async-channel = "2"

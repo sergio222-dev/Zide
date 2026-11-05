@@ -8591,6 +8591,8 @@ dependencies = [
  "zide-matcher",
  "zide-search",
  "zide-stubs",
+ "zide-syntax",
+ "zide-text",
 ]
 
 [[package]]

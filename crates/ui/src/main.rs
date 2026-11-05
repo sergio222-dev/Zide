@@ -14,8 +14,11 @@ use std::{
     time::Instant,
 };
 
+mod viewer;
+
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
+use viewer::Viewer;
 use zide_core::{Change, DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
 use zide_index::FileIndex;
 use zide_search::{
@@ -185,6 +188,7 @@ struct Workspace {
     /// `None` while the project is still being scanned.
     index: Option<Arc<FileIndex>>,
     popup: Option<Popup>,
+    viewer: Option<Viewer>,
     /// Bumped on every search; results of an older search are dropped.
     search_generation: u64,
     cancel_search: Option<Arc<AtomicBool>>,
@@ -230,6 +234,7 @@ impl Workspace {
             root,
             index: None,
             popup: None,
+            viewer: None,
             search_generation: 0,
             cancel_search: None,
             recent: Vec::new(),
@@ -476,7 +481,11 @@ impl Workspace {
             Tab::Actions => None,
         };
         if let Some((file, line)) = target {
-            eprintln!("open {} line {line:?}", index.paths()[file]);
+            let viewer = Viewer::open(&self.root, &index.paths()[file]);
+            if let Some(line) = line {
+                viewer.go_to_line(line);
+            }
+            self.viewer = Some(viewer);
             self.recent.retain(|&i| i != file);
             self.recent.insert(0, file);
             self.recent.truncate(MAX_RECENT);
@@ -815,8 +824,12 @@ impl Render for Workspace {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .p_4()
-            .child("Press Shift twice to open the popup. Tab switches tabs, Esc closes it.");
+            .child(match &self.viewer {
+                Some(viewer) => viewer.render(),
+                None => div().p_4().child(
+                    "Press Shift twice to open the popup. Tab switches tabs, Esc closes it.",
+                ),
+            });
 
         let Some(popup) = &self.popup else {
             return root;
