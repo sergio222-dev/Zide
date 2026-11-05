@@ -8577,6 +8577,7 @@ dependencies = [
 name = "zide-text"
 version = "0.0.0"
 dependencies = [
+ "regex",
  "ropey 1.6.1",
 ]
 

@@ -4,6 +4,8 @@
 //! [`Revision`]; consumers that computed something at an older revision must drop it.
 
 mod buffer;
+mod find;
 mod history;
 
 pub use buffer::{Anchor, Buffer, Edit, Position, Revision};
+pub use find::{FindQuery, Finder};
