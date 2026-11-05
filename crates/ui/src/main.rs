@@ -67,7 +67,10 @@ struct Popup {
     selected: usize,
     scroll: UniformListScrollHandle,
     opened_at: Option<Instant>,
-    _subscription: Subscription,
+    /// Text tab filters: file mask (`*.rs`) and directory (`crates/ui`).
+    mask_input: Entity<InputState>,
+    dir_input: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Popup {
@@ -147,6 +150,22 @@ impl Workspace {
                 this.search_again(cx);
             }
         });
+        let mask_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("File mask, e.g. *.rs"));
+        let dir_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Directory, e.g. crates/ui"));
+        let filter_subscriptions: Vec<_> = [&mask_input, &dir_input]
+            .into_iter()
+            .map(|filter| {
+                cx.subscribe(filter, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change)
+                        && this.popup.as_ref().is_some_and(|p| p.tab == Tab::Text)
+                    {
+                        this.search_again(cx);
+                    }
+                })
+            })
+            .collect();
         input.update(cx, |state, cx| state.focus(window, cx));
         self.popup = Some(Popup {
             input,
@@ -159,7 +178,12 @@ impl Workspace {
             selected: 0,
             scroll: UniformListScrollHandle::new(),
             opened_at: Some(Instant::now()),
-            _subscription: subscription,
+            mask_input,
+            dir_input,
+            _subscriptions: [subscription]
+                .into_iter()
+                .chain(filter_subscriptions)
+                .collect(),
         });
         self.search_again(cx);
     }
@@ -256,8 +280,19 @@ impl Workspace {
                 popup.select(0);
                 cx.notify();
                 if !query.is_empty() {
-                    let options = popup.options;
-                    self.search_text(query, options, index, generation, cancel, cx);
+                    let non_empty = |input: &Entity<InputState>| {
+                        let value = input.read(cx).value().trim().to_string();
+                        (!value.is_empty()).then_some(value)
+                    };
+                    let text_query = TextQuery {
+                        pattern: query,
+                        regex: popup.options.regex,
+                        case_sensitive: popup.options.case_sensitive,
+                        whole_word: popup.options.whole_word,
+                        file_mask: non_empty(&popup.mask_input),
+                        directory: non_empty(&popup.dir_input),
+                    };
+                    self.search_text(text_query, index, generation, cancel, cx);
                 }
             }
         }
@@ -308,8 +343,7 @@ impl Workspace {
     /// as they arrive.
     fn search_text(
         &mut self,
-        pattern: String,
-        options: TextOptions,
+        query: TextQuery,
         index: Arc<FileIndex>,
         generation: u64,
         cancel: Arc<AtomicBool>,
@@ -317,16 +351,9 @@ impl Workspace {
     ) {
         let (tx, rx) = async_channel::unbounded::<TextMessage>();
         let root = self.root.clone();
-        let label = pattern.clone();
+        let label = query.pattern.clone();
         cx.background_executor()
             .spawn(async move {
-                let query = TextQuery {
-                    pattern,
-                    regex: options.regex,
-                    case_sensitive: options.case_sensitive,
-                    whole_word: options.whole_word,
-                    ..Default::default()
-                };
                 let result =
                     search_text(&index, &root, &query, MAX_TEXT_RESULTS, &cancel, |hits| {
                         let _ = tx.send_blocking(TextMessage::Hits(hits));
@@ -480,7 +507,20 @@ impl Render for Workspace {
                     o.regex = !o.regex
                 }))
         });
-        let mut frame = popup_frame(popup.tab, &popup.input, self.status(popup), options);
+        let filters = (popup.tab == Tab::Text).then(|| {
+            div()
+                .flex()
+                .gap_2()
+                .child(div().flex_1().child(Input::new(&popup.mask_input)))
+                .child(div().flex_1().child(Input::new(&popup.dir_input)))
+        });
+        let mut frame = popup_frame(
+            popup.tab,
+            &popup.input,
+            self.status(popup),
+            options,
+            filters,
+        );
         if let Some(index) = &self.index {
             let (index, selected) = (index.clone(), popup.selected);
             let list = match popup.tab {
@@ -592,7 +632,13 @@ fn chip(
     chip.on_click(cx.listener(move |this, _, _, cx| this.toggle_option(toggle, cx)))
 }
 
-fn popup_frame(tab: Tab, input: &Entity<InputState>, status: String, options: Option<Div>) -> Div {
+fn popup_frame(
+    tab: Tab,
+    input: &Entity<InputState>,
+    status: String,
+    options: Option<Div>,
+    filters: Option<Div>,
+) -> Div {
     let tab_label = |label: &'static str, this: Tab| {
         let item = div().px_2().rounded_sm().child(label);
         if tab == this {
@@ -606,7 +652,7 @@ fn popup_frame(tab: Tab, input: &Entity<InputState>, status: String, options: Op
         .top_16()
         .left_1_4()
         .w_1_2()
-        .h(px(440.))
+        .h(px(480.))
         .p_2()
         .gap_2()
         .flex()
@@ -624,6 +670,7 @@ fn popup_frame(tab: Tab, input: &Entity<InputState>, status: String, options: Op
                 .children(options),
         )
         .child(Input::new(input))
+        .children(filters)
         .child(div().text_xs().text_color(rgb(0x777777)).child(status))
 }
 
