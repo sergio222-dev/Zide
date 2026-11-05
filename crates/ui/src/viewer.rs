@@ -15,6 +15,8 @@ use zide_syntax::{Class, LanguageId, Span, highlight, language_for_path};
 use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
+use crate::theme;
+
 /// Files larger than this are not opened.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 const TAB_WIDTH: usize = 4;
@@ -848,7 +850,7 @@ impl Viewer {
 
     /// Project folder, directories, file and the symbols around the cursor.
     fn breadcrumb(&self) -> Div {
-        let separator = || div().text_color(rgb(0xaaaaaa)).child("›");
+        let separator = || div().text_color(rgb(theme::DIM)).child("›");
         let mut parts: Vec<&str> = vec![self.root_name.as_str()];
         parts.extend(self.path.split('/'));
         let file = parts.pop().unwrap_or_default();
@@ -861,7 +863,7 @@ impl Viewer {
         for part in parts.into_iter().filter(|p| !p.is_empty()) {
             path = path.child(part.to_string()).child(separator());
         }
-        let path = path.child(div().text_color(rgb(0x222222)).child(file.to_string()));
+        let path = path.child(div().text_color(rgb(theme::STRONG)).child(file.to_string()));
         let mut symbols = div().flex().gap_1p5().flex_shrink_0().whitespace_nowrap();
         for symbol in self.enclosing_symbols() {
             let name = symbol.name.as_deref().unwrap_or("");
@@ -872,7 +874,7 @@ impl Viewer {
                     .gap_1()
                     .child(
                         div()
-                            .text_color(rgb(0x9b59b6))
+                            .text_color(rgb(theme::SYMBOL))
                             .child(symbol_glyph(symbol.kind)),
                     )
                     .child(if callable {
@@ -887,7 +889,7 @@ impl Viewer {
             .gap_1p5()
             .px_3()
             .py_1()
-            .text_color(rgb(0x555555))
+            .text_color(rgb(theme::MUTED))
             .child(path)
             .child(symbols)
     }
@@ -929,7 +931,7 @@ impl Viewer {
                         let from = found.start - line.start;
                         let to = found.end - line.start;
                         let range = line.display_byte(from)..line.display_byte(to);
-                        colors = paint(&colors, range, rgb(0xdcdcf5).into());
+                        colors = paint(&colors, range, rgb(theme::WORD).into());
                     }
                     if let Some(matches) = &matches {
                         let first = matches.partition_point(|m| m.end <= line.start);
@@ -940,16 +942,16 @@ impl Viewer {
                             let from = found.start.max(line.start) - line.start;
                             let to = found.end.min(line.start + line.chars) - line.start;
                             let color = if Some(found.start) == current_match {
-                                0xffc766
+                                theme::FIND_CURRENT
                             } else {
-                                0xfff1a8
+                                theme::FIND_MATCH
                             };
                             let range = line.display_byte(from)..line.display_byte(to);
                             colors = paint(&colors, range, rgb(color).into());
                         }
                     }
                     if let Some(range) = selection.and_then(|s| s.on_line(row, line)) {
-                        colors = paint(&colors, range, rgb(0xcfe3ff).into());
+                        colors = paint(&colors, range, rgb(theme::SELECTION).into());
                     }
                     // The caret is drawn on the cell grid, so it is as wide on a space or
                     // a thin letter as on any other character.
@@ -959,7 +961,7 @@ impl Viewer {
                         let left = px(gutter + column as f32 * cell_width);
                         let caret = div().absolute().top_0().left(left).h(px(ROW_HEIGHT));
                         if insert {
-                            caret.w(px(2.)).bg(rgb(0x1a5fff)) // a bar, like a terminal's
+                            caret.w(px(2.)).bg(rgb(theme::CARET_BAR)) // a bar, like a terminal's
                         } else {
                             caret.w(px(cell_width)).bg(rgba(0xff7a0099)) // a block you can see
                         }
@@ -974,7 +976,7 @@ impl Viewer {
                                 .w(px(12. * digits as f32 + 16.))
                                 .pr_3()
                                 .text_right()
-                                .text_color(rgb(0x888888))
+                                .text_color(rgb(theme::DIM))
                                 .child((row + 1).to_string()),
                         )
                         .child(StyledText::new(text).with_highlights(colors))
@@ -990,6 +992,8 @@ impl Viewer {
             .flex_1()
             .min_h_0()
             .w_full()
+            .bg(rgb(theme::BACKGROUND))
+            .text_color(rgb(theme::TEXT))
             .child(self.breadcrumb())
             .child(
                 div()
@@ -1004,7 +1008,7 @@ impl Viewer {
                     .py_1()
                     .flex()
                     .gap_3()
-                    .text_color(rgb(0x555555))
+                    .text_color(rgb(theme::MUTED))
                     .child(match self.vim.mode() {
                         Mode::Normal => "NORMAL",
                         Mode::Insert => "INSERT",
@@ -1064,15 +1068,15 @@ fn paint(
 
 fn style(class: Class) -> HighlightStyle {
     let color = match class {
-        Class::Keyword => 0xa626a4,
-        Class::String => 0x50a14f,
-        Class::Number | Class::Constant => 0xb76b01,
-        Class::Comment => 0x9a9a9a,
-        Class::Function => 0x4078f2,
-        Class::Type | Class::Tag => 0xc18401,
-        Class::Property | Class::Attribute => 0x986801,
-        Class::Variable => 0xe45649,
-        Class::Operator | Class::Punctuation => 0x555555,
+        Class::Keyword => 0xc678dd,
+        Class::String => 0x98c379,
+        Class::Number | Class::Constant => 0xd19a66,
+        Class::Comment => 0x7f848e,
+        Class::Function => 0x61afef,
+        Class::Type | Class::Tag => 0xe5c07b,
+        Class::Property | Class::Attribute => 0xd19a66,
+        Class::Variable => 0xe06c75,
+        Class::Operator | Class::Punctuation => 0xabb2bf,
     };
     HighlightStyle {
         color: Some(rgb(color).into()),

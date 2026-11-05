@@ -14,6 +14,8 @@ use std::{
     time::Instant,
 };
 
+mod session;
+mod theme;
 mod usages;
 mod viewer;
 
@@ -384,6 +386,9 @@ impl Workspace {
             registry: std::rc::Rc::new(registry),
         };
         workspace.rescan(cx);
+        if let Some(last) = session::last_file(&workspace.root) {
+            workspace.open_file(&last, None, cx);
+        }
         workspace
     }
 
@@ -422,6 +427,9 @@ impl Workspace {
                     return;
                 }
                 this.tree.set_entries(&paths, &dirs);
+                if let Some(viewer) = &this.viewer {
+                    this.tree.reveal(viewer.path()); // the file restored at startup
+                }
                 this.replace_index(FileIndex::new(paths));
                 this._watcher = watcher.ok();
                 // the old store indexes the old file list: keep it only to reuse its stubs
@@ -1012,8 +1020,8 @@ impl Workspace {
                     let row = &rows[index];
                     let workspace = workspace.clone();
                     let background = match (selected == Some(index), focused) {
-                        (true, true) => Some(0xcfe3ff),
-                        (true, false) => Some(0xe6e6e6),
+                        (true, true) => Some(theme::TREE_FOCUSED),
+                        (true, false) => Some(theme::TREE_SELECTED),
                         _ => None,
                     };
                     let line = div()
@@ -1052,7 +1060,9 @@ impl Workspace {
             .w(px(260.))
             .h_full()
             .border_r_1()
-            .border_color(rgb(0xdddddd))
+            .border_color(rgb(theme::BORDER))
+            .bg(rgb(theme::BACKGROUND))
+            .text_color(rgb(theme::TEXT))
             .child(list)
     }
 
@@ -1197,6 +1207,7 @@ impl Workspace {
             viewer.go_to_line(line);
         }
         self.viewer = Some(viewer);
+        session::remember_file(&self.root, path);
         self.tree.reveal(path);
         self.tree_focused = false; // a file was opened: the keys are the editor's
         self.scroll_tree_to_selection();

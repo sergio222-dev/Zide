@@ -18,3 +18,4 @@ zide-text = { path = "../text" }
 zide-tree = { path = "../tree" }
 zide-vim = { path = "../vim" }
 async-channel = "2"
+dirs = "6"
