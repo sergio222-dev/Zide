@@ -415,8 +415,8 @@ mod tests {
             download_verified(&http, &update, "no key here"),
             Err(Error::NoSigningKey)
         ));
-        // the placeholder shipped in the repo is not a key either
-        assert!(matches!(public_key(), Err(Error::NoSigningKey)));
+        // the key shipped in the repo is a real one
+        assert!(public_key().is_ok());
     }
 
     #[test]

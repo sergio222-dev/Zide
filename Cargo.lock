@@ -8775,6 +8775,7 @@ dependencies = [
  "zide-syntax",
  "zide-text",
  "zide-tree",
+ "zide-update",
  "zide-vim",
 ]
 
