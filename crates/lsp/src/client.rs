@@ -56,6 +56,22 @@ const TYPESCRIPT: ServerSpec = ServerSpec {
     }),
 };
 
+const GO: ServerSpec = ServerSpec {
+    name: "go",
+    command: "gopls",
+    args: &[],
+    install: "GOBIN={dir}/bin go install golang.org/x/tools/gopls@latest",
+    native: None,
+};
+
+const PYTHON: ServerSpec = ServerSpec {
+    name: "python",
+    command: "pyright-langserver",
+    args: &["--stdio"],
+    install: "npm install --prefix {dir} pyright",
+    native: None,
+};
+
 /// The server for the file at `path` and the `languageId` it is opened with.
 pub fn server_for(path: &str) -> Option<(&'static ServerSpec, &'static str)> {
     match path.rsplit_once('.')?.1 {
@@ -64,6 +80,8 @@ pub fn server_for(path: &str) -> Option<(&'static ServerSpec, &'static str)> {
         "tsx" => Some((&TYPESCRIPT, "typescriptreact")),
         "js" | "mjs" | "cjs" => Some((&TYPESCRIPT, "javascript")),
         "jsx" => Some((&TYPESCRIPT, "javascriptreact")),
+        "go" => Some((&GO, "go")),
+        "py" | "pyi" => Some((&PYTHON, "python")),
         _ => None,
     }
 }
@@ -382,6 +400,14 @@ mod tests {
         assert_eq!(
             server_for("a.mjs").map(|s| (s.0.name, s.1)),
             Some(("typescript", "javascript"))
+        );
+        assert_eq!(
+            server_for("cmd/main.go").map(|s| (s.0.name, s.1)),
+            Some(("go", "go"))
+        );
+        assert_eq!(
+            server_for("app.pyi").map(|s| (s.0.name, s.1)),
+            Some(("python", "python"))
         );
         assert!(server_for("README.md").is_none());
         assert!(server_for("Makefile").is_none());

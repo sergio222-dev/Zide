@@ -6,10 +6,10 @@ use std::{ops::Range, sync::OnceLock};
 
 use tree_sitter::{Node, Parser};
 
-use crate::{ImportTarget, Modifiers, StubKind, StubNode, js, rust};
+use crate::{ImportTarget, Modifiers, StubKind, StubNode, go, js, python, rust};
 
 /// Bump when any language's rules change: stubs built with other rules are rebuilt.
-pub const RULES_VERSION: u32 = 2;
+pub const RULES_VERSION: u32 = 3;
 
 const MAX_SIGNATURE_CHARS: usize = 200;
 
@@ -66,6 +66,18 @@ fn languages() -> &'static [Language] {
                 tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             ),
             js(&["tsx"], tree_sitter_typescript::LANGUAGE_TSX.into()),
+            Language {
+                extensions: &["go"],
+                grammar: tree_sitter_go::LANGUAGE.into(),
+                classify: go::classify,
+                signature_ends_at: &["body", "value"],
+            },
+            Language {
+                extensions: &["py", "pyi"],
+                grammar: tree_sitter_python::LANGUAGE.into(),
+                classify: python::classify,
+                signature_ends_at: &["body"],
+            },
         ]
     })
 }
@@ -287,8 +299,166 @@ mod tests {
         );
     }
 
+    /// `(kind, name, container name)` of the stubs of `source`, whose language comes from `path`.
+    fn outline_of(path: &str, source: &str) -> Vec<(StubKind, String, Option<String>)> {
+        let nodes = extract_nodes(language_for_path(path).unwrap(), source);
+        nodes
+            .iter()
+            .map(|n| {
+                let container = n.parent.and_then(|p| nodes[p as usize].name.clone());
+                (
+                    n.kind,
+                    n.name.clone().unwrap_or_default().to_string(),
+                    container.map(|c| c.to_string()),
+                )
+            })
+            .collect()
+    }
+
+    fn has(
+        found: &[(StubKind, String, Option<String>)],
+        kind: StubKind,
+        name: &str,
+        container: Option<&str>,
+    ) -> bool {
+        found.contains(&(kind, name.to_string(), container.map(str::to_string)))
+    }
+
+    #[test]
+    fn go_declarations_and_their_containers() {
+        let found = outline_of(
+            "main.go",
+            "package main\n\nimport (\n\t\"fmt\"\n\tio \"os/io\"\n)\n\n\
+             const Max, min = 1, 2\n\n\
+             type Point struct {\n\tX, Y int\n\tname string\n}\n\
+             type Shape interface {\n\tArea() float64\n}\n\
+             type ID int\n\n\
+             func (p Point) Dist() float64 { return 0 }\n\
+             func helper() { type local int }\n",
+        );
+        use StubKind::*;
+        assert!(has(&found, Const, "Max", None), "{found:?}");
+        assert!(has(&found, Const, "min", None), "{found:?}");
+        assert!(has(&found, Struct, "Point", None), "{found:?}");
+        assert!(has(&found, Field, "X", Some("Point")), "{found:?}");
+        assert!(has(&found, Field, "Y", Some("Point")), "{found:?}");
+        assert!(has(&found, Field, "name", Some("Point")), "{found:?}");
+        assert!(has(&found, Interface, "Shape", None), "{found:?}");
+        assert!(has(&found, Method, "Area", Some("Shape")), "{found:?}");
+        assert!(has(&found, TypeAlias, "ID", None), "{found:?}");
+        assert!(has(&found, Method, "Dist", None), "{found:?}");
+        assert!(has(&found, Function, "helper", None), "{found:?}");
+        assert!(!found.iter().any(|(_, n, _)| n == "local"), "{found:?}");
+    }
+
+    #[test]
+    fn go_exports_imports_and_signatures() {
+        let source = "package p\n\nimport (\n\t\"net/http\"\n\tf \"fmt\"\n\t. \"strings\"\n)\n\n\
+                      type Point struct {\n\tX int\n}\nfunc add(a int) int { return a }\nfunc Add() {}\n";
+        let nodes = extract_nodes(language_for_path("p.go").unwrap(), source);
+        let named = |name: &str| {
+            nodes
+                .iter()
+                .find(|n| n.name.as_deref() == Some(name))
+                .unwrap()
+        };
+        assert!(named("Add").modifiers.contains(Modifiers::PUBLIC));
+        assert!(!named("add").modifiers.contains(Modifiers::PUBLIC));
+        assert_eq!(
+            named("add").signature.as_deref(),
+            Some("func add(a int) int")
+        );
+        assert_eq!(named("Point").signature.as_deref(), Some("Point struct"));
+        let imports: Vec<_> = nodes
+            .iter()
+            .filter_map(|n| n.import.as_ref())
+            .map(|i| {
+                (
+                    i.path.to_string(),
+                    i.alias.as_deref().map(str::to_string),
+                    i.glob,
+                )
+            })
+            .collect();
+        assert_eq!(
+            imports,
+            [
+                ("net/http".to_string(), None, false),
+                ("fmt".to_string(), Some("f".to_string()), false),
+                ("strings".to_string(), None, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn python_declarations_and_their_containers() {
+        let found = outline_of(
+            "app.py",
+            "MAX_SIZE = 10\nlimit = 3\n\n@decorator\nclass Service(Base):\n    TIMEOUT = 5\n    \n    def run(self):\n        def inner(): pass\n        class Local: pass\n\n    async def fetch(self): ...\n\ndef helper(x): return x\n",
+        );
+        use StubKind::*;
+        assert!(has(&found, Const, "MAX_SIZE", None), "{found:?}");
+        assert!(!found.iter().any(|(_, n, _)| n == "limit"), "{found:?}");
+        assert!(has(&found, Class, "Service", None), "{found:?}");
+        assert!(has(&found, Const, "TIMEOUT", Some("Service")), "{found:?}");
+        assert!(has(&found, Method, "run", Some("Service")), "{found:?}");
+        assert!(has(&found, Method, "fetch", Some("Service")), "{found:?}");
+        assert!(has(&found, Function, "helper", None), "{found:?}");
+        assert!(
+            !found.iter().any(|(_, n, _)| n == "inner" || n == "Local"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn python_modifiers_signatures_and_imports() {
+        let source = "import os.path as p\nimport sys, re\nfrom a.b import c, d as e\nfrom . import f\nfrom x import *\n\nasync def go(a, b):\n    return a\ndef _hidden(): pass\n";
+        let nodes = extract_nodes(language_for_path("m.py").unwrap(), source);
+        let named = |name: &str| {
+            nodes
+                .iter()
+                .find(|n| n.name.as_deref() == Some(name))
+                .unwrap()
+        };
+        assert!(named("go").modifiers.contains(Modifiers::ASYNC));
+        assert!(named("go").modifiers.contains(Modifiers::PUBLIC));
+        assert!(!named("_hidden").modifiers.contains(Modifiers::PUBLIC));
+        assert_eq!(
+            named("go").signature.as_deref(),
+            Some("async def go(a, b):")
+        );
+        let imports: Vec<_> = nodes
+            .iter()
+            .filter_map(|n| n.import.as_ref())
+            .map(|i| {
+                (
+                    i.path.to_string(),
+                    i.member.as_deref().map(str::to_string),
+                    i.alias.as_deref().map(str::to_string),
+                    i.glob,
+                )
+            })
+            .collect();
+        let s = |x: &str| Some(x.to_string());
+        assert_eq!(
+            imports,
+            [
+                ("os.path".to_string(), None, s("p"), false),
+                ("sys".to_string(), None, None, false),
+                ("re".to_string(), None, None, false),
+                ("a.b".to_string(), s("c"), None, false),
+                ("a.b".to_string(), s("d"), s("e"), false),
+                (".".to_string(), s("f"), None, false),
+                ("x".to_string(), None, None, true),
+            ]
+        );
+    }
+
     #[test]
     fn language_is_chosen_by_extension() {
+        assert!(language_for_path("a.go").is_some());
+        assert!(language_for_path("a.py").is_some());
+        assert!(language_for_path("a.pyi").is_some());
         assert!(language_for_path("src/main.rs").is_some());
         assert!(language_for_path("README.md").is_none());
         assert!(language_for_path("Makefile").is_none());

@@ -15,6 +15,8 @@ Zide looks for each server in this order:
 | --- | --- | --- | --- |
 | Rust | `.rs` | `rust-analyzer` | `rustup component add rust-analyzer` (on the `PATH`), or put the binary in `<folder>/bin/` |
 | TypeScript / JavaScript | `.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs` | `tsc --lsp --stdio` (TypeScript 7, native) | `npm install --prefix ~/.local/share/zide/servers typescript` (Zide's folder). Fallback when that is absent: `typescript-language-server --stdio`, installed with `npm install --prefix ~/.local/share/zide/servers typescript-language-server typescript@5` or `npm install -g typescript-language-server typescript@5` (`PATH`) |
+| Go | `.go` | `gopls` | `GOBIN=~/.local/share/zide/servers/bin go install golang.org/x/tools/gopls@latest` (Zide's folder), or `go install golang.org/x/tools/gopls@latest` (`$GOPATH/bin` on the `PATH`) |
+| Python | `.py` `.pyi` | `pyright-langserver --stdio` | `npm install --prefix ~/.local/share/zide/servers pyright` (Zide's folder), or `npm install -g pyright` (`PATH`) |
 
 The npm servers are Node scripts: `node` has to be on the `PATH` when Zide runs them.
 

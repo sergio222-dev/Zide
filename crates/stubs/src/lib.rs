@@ -7,8 +7,10 @@
 
 mod cache;
 mod extract;
+mod go;
 mod js;
 mod model;
+mod python;
 mod rust;
 mod store;
 

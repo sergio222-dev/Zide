@@ -63,6 +63,16 @@ fn grammars() -> &'static [Grammar] {
                 query: format!("{js}\n{ts}"),
             },
             Grammar {
+                extensions: &["go"],
+                language: tree_sitter_go::LANGUAGE.into(),
+                query: generic_first(tree_sitter_go::HIGHLIGHTS_QUERY, "(identifier) @variable"),
+            },
+            Grammar {
+                extensions: &["py", "pyi"],
+                language: tree_sitter_python::LANGUAGE.into(),
+                query: tree_sitter_python::HIGHLIGHTS_QUERY.to_string(),
+            },
+            Grammar {
                 extensions: &["tsx"],
                 language: tree_sitter_typescript::LANGUAGE_TSX.into(),
                 query: format!("{js}\n{ts}\n{jsx}"),
@@ -72,6 +82,14 @@ fn grammars() -> &'static [Grammar] {
 }
 
 pub use select::extend_selection;
+
+/// Moves the catch-all pattern `generic` to the front. Here the last pattern wins, as in
+/// Neovim; some grammars order theirs the other way round (first wins) and would paint every
+/// identifier as a plain variable.
+fn generic_first(query: &str, generic: &str) -> String {
+    let rest: Vec<&str> = query.lines().filter(|l| l.trim() != generic).collect();
+    format!("{generic}\n{}", rest.join("\n"))
+}
 
 /// A language with highlighting, by file extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +197,34 @@ mod tests {
             .into_iter()
             .map(|s| (source[s.range].to_string(), s.class))
             .collect()
+    }
+
+    #[test]
+    fn go_keywords_strings_and_functions() {
+        let found = classes(
+            "a.go",
+            "package main\n\nfunc add(a int) int { return a } // done\nvar s = \"hi\"\n",
+        );
+        assert!(
+            found.contains(&("func".into(), Class::Keyword)),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&("add".into(), Class::Function)),
+            "{found:?}"
+        );
+        assert!(found.contains(&("\"hi\"".into(), Class::String)));
+        assert!(found.contains(&("// done".into(), Class::Comment)));
+    }
+
+    #[test]
+    fn python_keywords_strings_and_functions() {
+        let found = classes("a.py", "def add(a):\n    return a  # done\n\ns = \"hi\"\n");
+        assert!(found.contains(&("def".into(), Class::Keyword)));
+        assert!(found.contains(&("add".into(), Class::Function)));
+        assert!(found.contains(&("\"hi\"".into(), Class::String)));
+        assert!(found.contains(&("# done".into(), Class::Comment)));
+        assert!(language_for_path("stubs.pyi").is_some());
     }
 
     #[test]
