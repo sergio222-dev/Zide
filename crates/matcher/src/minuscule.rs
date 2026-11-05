@@ -256,10 +256,8 @@ impl MinusculeMatcher {
             } else {
                 0
             }
-        } else if is_hump_start {
-            -1
-        } else if self.is_lower[pi] && hump_start_matched_upper {
-            -1
+        } else if is_hump_start || (self.is_lower[pi] && hump_start_matched_upper) {
+            -1 // case mismatch on a hump start, or lowercase non-hump on an uppercase hump
         } else {
             0
         }
