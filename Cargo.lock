@@ -8093,6 +8093,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
+name = "xxhash-rust"
+version = "0.8.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
+
+[[package]]
 name = "y4m"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8438,12 +8444,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "zide-symbols"
+name = "zide-stubs"
 version = "0.0.0"
 dependencies = [
  "rayon",
  "tree-sitter",
  "tree-sitter-rust",
+ "xxhash-rust",
  "zide-index",
  "zide-matcher",
 ]
@@ -8458,7 +8465,7 @@ dependencies = [
  "zide-index",
  "zide-matcher",
  "zide-search",
- "zide-symbols",
+ "zide-stubs",
 ]
 
 [[package]]

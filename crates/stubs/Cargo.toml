@@ -1,5 +1,5 @@
 [package]
-name = "zide-symbols"
+name = "zide-stubs"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -9,5 +9,6 @@ publish.workspace = true
 rayon = "1"
 tree-sitter = "0.25"
 tree-sitter-rust = "0.24"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zide-index = { path = "../index" }
 zide-matcher = { path = "../matcher" }

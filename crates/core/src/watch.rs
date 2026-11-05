@@ -11,6 +11,15 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher, event::Modif
 /// How long to wait for more events before reporting a burst as one change.
 const DEBOUNCE: Duration = Duration::from_millis(200);
 
+/// What changed. `Files` implies the contents may have changed too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Change {
+    /// Only the contents of existing files.
+    Contents,
+    /// Files were created, removed or renamed: the file list is stale.
+    Files,
+}
+
 /// Keeps watching until dropped.
 pub struct ProjectWatcher {
     _watcher: RecommendedWatcher,
@@ -18,18 +27,18 @@ pub struct ProjectWatcher {
     pub unwatched: usize,
 }
 
-/// Calls `on_change` (from a background thread) after files were created, removed or renamed
-/// in `root` or in any of `dirs` (the relative, `/`-separated directories from
+/// Calls `on_change` (from a background thread) after files were created, removed, renamed or
+/// written in `root` or in any of `dirs` (the relative, `/`-separated directories from
 /// [`scan_project`](crate::scan_project)). Bursts of events produce a single call.
 pub fn watch_project(
     root: &Path,
     dirs: &[String],
-    on_change: impl Fn() + Send + 'static,
+    on_change: impl Fn(Change) + Send + 'static,
 ) -> notify::Result<ProjectWatcher> {
-    let (tx, rx) = mpsc::channel::<()>();
+    let (tx, rx) = mpsc::channel::<Change>();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if event.is_ok_and(|e| changes_file_list(&e.kind)) {
-            let _ = tx.send(());
+        if let Some(change) = event.ok().and_then(|e| classify(&e.kind)) {
+            let _ = tx.send(change);
         }
     })?;
 
@@ -45,9 +54,11 @@ pub fn watch_project(
 
     thread::spawn(move || {
         // ends when the watcher (and with it the sender) is dropped
-        while rx.recv().is_ok() {
-            while rx.recv_timeout(DEBOUNCE).is_ok() {}
-            on_change();
+        while let Ok(mut change) = rx.recv() {
+            while let Ok(more) = rx.recv_timeout(DEBOUNCE) {
+                change = change.max(more);
+            }
+            on_change(change);
         }
     });
     Ok(ProjectWatcher {
@@ -56,11 +67,14 @@ pub fn watch_project(
     })
 }
 
-fn changes_file_list(kind: &EventKind) -> bool {
-    matches!(
-        kind,
-        EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
-    )
+fn classify(kind: &EventKind) -> Option<Change> {
+    match kind {
+        EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)) => {
+            Some(Change::Files)
+        }
+        EventKind::Modify(ModifyKind::Data(_)) => Some(Change::Contents),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -80,16 +94,18 @@ mod tests {
     fn reports_a_created_file_once_per_burst() {
         let root = temp_project("create");
         let (tx, rx) = channel();
-        let _watcher = watch_project(&root, &["src".to_string()], move || {
-            let _ = tx.send(());
+        let _watcher = watch_project(&root, &["src".to_string()], move |change| {
+            let _ = tx.send(change);
         })
         .unwrap();
 
         for i in 0..5 {
             fs::write(root.join(format!("src/new{i}.rs")), "").unwrap();
         }
-        rx.recv_timeout(Duration::from_secs(5))
-            .expect("no change reported");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Change::Files
+        );
         assert!(
             rx.recv_timeout(Duration::from_millis(600)).is_err(),
             "burst split in two"
@@ -98,16 +114,19 @@ mod tests {
     }
 
     #[test]
-    fn ignores_edits_to_file_contents() {
+    fn reports_edits_to_file_contents_as_content_changes() {
         let root = temp_project("edit");
         let (tx, rx) = channel();
-        let _watcher = watch_project(&root, &["src".to_string()], move || {
-            let _ = tx.send(());
+        let _watcher = watch_project(&root, &["src".to_string()], move |change| {
+            let _ = tx.send(change);
         })
         .unwrap();
 
         fs::write(root.join("src/a.rs"), "changed").unwrap();
-        assert!(rx.recv_timeout(Duration::from_millis(800)).is_err());
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Change::Contents
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -115,14 +134,16 @@ mod tests {
     fn reports_a_removed_file() {
         let root = temp_project("remove");
         let (tx, rx) = channel();
-        let _watcher = watch_project(&root, &["src".to_string()], move || {
-            let _ = tx.send(());
+        let _watcher = watch_project(&root, &["src".to_string()], move |change| {
+            let _ = tx.send(change);
         })
         .unwrap();
 
         fs::remove_file(root.join("src/a.rs")).unwrap();
-        rx.recv_timeout(Duration::from_secs(5))
-            .expect("no change reported");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Change::Files
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 }

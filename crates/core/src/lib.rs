@@ -4,4 +4,4 @@ mod watch;
 
 pub use double_shift::DoubleShiftDetector;
 pub use scan::{Scan, scan_files, scan_project};
-pub use watch::{ProjectWatcher, watch_project};
+pub use watch::{Change, ProjectWatcher, watch_project};

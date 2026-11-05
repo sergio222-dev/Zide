@@ -16,13 +16,13 @@ use std::{
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
-use zide_core::{DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
+use zide_core::{Change, DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
 use zide_index::FileIndex;
 use zide_search::{
     ActionHit, ActionText, FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_actions,
     search_files_with_recent, search_text,
 };
-use zide_symbols::{SymbolHit, SymbolIndex, SymbolKind, search_symbols};
+use zide_stubs::{StubKind, StubStore, SymbolHit, search_symbols};
 
 actions!(zide, [SwitchTab, ToggleRegex, ToggleCase, ToggleWord]);
 
@@ -192,21 +192,31 @@ struct Workspace {
     recent: Vec<usize>,
     /// Bumped on every scan; the result of an older scan is dropped.
     scan_generation: u64,
-    changes_tx: async_channel::Sender<()>,
+    changes_tx: async_channel::Sender<Change>,
+    /// Bumped on every symbol indexing; the result of an older one is dropped.
+    symbols_generation: u64,
     _watcher: Option<ProjectWatcher>,
     /// `None` until the symbols of the current index are parsed.
-    symbols: Option<Arc<SymbolIndex>>,
+    symbols: Option<Arc<StubStore>>,
     registry: std::rc::Rc<Vec<ActionDef>>,
     action_texts: Vec<ActionText>,
 }
 
 impl Workspace {
     fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
-        // file-system changes arrive on a watcher thread; a foreground task rescans
-        let (changes_tx, changes_rx) = async_channel::unbounded::<()>();
+        // file-system changes arrive on a watcher thread; a foreground task reacts to them
+        let (changes_tx, changes_rx) = async_channel::unbounded::<Change>();
         cx.spawn(async move |this, cx| {
-            while changes_rx.recv().await.is_ok() {
-                if this.update(cx, |this, cx| this.rescan(cx)).is_err() {
+            while let Ok(change) = changes_rx.recv().await {
+                let reacted = this.update(cx, |this, cx| match change {
+                    Change::Files => this.rescan(cx),
+                    // same file list: the symbol indices stay valid and unchanged files are reused
+                    Change::Contents => {
+                        let previous = this.symbols.clone();
+                        this.index_symbols(previous, cx);
+                    }
+                });
+                if reacted.is_err() {
                     break;
                 }
             }
@@ -225,6 +235,7 @@ impl Workspace {
             recent: Vec::new(),
             scan_generation: 0,
             changes_tx,
+            symbols_generation: 0,
             _watcher: None,
             symbols: None,
             action_texts: registry
@@ -258,8 +269,8 @@ impl Workspace {
                         eprintln!("scan failed: {e}");
                         Scan::default()
                     });
-                    let watcher = watch_project(&root, &scan.dirs, move || {
-                        let _ = changes.send_blocking(());
+                    let watcher = watch_project(&root, &scan.dirs, move |change| {
+                        let _ = changes.send_blocking(change);
                     });
                     (scan.files, watcher)
                 })
@@ -276,8 +287,9 @@ impl Workspace {
                 }
                 this.replace_index(FileIndex::new(paths));
                 this._watcher = watcher.ok();
-                this.symbols = None;
-                this.index_symbols(generation, cx);
+                // the old store indexes the old file list: keep it only to reuse its stubs
+                let previous = this.symbols.take();
+                this.index_symbols(previous, cx);
                 this.search_again(cx);
             })
             .ok();
@@ -286,27 +298,32 @@ impl Workspace {
     }
 
     /// Parses the symbols of the current files in the background; stale results are dropped.
-    fn index_symbols(&mut self, generation: u64, cx: &mut Context<Self>) {
+    fn index_symbols(&mut self, previous: Option<Arc<StubStore>>, cx: &mut Context<Self>) {
         let Some(index) = self.index.clone() else {
             return;
         };
+        self.symbols_generation += 1;
+        let generation = self.symbols_generation;
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let started = Instant::now();
             let symbols = cx
                 .background_executor()
-                .spawn(async move { SymbolIndex::build(&index, &root, &AtomicBool::new(false)) })
+                .spawn(async move {
+                    StubStore::build(index, &root, previous.as_deref(), &AtomicBool::new(false))
+                })
                 .await;
             let Some(symbols) = symbols else {
                 return;
             };
             eprintln!(
-                "indexed {} symbols in {:?}",
+                "indexed {} symbols in {:?} ({} files reused)",
                 symbols.len(),
-                started.elapsed()
+                started.elapsed(),
+                symbols.reused()
             );
             this.update(cx, |this, cx| {
-                if this.scan_generation == generation {
+                if this.symbols_generation == generation {
                     this.symbols = Some(Arc::new(symbols));
                     this.search_again(cx);
                 }
@@ -440,8 +457,8 @@ impl Workspace {
                 .get(popup.selected)
                 .map(|hit| (hit.file, Some(hit.line as u32))),
             Tab::Symbols => popup.symbols.get(popup.selected).and_then(|hit| {
-                let entry = &self.symbols.as_ref()?.entries()[hit.entry];
-                Some((entry.file, Some(entry.line)))
+                let symbol = self.symbols.as_ref()?.symbol(hit.entry);
+                Some((symbol.file, Some(symbol.node.line)))
             }),
             Tab::Actions => None,
         };
@@ -567,7 +584,7 @@ impl Workspace {
     fn search_symbols(
         &mut self,
         query: String,
-        symbols: Arc<SymbolIndex>,
+        symbols: Arc<StubStore>,
         generation: u64,
         cancel: Arc<AtomicBool>,
         cx: &mut Context<Self>,
@@ -854,7 +871,7 @@ impl Render for Workspace {
                     };
                     range
                         .map(|row| {
-                            let entry = &symbols.entries()[hits[row].entry];
+                            let symbol = symbols.symbol(hits[row].entry);
                             let ranges = hits[row].fragments.iter().map(|f| f.start..f.end);
                             row_frame(row == selected)
                                 .child(
@@ -862,13 +879,17 @@ impl Render for Workspace {
                                         .flex_shrink_0()
                                         .w(px(64.))
                                         .text_color(rgb(0x777777))
-                                        .child(kind_label(entry.kind)),
+                                        .child(kind_label(symbol.node.kind)),
                                 )
-                                .child(highlighted(entry.name.clone(), ranges.collect()))
+                                .child(highlighted(
+                                    symbol.node.name.as_deref().unwrap_or_default().to_string(),
+                                    ranges.collect(),
+                                ))
                                 .child(div().ml_auto().text_color(rgb(0x777777)).child(format!(
-                                    "{}:{}",
-                                    index.paths()[entry.file],
-                                    entry.line
+                                    "{}{}:{}",
+                                    symbol.container.map_or(String::new(), |c| format!("{c} · ")),
+                                    index.paths()[symbol.file],
+                                    symbol.node.line
                                 )))
                         })
                         .collect()
@@ -921,16 +942,21 @@ impl Render for Workspace {
     }
 }
 
-fn kind_label(kind: SymbolKind) -> &'static str {
+fn kind_label(kind: StubKind) -> &'static str {
     match kind {
-        SymbolKind::Function => "fn",
-        SymbolKind::Method => "method",
-        SymbolKind::Class => "type",
-        SymbolKind::Interface => "trait",
-        SymbolKind::Module => "mod",
-        SymbolKind::Macro => "macro",
-        SymbolKind::Type => "alias",
-        SymbolKind::Constant => "const",
+        StubKind::Function => "fn",
+        StubKind::Method => "method",
+        StubKind::Struct => "struct",
+        StubKind::Enum => "enum",
+        StubKind::Variant => "variant",
+        StubKind::Field => "field",
+        StubKind::Trait => "trait",
+        StubKind::Impl => "impl",
+        StubKind::Module => "mod",
+        StubKind::TypeAlias => "alias",
+        StubKind::Const => "const",
+        StubKind::Macro => "macro",
+        StubKind::Import => "use",
     }
 }
 
