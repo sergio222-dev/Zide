@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
     time::SystemTime,
+    time::{Duration, Instant},
 };
 
 use gpui_kit::*;
@@ -109,6 +110,15 @@ pub struct FindStatus {
     pub error: Option<String>,
 }
 
+/// A scroll in flight: the view's top, in pixels, glides from `from` to `to`.
+struct ScrollAnim {
+    from: f32,
+    to: f32,
+    start: Instant,
+}
+
+const SCROLL_DURATION: Duration = Duration::from_millis(160);
+
 pub struct Viewer {
     find: Option<FindState>,
     path: String,
@@ -128,6 +138,7 @@ pub struct Viewer {
     scroll: UniformListScrollHandle,
     /// A `z` was typed and its second key (`t`, `z`, `b`...) is awaited.
     z_pending: bool,
+    anim: Option<ScrollAnim>,
 }
 
 impl Viewer {
@@ -159,6 +170,7 @@ impl Viewer {
             buffer,
             scroll: UniformListScrollHandle::new(),
             z_pending: false,
+            anim: None,
         };
         viewer.rebuild();
         viewer
@@ -215,10 +227,56 @@ impl Viewer {
         Some((top, rows.max(1)))
     }
 
+    /// `(viewport height, current top)` in pixels, once the list has been laid out.
+    fn view_pixels(&self) -> Option<(f32, f32)> {
+        let state = self.scroll.0.borrow();
+        let viewport = f32::from(state.last_item_size?.item.height);
+        Some((viewport, -f32::from(state.base_handle.offset().y)))
+    }
+
+    /// Glides the view so `top` (in pixels, clamped to the document) is its first row.
+    /// Without a layout there is nothing to glide on: `fallback` scrolls instead.
+    fn glide_to(&mut self, top: impl FnOnce(f32) -> f32, fallback: impl FnOnce(&Self)) {
+        let Some((viewport, current)) = self.view_pixels() else {
+            return fallback(self);
+        };
+        let max = (self.buffer.line_count() as f32 * ROW_HEIGHT - viewport).max(0.);
+        self.anim = Some(ScrollAnim {
+            from: current,
+            to: top(viewport).clamp(0., max),
+            start: Instant::now(),
+        });
+    }
+
+    /// Advances the glide one frame; asks for another while it lasts.
+    pub fn tick(&mut self, window: &mut Window) {
+        let Some(anim) = &self.anim else { return };
+        let t = (anim.start.elapsed().as_secs_f32() / SCROLL_DURATION.as_secs_f32()).min(1.);
+        let eased = 1. - (1. - t).powi(3);
+        let top = anim.from + (anim.to - anim.from) * eased;
+        let state = self.scroll.0.borrow();
+        let x = state.base_handle.offset().x;
+        state.base_handle.set_offset(point(x, px(-top)));
+        drop(state);
+        if t >= 1. {
+            self.anim = None;
+        } else {
+            window.request_animation_frame();
+        }
+    }
+
     /// `zt`, `zz`, `zb`: puts the cursor line at the top, middle or bottom of the view.
     fn place_cursor_line(&mut self, strategy: ScrollStrategy) {
         let line = self.buffer.position_of(self.vim.cursor()).line;
-        self.scroll.scroll_to_item_strict(line, strategy);
+        let y = line as f32 * ROW_HEIGHT;
+        self.glide_to(
+            |viewport| match strategy {
+                ScrollStrategy::Center => y - (viewport - ROW_HEIGHT) / 2.,
+                ScrollStrategy::Bottom => y + ROW_HEIGHT - viewport,
+                _ => y,
+            },
+            |this| this.scroll.scroll_to_item_strict(line, strategy),
+        );
     }
 
     /// `Ctrl-D` / `Ctrl-U`: the cursor and the view move half a page.
@@ -227,13 +285,15 @@ impl Viewer {
         let half = (rows / 2).max(1);
         let line = self.buffer.position_of(self.vim.cursor()).line;
         let last = self.buffer.line_count().saturating_sub(1);
-        let (line, top) = if down {
-            ((line + half).min(last), (top + half).min(last))
+        let line = if down {
+            (line + half).min(last)
         } else {
-            (line.saturating_sub(half), top.saturating_sub(half))
+            line.saturating_sub(half)
         };
         self.vim.move_to_line(&self.buffer, line);
-        self.scroll.scroll_to_item_strict(top, ScrollStrategy::Top);
+        let shift = half as f32 * ROW_HEIGHT;
+        let top = top as f32 * ROW_HEIGHT;
+        self.glide_to(|_| if down { top + shift } else { top - shift }, |_| {});
     }
 
     /// What is typed so far of an unfinished command, for the status bar.
@@ -246,6 +306,7 @@ impl Viewer {
     }
 
     pub fn handle_key(&mut self, key: Key) -> Effect {
+        self.anim = None; // a key press takes over from a glide
         if self.z_pending {
             self.z_pending = false;
             let strategy = match key {

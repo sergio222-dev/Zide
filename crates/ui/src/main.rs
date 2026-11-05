@@ -1049,7 +1049,10 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(viewer) = &mut self.viewer {
+            viewer.tick(window);
+        }
         if let Some(opened_at) = self.popup.as_mut().and_then(|p| p.opened_at.take()) {
             eprintln!(
                 "popup first render {:?} after double-Shift",
