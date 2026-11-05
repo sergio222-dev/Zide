@@ -10,6 +10,7 @@ use std::{
 };
 
 use gpui_kit::*;
+use zide_stubs::{StubKind, StubNode, extract_nodes, language_for_path as stub_language};
 use zide_syntax::{Class, LanguageId, Span, highlight, language_for_path};
 use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
@@ -154,6 +155,10 @@ pub struct Viewer {
     /// Advance of one monospace cell in pixels, measured on the first frame.
     cell_width: Option<f32>,
     font_family: SharedString,
+    /// Declarations of the file as of `built_at`, for the breadcrumb.
+    outline: Vec<StubNode>,
+    /// Name of the project folder, first crumb of the breadcrumb.
+    root_name: String,
 }
 
 impl Viewer {
@@ -188,6 +193,11 @@ impl Viewer {
             anim: None,
             cell_width: None,
             font_family: EDITOR_FONTS[0].into(),
+            outline: Vec::new(),
+            root_name: root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         };
         viewer.rebuild();
         viewer
@@ -585,6 +595,10 @@ impl Viewer {
             .map(|language| highlight(language, &self.buffer.text()))
             .unwrap_or_default();
         self.lines = Arc::new(build_lines(&self.buffer, &spans));
+        self.outline = match stub_language(&self.path) {
+            Some(language) if self.editable => extract_nodes(language, &self.buffer.text()),
+            _ => Vec::new(),
+        };
         self.built_at = self.buffer.revision();
     }
 
@@ -602,6 +616,57 @@ impl Viewer {
             .next()
             .map_or(byte, |c| byte + c.len_utf8());
         (position.line, map[byte]..map[end].max(map[byte] + 1))
+    }
+
+    /// The declarations around the cursor, outermost first.
+    fn enclosing_symbols(&self) -> Vec<&StubNode> {
+        enclosing(&self.outline, self.buffer.byte_of(self.vim.cursor()))
+    }
+
+    /// Project folder, directories, file and the symbols around the cursor.
+    fn breadcrumb(&self) -> Div {
+        let separator = || div().text_color(rgb(0xaaaaaa)).child("›");
+        let mut parts: Vec<&str> = vec![self.root_name.as_str()];
+        parts.extend(self.path.split('/'));
+        let file = parts.pop().unwrap_or_default();
+        let mut path = div()
+            .flex()
+            .gap_1p5()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap();
+        for part in parts.into_iter().filter(|p| !p.is_empty()) {
+            path = path.child(part.to_string()).child(separator());
+        }
+        let path = path.child(div().text_color(rgb(0x222222)).child(file.to_string()));
+        let mut symbols = div().flex().gap_1p5().flex_shrink_0().whitespace_nowrap();
+        for symbol in self.enclosing_symbols() {
+            let name = symbol.name.as_deref().unwrap_or("");
+            let callable = matches!(symbol.kind, StubKind::Function | StubKind::Method);
+            symbols = symbols.child(separator()).child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(rgb(0x9b59b6))
+                            .child(symbol_glyph(symbol.kind)),
+                    )
+                    .child(if callable {
+                        format!("{name}()")
+                    } else {
+                        name.to_string()
+                    }),
+            );
+        }
+        div()
+            .flex()
+            .gap_1p5()
+            .px_3()
+            .py_1()
+            .text_color(rgb(0x555555))
+            .child(path)
+            .child(symbols)
     }
 
     pub fn render(&self) -> Div {
@@ -691,13 +756,7 @@ impl Viewer {
             .flex_1()
             .min_h_0()
             .w_full()
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_color(rgb(0x555555))
-                    .child(self.path.clone()),
-            )
+            .child(self.breadcrumb())
             .child(
                 div()
                     .flex_1()
@@ -826,6 +885,43 @@ fn build_lines(buffer: &Buffer, spans: &[Span]) -> Vec<Line> {
         .collect()
 }
 
+/// The declarations of `outline` (in source order) that contain `byte`, outermost first.
+/// Imports are not shown: they are declarations only for the search.
+fn enclosing(outline: &[StubNode], byte: usize) -> Vec<&StubNode> {
+    // nested declarations come after their parent, so the last one containing the byte is
+    // the innermost
+    let Some(innermost) = outline
+        .iter()
+        .rposition(|node| node.kind != StubKind::Import && node.range.contains(&(byte as u32)))
+    else {
+        return Vec::new();
+    };
+    let mut chain = Vec::new();
+    let mut at = Some(innermost);
+    while let Some(index) = at {
+        chain.push(&outline[index]);
+        at = outline[index].parent.map(|p| p as usize);
+    }
+    chain.reverse();
+    chain
+}
+
+fn symbol_glyph(kind: StubKind) -> &'static str {
+    match kind {
+        StubKind::Function | StubKind::Method | StubKind::Macro => "ƒ",
+        StubKind::Struct
+        | StubKind::Class
+        | StubKind::Interface
+        | StubKind::Enum
+        | StubKind::Trait
+        | StubKind::Impl
+        | StubKind::TypeAlias => "C",
+        StubKind::Module => "M",
+        StubKind::Const => "c",
+        StubKind::Field | StubKind::Variant | StubKind::Import => "•",
+    }
+}
+
 /// `line` with tabs as spaces, and for each old byte offset (plus the end) its new offset.
 fn expand_tabs(line: &str) -> (String, Vec<usize>) {
     let mut text = String::with_capacity(line.len());
@@ -886,6 +982,21 @@ mod tests {
         for c in keys.chars() {
             viewer.handle_key(Key::Char(c));
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_breadcrumb_lists_the_declarations_around_the_cursor() {
+        let source = "struct P;\nimpl P {\n    fn go(&self) {\n        1;\n    }\n}\n";
+        let outline = extract_nodes(stub_language("a.rs").unwrap(), source);
+        let names = |byte: usize| -> Vec<String> {
+            enclosing(&outline, byte)
+                .iter()
+                .map(|n| n.name.as_deref().unwrap_or("").to_string())
+                .collect()
+        };
+        assert_eq!(names(source.find("1;").unwrap()), ["P", "go"]);
+        assert_eq!(names(source.find("struct").unwrap()), ["P"]);
+        assert!(names(source.len() - 1).is_empty()); // after the last declaration
     }
 
     #[::core::prelude::v1::test]
