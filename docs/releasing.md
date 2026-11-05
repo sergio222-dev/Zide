@@ -2,7 +2,14 @@
 
 ## Install
 
-Download `zide-<version>-x86_64-unknown-linux-gnu.tar.gz` from the
+One line (installs to `~/.local/bin`, checks the signature if `minisign` is installed;
+`ZIDE_VERSION=0.1.0` pins a version):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sergio222-dev/Zide/main/scripts/install.sh | sh
+```
+
+Or by hand: download `zide-<version>-x86_64-unknown-linux-gnu.tar.gz` from the
 [releases page](https://github.com/sergio222-dev/Zide/releases), then:
 
 ```sh
