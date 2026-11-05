@@ -8365,7 +8365,9 @@ version = "0.0.0"
 dependencies = [
  "gpui-kit",
  "zide-core",
+ "zide-index",
  "zide-matcher",
+ "zide-search",
 ]
 
 [[package]]

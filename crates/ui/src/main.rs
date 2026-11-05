@@ -1,19 +1,22 @@
-//! GPUI spike: window, double-Shift popup, input and a virtual list over 100k names
-//! filtered by the matcher. Logs timings to stderr.
+//! Search Everywhere prototype: double-Shift popup with file search over a real project.
+//!
+//! `zide-ui [root]` indexes `root` (default: the current directory) in the background;
+//! the window shows up before the index is ready (ADR-009). Timings go to stderr.
 
-use std::{sync::Arc, time::Instant};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
-use zide_core::DoubleShiftDetector;
-use zide_matcher::{FixingLayoutMatcher, Matcher, MatchingMode, RussianToEnglish};
+use zide_core::{DoubleShiftDetector, scan_files};
+use zide_index::FileIndex;
+use zide_search::{FileHit, FileQuery, search_files};
 
-const NAME_COUNT: usize = 100_000;
-const MAX_VISIBLE_RESULTS: usize = 200;
+const MAX_RESULTS: usize = 200;
 
 struct Popup {
     input: Entity<InputState>,
-    results: Arc<Vec<usize>>,
+    query: String,
+    hits: Arc<Vec<FileHit>>,
     opened_at: Option<Instant>,
     _subscription: Subscription,
 }
@@ -21,37 +24,43 @@ struct Popup {
 struct Workspace {
     focus: FocusHandle,
     detector: DoubleShiftDetector,
-    names: Arc<Vec<String>>,
+    root: PathBuf,
+    /// `None` while the project is still being scanned.
+    index: Option<Arc<FileIndex>>,
     popup: Option<Popup>,
 }
 
-fn synthetic_names() -> Vec<String> {
-    let words = [
-        "Goto",
-        "File",
-        "Action",
-        "Search",
-        "Everywhere",
-        "Matcher",
-        "Index",
-        "Project",
-        "Symbol",
-        "Text",
-    ];
-    (0..NAME_COUNT)
-        .map(|i| {
-            let (a, b, c) = (words[i % 10], words[(i / 10) % 10], words[(i / 100) % 10]);
-            format!("src/{c}/{a}{b}Impl{i}.rs")
-        })
-        .collect()
-}
-
 impl Workspace {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
+        let scan_root = root.clone();
+        cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            let paths = cx
+                .background_executor()
+                .spawn(async move { scan_files(&scan_root) })
+                .await;
+            let index = FileIndex::new(paths.unwrap_or_else(|e| {
+                eprintln!("scan failed: {e}");
+                Vec::new()
+            }));
+            eprintln!("indexed {} files in {:?}", index.len(), started.elapsed());
+            this.update(cx, |this, cx| {
+                this.index = Some(Arc::new(index));
+                let query = this.popup.as_ref().map(|p| p.query.clone());
+                if let Some(query) = query {
+                    this.search(&query, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+
         Self {
             focus: cx.focus_handle(),
             detector: DoubleShiftDetector::default(),
-            names: Arc::new(synthetic_names()),
+            root,
+            index: None,
             popup: None,
         }
     }
@@ -65,14 +74,14 @@ impl Workspace {
             }
         });
         input.update(cx, |state, cx| state.focus(window, cx));
-        let all = Arc::new((0..self.names.len().min(MAX_VISIBLE_RESULTS)).collect());
         self.popup = Some(Popup {
             input,
-            results: all,
+            query: String::new(),
+            hits: Arc::default(),
             opened_at: Some(Instant::now()),
             _subscription: subscription,
         });
-        cx.notify();
+        self.search("", cx);
     }
 
     fn close_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -82,28 +91,35 @@ impl Workspace {
     }
 
     fn search(&mut self, query: &str, cx: &mut Context<Self>) {
-        let started = Instant::now();
-        // like IntelliJ's navigation: a leading `*` lets the pattern match anywhere in the name
-        let pattern = format!("*{query}");
-        let matcher =
-            FixingLayoutMatcher::new(&pattern, MatchingMode::IgnoreCase, "", &RussianToEnglish);
-        let results: Vec<usize> = self
-            .names
-            .iter()
-            .enumerate()
-            .filter(|(_, name)| matcher.matches(name))
-            .map(|(i, _)| i)
-            .take(MAX_VISIBLE_RESULTS)
-            .collect();
-        eprintln!(
-            "search {query:?}: {} results in {:?}",
-            results.len(),
-            started.elapsed()
-        );
-        if let Some(popup) = &mut self.popup {
-            popup.results = Arc::new(results);
+        let Some(popup) = &mut self.popup else {
+            return;
+        };
+        popup.query = query.to_string();
+        if let Some(index) = &self.index {
+            let started = Instant::now();
+            let hits = if query.trim().is_empty() {
+                // nothing typed yet: show the first files
+                (0..index.len().min(MAX_RESULTS))
+                    .map(|index| FileHit { index, score: 0 })
+                    .collect()
+            } else {
+                search_files(index, &FileQuery::parse(query), MAX_RESULTS)
+            };
+            eprintln!(
+                "search {query:?}: {} hits in {:?}",
+                hits.len(),
+                started.elapsed()
+            );
+            popup.hits = Arc::new(hits);
         }
         cx.notify();
+    }
+
+    fn status(&self) -> String {
+        match &self.index {
+            Some(index) => format!("{} files · {}", index.len(), self.root.display()),
+            None => format!("Indexing {}…", self.root.display()),
+        }
     }
 }
 
@@ -141,45 +157,60 @@ impl Render for Workspace {
             .p_4()
             .child("Press Shift twice to open the popup. Esc closes it.");
 
-        if let Some(popup) = &self.popup {
-            let names = self.names.clone();
-            let results = popup.results.clone();
+        if let (Some(popup), Some(index)) = (&self.popup, &self.index) {
+            let (index, hits) = (index.clone(), popup.hits.clone());
             root = root.child(
-                div()
-                    .absolute()
-                    .top_16()
-                    .left_1_4()
-                    .w_1_2()
-                    .h(px(420.))
-                    .p_2()
-                    .gap_2()
-                    .flex()
-                    .flex_col()
-                    .bg(rgb(0xffffff))
-                    .border_1()
-                    .border_color(rgb(0xc8c8c8))
-                    .rounded_md()
-                    .child(Input::new(&popup.input))
-                    .child(
-                        uniform_list("results", results.len(), move |range, _, _| {
-                            range
-                                .map(|row| div().h(px(24.)).child(names[results[row]].clone()))
-                                .collect()
-                        })
-                        .w_full()
-                        .h(px(360.)),
-                    ),
+                popup_frame(&popup.input, self.status()).child(
+                    uniform_list("results", hits.len(), move |range, _, _| {
+                        range
+                            .map(|row| {
+                                div()
+                                    .h(px(24.))
+                                    .child(index.paths()[hits[row].index].clone())
+                            })
+                            .collect()
+                    })
+                    .w_full()
+                    .h(px(340.)),
+                ),
             );
+        } else if let Some(popup) = &self.popup {
+            root = root.child(popup_frame(&popup.input, self.status()));
         }
         root
     }
 }
 
+fn popup_frame(input: &Entity<InputState>, status: String) -> Div {
+    div()
+        .absolute()
+        .top_16()
+        .left_1_4()
+        .w_1_2()
+        .h(px(420.))
+        .p_2()
+        .gap_2()
+        .flex()
+        .flex_col()
+        .bg(rgb(0xffffff))
+        .border_1()
+        .border_color(rgb(0xc8c8c8))
+        .rounded_md()
+        .child(Input::new(input))
+        .child(div().text_xs().text_color(rgb(0x777777)).child(status))
+}
+
 fn main() {
-    gpui_kit::application().run(|cx| {
+    let root = std::env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().expect("no current directory"));
+    let root = root.canonicalize().unwrap_or(root);
+
+    gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
-        gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-            let workspace = cx.new(Workspace::new);
+        gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(root, cx));
             workspace.read(cx).focus.clone().focus(window, cx);
             workspace
         })
