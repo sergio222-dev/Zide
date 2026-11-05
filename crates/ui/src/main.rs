@@ -566,6 +566,15 @@ impl Workspace {
         cx.notify();
     }
 
+    /// F3 / Shift+F3: the next match of the last search, or the panel when there was none.
+    fn step_or_open_find(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.viewer {
+            Some(viewer) if viewer.has_find() => self.find_step(forward, cx),
+            Some(_) => self.open_find(false, window, cx),
+            None => {}
+        }
+    }
+
     fn find_step(&mut self, forward: bool, cx: &mut Context<Self>) {
         if let Some(viewer) = &mut self.viewer {
             viewer.jump(forward, false);
@@ -999,8 +1008,12 @@ impl Render for Workspace {
                 cx.listener(|this, _: &ReplaceInFile, window, cx| this.open_find(true, window, cx)),
             )
             .on_action(cx.listener(|this, _: &ReplaceAll, _, cx| this.replace_everywhere(cx)))
-            .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find_step(true, cx)))
-            .on_action(cx.listener(|this, _: &FindPrevious, _, cx| this.find_step(false, cx)))
+            .on_action(cx.listener(|this, _: &FindNext, window, cx| {
+                this.step_or_open_find(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FindPrevious, window, cx| {
+                this.step_or_open_find(false, window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &GoToFile, window, cx| this.open_tab(Tab::Files, window, cx)),
             )

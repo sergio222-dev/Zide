@@ -250,6 +250,10 @@ impl Viewer {
         }
     }
 
+    pub fn has_find(&self) -> bool {
+        self.find.is_some()
+    }
+
     pub fn find_status(&self) -> Option<FindStatus> {
         let find = self.find.as_ref()?;
         Some(FindStatus {
