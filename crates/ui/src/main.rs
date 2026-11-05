@@ -237,7 +237,6 @@ struct Popup {
     options: TextOptions,
     selected: usize,
     scroll: UniformListScrollHandle,
-    opened_at: Option<Instant>,
     /// Text tab filters: file mask (`*.rs`) and directory (`crates/ui`).
     mask_input: Entity<InputState>,
     dir_input: Entity<InputState>,
@@ -541,7 +540,6 @@ impl Workspace {
             options: TextOptions::default(),
             selected: 0,
             scroll: UniformListScrollHandle::new(),
-            opened_at: Some(Instant::now()),
             mask_input,
             dir_input,
             _subscriptions: [subscription]
@@ -750,6 +748,7 @@ impl Workspace {
                 return self.set_usages_note(&word, note, cx);
             }
         };
+        let label = client.label().to_string();
         let (line, character) = viewer.lsp_position();
         let text = viewer.text();
         let path = self.root.join(viewer.path());
@@ -764,13 +763,13 @@ impl Workspace {
                     Ok::<_, LspError>(usages::hits(&root, &index, &found))
                 })
                 .await;
-            eprintln!("usages from {} in {:?}", spec.command, started.elapsed());
+            eprintln!("usages from {label} in {:?}", started.elapsed());
             this.update(cx, |this, cx| {
                 // a dead server is started anew by the next request
                 if matches!(outcome, Err(LspError::Closed | LspError::Io(_))) {
                     this.lsp.remove(spec.name);
                 }
-                this.apply_usages(&word, spec.command, outcome, cx);
+                this.apply_usages(&word, &label, outcome, cx);
             })
             .ok();
         })
@@ -1412,12 +1411,6 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(viewer) = &mut self.viewer {
             viewer.tick(window);
-        }
-        if let Some(opened_at) = self.popup.as_mut().and_then(|p| p.opened_at.take()) {
-            eprintln!(
-                "popup first render {:?} after double-Shift",
-                opened_at.elapsed()
-            );
         }
 
         let mut root = div()

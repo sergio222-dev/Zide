@@ -129,6 +129,8 @@ pub struct Client {
     busy: Arc<Busy>,
     started: Instant,
     child: Option<Mutex<Child>>,
+    /// What to call the running server: its command, or `<name> (native)`.
+    label: String,
     /// Version of each open document, by URI.
     versions: Mutex<HashMap<String, i32>>,
 }
@@ -136,9 +138,9 @@ pub struct Client {
 impl Client {
     /// Runs the server of `spec` with `root` as its workspace and waits for its handshake.
     pub fn start(spec: &ServerSpec, root: &Path) -> Result<Self, Error> {
-        let (program, args) = crate::servers::launch(spec);
-        let mut child = Command::new(program)
-            .args(args)
+        let launch = crate::servers::launch(spec);
+        let mut child = Command::new(&launch.program)
+            .args(launch.args)
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -159,6 +161,11 @@ impl Client {
         match Self::handshake(connection, busy, root) {
             Ok(mut client) => {
                 client.child = Some(Mutex::new(child));
+                client.label = if launch.native {
+                    format!("{} (native)", spec.name)
+                } else {
+                    spec.command.to_string()
+                };
                 Ok(client)
             }
             // a program that starts and quits at once (a rustup shim without the component)
@@ -217,8 +224,13 @@ impl Client {
             busy,
             started: Instant::now(),
             child: None,
+            label: String::new(),
             versions: Mutex::default(),
         })
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
     }
 
     /// Tells the server the document is open with `text`, or its new full `text` when it

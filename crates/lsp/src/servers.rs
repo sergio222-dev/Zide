@@ -33,12 +33,27 @@ pub fn resolve(command: &str) -> PathBuf {
 
 /// What to run for `spec`: its native build when Zide's folder has one, else the program
 /// from [`resolve`] with the usual arguments.
-pub fn launch(spec: &ServerSpec) -> (PathBuf, &'static [&'static str]) {
+pub fn launch(spec: &ServerSpec) -> Launch {
     let native = spec.native.as_ref().and_then(|native| {
         let found = (native.find)(&servers_dir()?)?;
-        Some((found, native.args))
+        Some(Launch {
+            program: found,
+            args: native.args,
+            native: true,
+        })
     });
-    native.unwrap_or_else(|| (resolve(spec.command), spec.args))
+    native.unwrap_or_else(|| Launch {
+        program: resolve(spec.command),
+        args: spec.args,
+        native: false,
+    })
+}
+
+/// How a server is run, as chosen by [`launch`].
+pub struct Launch {
+    pub program: PathBuf,
+    pub args: &'static [&'static str],
+    pub native: bool,
 }
 
 /// The TypeScript 7 executable that npm installs as `@typescript/typescript-<os>-<arch>`.
