@@ -18,7 +18,18 @@ use zide_vim::{Key, Mode, Vim};
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 const TAB_WIDTH: usize = 4;
 const ROW_HEIGHT: f32 = 20.;
-const EDITOR_FONT: &str = "monospace";
+/// Monospace families, in order of preference. GPUI does not resolve the generic `monospace`.
+const EDITOR_FONTS: &[&str] = &[
+    "JetBrains Mono",
+    "Iosevka Nerd Font Mono",
+    "0xProto Nerd Font Mono",
+    "Noto Sans Mono",
+    "DejaVu Sans Mono",
+    "Adwaita Mono",
+    "Liberation Mono",
+    "Menlo",
+    "Consolas",
+];
 
 struct Line {
     /// Char offset of the line in the buffer, and its length in chars.
@@ -142,6 +153,7 @@ pub struct Viewer {
     anim: Option<ScrollAnim>,
     /// Advance of one monospace cell in pixels, measured on the first frame.
     cell_width: Option<f32>,
+    font_family: SharedString,
 }
 
 impl Viewer {
@@ -175,6 +187,7 @@ impl Viewer {
             z_pending: false,
             anim: None,
             cell_width: None,
+            font_family: EDITOR_FONTS[0].into(),
         };
         viewer.rebuild();
         viewer
@@ -257,7 +270,14 @@ impl Viewer {
         if self.cell_width.is_none() {
             let text_system = window.text_system();
             let size = window.text_style().font_size.to_pixels(window.rem_size());
-            let id = text_system.resolve_font(&font(EDITOR_FONT));
+            let installed = text_system.all_font_names();
+            if let Some(family) = EDITOR_FONTS
+                .iter()
+                .find(|family| installed.iter().any(|name| name == *family))
+            {
+                self.font_family = (*family).into();
+            }
+            let id = text_system.resolve_font(&font(self.font_family.clone()));
             self.cell_width = text_system
                 .advance(id, size, 'm')
                 .ok()
@@ -681,7 +701,7 @@ impl Viewer {
             .child(
                 div()
                     .flex_1()
-                    .font_family(EDITOR_FONT)
+                    .font_family(self.font_family.clone())
                     .whitespace_nowrap()
                     .child(list),
             )
