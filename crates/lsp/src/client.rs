@@ -23,7 +23,8 @@ pub struct ServerSpec {
     pub name: &'static str,
     pub command: &'static str,
     pub args: &'static [&'static str],
-    /// What to run to get it, shown when the server is missing.
+    /// What to run to get it, shown when the server is missing; `{dir}` stands for Zide's
+    /// folder of servers.
     pub install: &'static str,
 }
 
@@ -38,7 +39,7 @@ const TYPESCRIPT: ServerSpec = ServerSpec {
     name: "typescript",
     command: "typescript-language-server",
     args: &["--stdio"],
-    install: "npm install -g typescript-language-server typescript",
+    install: "npm install --prefix {dir} typescript-language-server typescript",
 };
 
 /// The server for the file at `path` and the `languageId` it is opened with.
@@ -121,7 +122,7 @@ pub struct Client {
 impl Client {
     /// Runs the server of `spec` with `root` as its workspace and waits for its handshake.
     pub fn start(spec: &ServerSpec, root: &Path) -> Result<Self, Error> {
-        let mut child = Command::new(spec.command)
+        let mut child = Command::new(crate::servers::resolve(spec.command))
             .args(spec.args)
             .current_dir(root)
             .stdin(Stdio::piped())

@@ -8531,6 +8531,7 @@ version = "0.0.0"
 name = "zide-lsp"
 version = "0.0.0"
 dependencies = [
+ "dirs 6.0.0",
  "lsp-types",
  "serde_json",
 ]

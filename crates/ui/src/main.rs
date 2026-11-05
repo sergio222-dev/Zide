@@ -1791,10 +1791,9 @@ fn vim_key(event: &KeyDownEvent) -> Option<zide_vim::Key> {
 
 /// Why a language server is not available and what to do about it.
 fn setup_hint(spec: &zide_lsp::ServerSpec, error: &LspError) -> String {
-    format!(
-        "{error}. Setup: {} (docs/language-servers.md)",
-        spec.install
-    )
+    let dir = zide_lsp::servers_dir().map_or_else(String::new, |d| d.display().to_string());
+    let install = spec.install.replace("{dir}", &dir);
+    format!("{error}. Setup: {install} (docs/language-servers.md)")
 }
 
 fn kind_label(kind: StubKind) -> &'static str {

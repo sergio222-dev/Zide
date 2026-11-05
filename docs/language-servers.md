@@ -4,12 +4,19 @@ Zide does not ship language servers. It starts the one of the language of the fi
 (in the background, once per project) and uses it for semantic features such as Find Usages
 (`Alt+F7`). Without a server those features fall back to text search, and the popup says why.
 
-Zide finds each server by its command name on your `PATH`.
+Zide looks for each server in this order:
 
-| Language | Files | Command | Install |
+1. **Zide's own folder** (`~/.local/share/zide/servers` on Linux): `bin/<command>` for programs,
+   `node_modules/.bin/<command>` for what npm installs with `--prefix`. Installing here touches
+   nothing else on your machine.
+2. The **`PATH`**, like any other program.
+
+| Language | Files | Command | Install (pick one) |
 | --- | --- | --- | --- |
-| Rust | `.rs` | `rust-analyzer` | `rustup component add rust-analyzer` |
-| TypeScript / JavaScript | `.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs` | `typescript-language-server --stdio` | `npm install -g typescript-language-server typescript` |
+| Rust | `.rs` | `rust-analyzer` | `rustup component add rust-analyzer` (on the `PATH`), or put the binary in `<folder>/bin/` |
+| TypeScript / JavaScript | `.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs` | `typescript-language-server --stdio` | `npm install --prefix ~/.local/share/zide/servers typescript-language-server typescript` (Zide's folder), or `npm install -g typescript-language-server typescript` (`PATH`) |
+
+The npm servers are Node scripts: `node` has to be on the `PATH` when Zide runs them.
 
 ## Checking it works
 
