@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use lsp_types::{Location, Range, TextEdit};
+use lsp_types::{DocumentHighlight, Location, Range, TextEdit};
 use serde_json::{Value, json};
 
 use crate::{
@@ -132,7 +132,7 @@ pub struct Client {
     /// What to call the running server: its command, or `<name> (native)`.
     label: String,
     /// Version of each open document, by URI.
-    versions: Mutex<HashMap<String, i32>>,
+    versions: Mutex<HashMap<String, (i32, u64)>>,
 }
 
 impl Client {
@@ -234,13 +234,17 @@ impl Client {
     }
 
     /// Tells the server the document is open with `text`, or its new full `text` when it
-    /// already was.
+    /// already was. Sending the same text again is free.
     pub fn sync(&self, path: &Path, language_id: &str, text: &str) -> Result<(), Error> {
+        use std::hash::{DefaultHasher, Hash, Hasher};
         let uri = path_to_uri(path);
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        let fingerprint = hasher.finish();
         let mut versions = self.versions.lock().unwrap();
         match versions.get_mut(&uri) {
             None => {
-                versions.insert(uri.clone(), 1);
+                versions.insert(uri.clone(), (1, fingerprint));
                 self.connection
                     .notify(
                         "textDocument/didOpen",
@@ -250,8 +254,10 @@ impl Client {
                     )
                     .map_err(Error::Io)
             }
-            Some(version) => {
+            Some((_, known)) if *known == fingerprint => Ok(()),
+            Some((version, known)) => {
                 *version += 1;
+                *known = fingerprint;
                 self.connection
                     .notify(
                         "textDocument/didChange",
@@ -263,6 +269,33 @@ impl Client {
                     .map_err(Error::Io)
             }
         }
+    }
+
+    /// Where the symbol at `line`:`character` (0-based, UTF-16) appears in its own document,
+    /// as ranges.
+    pub fn document_highlight(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<Range>, Error> {
+        let result = self.connection.request(
+            "textDocument/documentHighlight",
+            json!({
+                "textDocument": {"uri": path_to_uri(path)},
+                "position": {"line": line, "character": character},
+            }),
+            REQUEST_TIMEOUT,
+        )?;
+        if result.is_null() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_value::<Vec<DocumentHighlight>>(result)
+            .map(|found| found.into_iter().map(|h| h.range).collect())
+            .map_err(|e| Error::Server {
+                code: 0,
+                message: format!("unexpected highlight answer: {e}"),
+            })
     }
 
     /// Where the symbol at `line`:`character` (0-based, UTF-16) is used, its declaration included.
@@ -419,6 +452,46 @@ mod tests {
         assert_eq!(sent[3]["method"], "textDocument/didChange");
         assert_eq!(sent[3]["params"]["textDocument"]["version"], 2);
         assert_eq!(sent[3]["params"]["contentChanges"][0]["text"], "two");
+        drop(client);
+    }
+
+    #[test]
+    fn syncing_the_same_text_again_sends_nothing() {
+        let (connection, wire, server) = connect(|_, _| {});
+        let _server = serve(wire.clone(), server, |_| Value::Null);
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        let path = Path::new("/w/a.rs");
+        client.sync(path, "rust", "one").unwrap();
+        client.sync(path, "rust", "one").unwrap();
+        client.sync(path, "rust", "two").unwrap();
+        let methods: Vec<_> = wire
+            .wait_for(4)
+            .iter()
+            .map(|m| m["method"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(
+            &methods[2..],
+            ["textDocument/didOpen", "textDocument/didChange"]
+        );
+        drop(client);
+    }
+
+    #[test]
+    fn highlights_come_back_as_ranges() {
+        let (connection, wire, server) = connect(|_, _| {});
+        let _server = serve(wire.clone(), server, |method| {
+            assert_eq!(method, "textDocument/documentHighlight");
+            json!([
+                {"range": {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 5}}, "kind": 2},
+                {"range": {"start": {"line": 4, "character": 0}, "end": {"line": 4, "character": 3}}}
+            ])
+        });
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        let found = client
+            .document_highlight(Path::new("/w/a.rs"), 1, 3)
+            .unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[1].start.line, 4);
         drop(client);
     }
 

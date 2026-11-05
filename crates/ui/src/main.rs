@@ -11,7 +11,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 mod session;
@@ -21,7 +21,7 @@ mod viewer;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
-use viewer::{Effect, FindStatus, FormatRequest, Viewer};
+use viewer::{Effect, FindStatus, FormatRequest, HighlightKey, Viewer};
 use zide_core::{Change, DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
 use zide_index::FileIndex;
 use zide_lsp::{Client, Error as LspError, server_for};
@@ -300,6 +300,8 @@ struct Workspace {
     tree_focused: bool,
     /// A `g` was typed in the tree (`gg` goes to the top).
     tree_g: bool,
+    /// The file and word whose usages were last asked of a language server.
+    highlight_requested: Option<(String, HighlightKey)>,
     tree_scroll: UniformListScrollHandle,
     /// Language servers by `ServerSpec::name`, started the first time they are needed.
     lsp: std::collections::HashMap<&'static str, LspState>,
@@ -359,6 +361,7 @@ impl Workspace {
             tree_visible: true,
             tree_focused: false,
             tree_g: false,
+            highlight_requested: None,
             tree_scroll: UniformListScrollHandle::new(),
             lsp: std::collections::HashMap::new(),
             root,
@@ -711,6 +714,70 @@ impl Workspace {
         self.show_tab(Tab::Text, cx);
         // the text matches above are shown at once; a language server refines them
         self.semantic_usages(word, cx);
+    }
+
+    /// Asks the language server where the word under the caret is used, once the caret rests on
+    /// it for a moment; until the answer arrives the viewer highlights by text.
+    fn request_highlights(&mut self, cx: &mut Context<Self>) {
+        let Some(viewer) = &self.viewer else {
+            return;
+        };
+        let Some(target) = viewer.highlight_target() else {
+            self.highlight_requested = None;
+            return;
+        };
+        let relative = viewer.path().to_string();
+        let Some((spec, language)) = server_for(&relative) else {
+            return;
+        };
+        let Some(LspState::Ready(client)) = self.lsp.get(spec.name) else {
+            return; // not started yet: ask again at the next frame
+        };
+        let request = (relative, target.key);
+        if self.highlight_requested.as_ref() == Some(&request) {
+            return;
+        }
+        self.highlight_requested = Some(request.clone());
+        let client = client.clone();
+        let text = viewer.text();
+        let path = self.root.join(&request.0);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(120))
+                .await;
+            let wanted = this
+                .update(cx, |this, _| {
+                    this.highlight_requested.as_ref() == Some(&request)
+                })
+                .unwrap_or(false);
+            if !wanted {
+                return; // the caret moved on while waiting
+            }
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    client.sync(&path, language, &text)?;
+                    client.document_highlight(&path, target.line, target.character)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if matches!(outcome, Err(LspError::Closed | LspError::Io(_))) {
+                    this.lsp.remove(spec.name);
+                }
+                if this.highlight_requested.as_ref() != Some(&request) {
+                    return;
+                }
+                if let (Ok(ranges), Some(viewer)) = (
+                    outcome,
+                    this.viewer.as_mut().filter(|v| v.path() == request.0),
+                ) {
+                    viewer.set_semantic(request.1, ranges);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Ctrl+W / Ctrl+Shift+W in the editor.
@@ -1527,6 +1594,7 @@ impl Render for Workspace {
         if let Some(viewer) = &mut self.viewer {
             viewer.tick(window);
         }
+        self.request_highlights(cx);
 
         let mut root = div()
             .id("workspace")

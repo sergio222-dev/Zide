@@ -150,6 +150,15 @@ struct SelectionTrail {
     history: Vec<(Option<Range<usize>>, usize)>,
 }
 
+/// Revision of the text and where the highlighted word starts.
+pub type HighlightKey = (Revision, usize);
+
+pub struct HighlightTarget {
+    pub key: HighlightKey,
+    pub line: u32,
+    pub character: u32,
+}
+
 pub struct Viewer {
     find: Option<FindState>,
     path: String,
@@ -164,6 +173,8 @@ pub struct Viewer {
     vim: Vim,
     language: Option<LanguageId>,
     trail: Option<SelectionTrail>,
+    /// Usages of the word at `key` that a language server found.
+    semantic: Option<(HighlightKey, Arc<Vec<Range<usize>>>)>,
     /// Display lines of `buffer` as of `built_at`.
     lines: Arc<Vec<Line>>,
     built_at: Revision,
@@ -205,6 +216,7 @@ impl Viewer {
             vim: Vim::default(),
             language,
             trail: None,
+            semantic: None,
             lines: Arc::default(),
             built_at: buffer.revision(),
             buffer,
@@ -283,13 +295,18 @@ impl Viewer {
     /// them, which absorbs a scroll glide), as char ranges: IntelliJ's usage highlighting,
     /// by text. Nothing while selecting or searching, when it would only add noise.
     fn word_highlights(&self) -> Arc<Vec<Range<usize>>> {
-        let searching = self.find.as_ref().is_some_and(|find| find.visible);
-        if searching || self.vim.selection(&self.buffer).is_some() {
+        if !self.highlights_apply() {
             return Arc::default();
         }
-        let Some(word) = self.word_at_cursor() else {
+        let Some(range) = self.word_range_at_cursor() else {
             return Arc::default();
         };
+        if let Some((key, found)) = &self.semantic
+            && *key == (self.buffer.revision(), range.start)
+        {
+            return found.clone();
+        }
+        let word = self.buffer.slice(range);
         let (top, rows) = self.view_metrics().unwrap_or((0, 60));
         let first = top.saturating_sub(rows);
         let last = (top + 2 * rows).min(self.buffer.line_count());
@@ -669,6 +686,12 @@ impl Viewer {
 
     /// The identifier under the cursor, if it is on one.
     pub fn word_at_cursor(&self) -> Option<String> {
+        self.word_range_at_cursor()
+            .map(|range| self.buffer.slice(range))
+    }
+
+    /// Where the identifier under the cursor is, in chars.
+    fn word_range_at_cursor(&self) -> Option<Range<usize>> {
         let position = self.buffer.position_of(self.vim.cursor());
         let line: Vec<char> = self.buffer.line(position.line).chars().collect();
         let is_word = |c: char| c.is_alphanumeric() || c == '_';
@@ -683,7 +706,42 @@ impl Viewer {
             .iter()
             .position(|&c| !is_word(c))
             .map_or(line.len(), |i| position.column + i);
-        Some(line[start..end].iter().collect())
+        let first = self.buffer.line_start(position.line);
+        Some(first + start..first + end)
+    }
+
+    /// Whether usage highlighting applies now: not while selecting or searching, when it would
+    /// only add noise.
+    fn highlights_apply(&self) -> bool {
+        let searching = self.find.as_ref().is_some_and(|find| find.visible);
+        !searching && self.vim.selection(&self.buffer).is_none()
+    }
+
+    /// What a language server is asked to highlight, when the caret is on a word.
+    pub fn highlight_target(&self) -> Option<HighlightTarget> {
+        if !self.highlights_apply() {
+            return None;
+        }
+        let word = self.word_range_at_cursor()?;
+        let at = self.lsp_position_at(word.start);
+        Some(HighlightTarget {
+            key: (self.buffer.revision(), word.start),
+            line: at.line,
+            character: at.character,
+        })
+    }
+
+    /// Stores what a language server answered for `key`; ignored when the text moved on.
+    pub fn set_semantic(&mut self, key: HighlightKey, ranges: Vec<zide_lsp::Range>) {
+        if self.buffer.revision() != key.0 {
+            return;
+        }
+        let mut found: Vec<Range<usize>> = ranges
+            .into_iter()
+            .map(|r| self.offset_of_lsp(r.start)..self.offset_of_lsp(r.end))
+            .collect();
+        found.sort_by_key(|r| r.start);
+        self.semantic = Some((key, Arc::new(found)));
     }
 
     pub fn selected_text(&self) -> Option<String> {
@@ -1374,6 +1432,25 @@ mod tests {
         );
         type_keys(&mut viewer, "v"); // selecting: no highlighting
         assert!(viewer.word_highlights().is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn a_server_answer_replaces_the_textual_highlights_while_it_fits() {
+        let (dir, file) = temp_file("semantic-hl", "foo foo\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let target = viewer.highlight_target().unwrap();
+        let only_second =
+            zide_lsp::Range::new(zide_lsp::Position::new(0, 4), zide_lsp::Position::new(0, 7));
+        viewer.set_semantic(target.key, vec![only_second]);
+        assert_eq!(*viewer.word_highlights(), [4..7]);
+        // after an edit ("oo foo") the old answer no longer applies: back to the text
+        type_keys(&mut viewer, "x");
+        assert_eq!(*viewer.word_highlights(), [0..2]);
+        // an answer for a revision that is gone is ignored
+        viewer.set_semantic(target.key, vec![only_second]);
+        assert_eq!(*viewer.word_highlights(), [0..2]);
         fs::remove_dir_all(dir).unwrap();
     }
 
