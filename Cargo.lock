@@ -8528,6 +8528,14 @@ name = "zide-index"
 version = "0.0.0"
 
 [[package]]
+name = "zide-lsp"
+version = "0.0.0"
+dependencies = [
+ "lsp-types",
+ "serde_json",
+]
+
+[[package]]
 name = "zide-matcher"
 version = "0.0.0"
 
