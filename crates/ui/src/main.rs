@@ -153,7 +153,9 @@ impl Render for Workspace {
                     .gap_2()
                     .flex()
                     .flex_col()
+                    .bg(rgb(0xffffff))
                     .border_1()
+                    .border_color(rgb(0xc8c8c8))
                     .rounded_md()
                     .child(Input::new(&popup.input))
                     .child(
@@ -162,7 +164,8 @@ impl Render for Workspace {
                                 .map(|row| div().h(px(24.)).child(names[results[row]].clone()))
                                 .collect()
                         })
-                        .flex_1(),
+                        .w_full()
+                        .h(px(360.)),
                     ),
             );
         }
