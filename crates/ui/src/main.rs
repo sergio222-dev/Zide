@@ -358,7 +358,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             last_space: None,
             tree: Tree::new(),
-            tree_visible: true,
+            tree_visible: false,
             tree_focused: false,
             tree_g: false,
             highlight_requested: None,
@@ -1599,6 +1599,7 @@ impl Render for Workspace {
         let mut root = div()
             .id("workspace")
             .size_full()
+            .bg(rgb(theme::BACKGROUND))
             .key_context("Workspace")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| {
@@ -1685,9 +1686,10 @@ impl Render for Workspace {
                             .flex_1()
                             .min_w_0()
                             .h_full()
+                            .text_color(rgb(theme::TEXT))
                             .children(self.find_panel(cx))
                             .child(viewer.render()),
-                        None => div().flex_1().p_4().child(
+                        None => div().flex_1().p_4().text_color(rgb(theme::DIM)).child(
                             "Press Space twice to open the popup. Alt+1 shows the project tree.",
                         ),
                     }),
