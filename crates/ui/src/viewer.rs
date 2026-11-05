@@ -126,6 +126,8 @@ pub struct Viewer {
     lines: Arc<Vec<Line>>,
     built_at: Revision,
     scroll: UniformListScrollHandle,
+    /// A `z` was typed and its second key (`t`, `z`, `b`...) is awaited.
+    z_pending: bool,
 }
 
 impl Viewer {
@@ -156,6 +158,7 @@ impl Viewer {
             built_at: buffer.revision(),
             buffer,
             scroll: UniformListScrollHandle::new(),
+            z_pending: false,
         };
         viewer.rebuild();
         viewer
@@ -203,7 +206,86 @@ impl Viewer {
         }
     }
 
+    /// `(first visible row, visible rows)` as of the last layout, if there was one.
+    fn view_metrics(&self) -> Option<(usize, usize)> {
+        let state = self.scroll.0.borrow();
+        let row = f32::from(state.last_item_size?.item.height);
+        if row <= 0. {
+            return None;
+        }
+        let top = (-f32::from(state.base_handle.offset().y) / row).max(0.) as usize;
+        let rows = (f32::from(state.base_handle.bounds().size.height) / row) as usize;
+        Some((top, rows.max(1)))
+    }
+
+    /// `zt`, `zz`, `zb`: puts the cursor line at the top, middle or bottom of the view.
+    fn place_cursor_line(&mut self, strategy: ScrollStrategy) {
+        let line = self.buffer.position_of(self.vim.cursor()).line;
+        self.scroll.scroll_to_item_strict(line, strategy);
+    }
+
+    /// `Ctrl-D` / `Ctrl-U`: the cursor and the view move half a page.
+    fn scroll_half_page(&mut self, down: bool) {
+        let (top, rows) = self.view_metrics().unwrap_or((0, 20));
+        let half = (rows / 2).max(1);
+        let line = self.buffer.position_of(self.vim.cursor()).line;
+        let last = self.buffer.line_count().saturating_sub(1);
+        let (line, top) = if down {
+            ((line + half).min(last), (top + half).min(last))
+        } else {
+            (line.saturating_sub(half), top.saturating_sub(half))
+        };
+        self.vim.move_to_line(&self.buffer, line);
+        self.scroll.scroll_to_item_strict(top, ScrollStrategy::Top);
+    }
+
+    /// What is typed so far of an unfinished command, for the status bar.
+    fn pending_keys(&self) -> String {
+        format!(
+            "{}{}",
+            if self.z_pending { "z" } else { "" },
+            self.vim.pending()
+        )
+    }
+
     pub fn handle_key(&mut self, key: Key) -> Effect {
+        if self.z_pending {
+            self.z_pending = false;
+            let strategy = match key {
+                Key::Char('t') | Key::Enter => Some(ScrollStrategy::Top),
+                Key::Char('z' | '.') => Some(ScrollStrategy::Center),
+                Key::Char('b' | '-') => Some(ScrollStrategy::Bottom),
+                _ => None, // Esc or anything else cancels
+            };
+            if let Some(strategy) = strategy {
+                if matches!(key, Key::Enter | Key::Char('.' | '-')) {
+                    self.vim.handle(&mut self.buffer, Key::Char('^'));
+                }
+                self.place_cursor_line(strategy);
+            }
+            return Effect::None;
+        }
+        let navigating = matches!(
+            self.vim.mode(),
+            Mode::Normal | Mode::Visual | Mode::VisualLine
+        ) && self.vim.pending().is_empty();
+        if navigating {
+            match key {
+                Key::Char('z') if self.vim.mode() == Mode::Normal => {
+                    self.z_pending = true;
+                    return Effect::None;
+                }
+                Key::Ctrl('d') => {
+                    self.scroll_half_page(true);
+                    return Effect::None;
+                }
+                Key::Ctrl('u') => {
+                    self.scroll_half_page(false);
+                    return Effect::None;
+                }
+                _ => {}
+            }
+        }
         if self.vim.mode() == Mode::Normal && self.vim.pending().is_empty() {
             match key {
                 Key::Char('/') => return Effect::OpenFind,
@@ -531,7 +613,7 @@ impl Viewer {
                         Mode::Visual => "VISUAL",
                         Mode::VisualLine => "VISUAL LINE",
                     })
-                    .child(self.vim.pending())
+                    .child(self.pending_keys())
                     .child(if self.is_dirty() { "[+]" } else { "" })
                     .child(self.notice.clone().unwrap_or_default())
                     .child(div().ml_auto().child({
@@ -699,6 +781,39 @@ mod tests {
         for c in keys.chars() {
             viewer.handle_key(Key::Char(c));
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn z_waits_for_its_second_key_and_escape_cancels() {
+        let (dir, file) = temp_file("z", "a\nb\nc\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "z");
+        assert_eq!(viewer.pending_keys(), "z");
+        viewer.handle_key(Key::Esc);
+        assert_eq!(viewer.pending_keys(), "");
+        type_keys(&mut viewer, "zz");
+        assert_eq!(viewer.pending_keys(), "");
+        assert_eq!(viewer.vim.cursor(), 0); // scrolling does not move the cursor
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn ctrl_d_and_ctrl_u_move_the_cursor_half_a_page() {
+        let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let (dir, file) = temp_file("page", &text);
+        let mut viewer = Viewer::open(&dir, &file);
+        let line = |v: &Viewer| v.buffer.position_of(v.vim.cursor()).line;
+        viewer.handle_key(Key::Ctrl('d')); // no layout yet: 20 rows, half is 10
+        assert_eq!(line(&viewer), 10);
+        viewer.handle_key(Key::Ctrl('d'));
+        assert_eq!(line(&viewer), 20);
+        viewer.handle_key(Key::Ctrl('u'));
+        assert_eq!(line(&viewer), 10);
+        for _ in 0..5 {
+            viewer.handle_key(Key::Ctrl('u'));
+        }
+        assert_eq!(line(&viewer), 0);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[::core::prelude::v1::test]

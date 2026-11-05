@@ -98,6 +98,13 @@ impl Vim {
         self.want_column = buffer.position_of(self.cursor).column;
     }
 
+    /// Moves the cursor to `line` (clamped), on the column it wants: what scrolling by pages does.
+    pub fn move_to_line(&mut self, buffer: &Buffer, line: usize) {
+        let line = line.min(motion::last_line(buffer));
+        let last_column = buffer.line_len(line).saturating_sub(1);
+        self.cursor = buffer.line_start(line) + self.want_column.min(last_column);
+    }
+
     /// What the user has typed of an unfinished command (`2d`, `g`), for a status line.
     pub fn pending(&self) -> String {
         let mut out = String::new();

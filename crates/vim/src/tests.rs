@@ -279,3 +279,18 @@ fn dot_ignores_motions_undo_and_itself() {
 fn a_repeated_change_is_one_undo_step() {
     assert_eq!(run("a b c d", "dw.u").0, "b c d");
 }
+
+#[test]
+fn move_to_line_keeps_the_wanted_column_and_clamps() {
+    let mut buffer = Buffer::new("abcd\nx\nabcd\n");
+    let mut vim = Vim::default();
+    for c in "lll".chars() {
+        vim.handle(&mut buffer, Key::Char(c));
+    }
+    vim.move_to_line(&buffer, 1);
+    assert_eq!(vim.cursor(), 5); // the short line
+    vim.move_to_line(&buffer, 2);
+    assert_eq!(vim.cursor(), 7 + 3); // the wanted column is back
+    vim.move_to_line(&buffer, 99);
+    assert_eq!(vim.cursor(), 7 + 3); // clamped to the last line
+}
