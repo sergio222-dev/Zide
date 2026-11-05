@@ -2153,8 +2153,15 @@ fn popup_frame(
 }
 
 fn main() {
-    let root = std::env::args_os()
-        .nth(1)
+    let first = std::env::args_os().nth(1);
+    if matches!(
+        first.as_deref().and_then(|a| a.to_str()),
+        Some("--version" | "-V")
+    ) {
+        println!("zide {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    let root = first
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().expect("no current directory"));
     let root = root.canonicalize().unwrap_or(root);
