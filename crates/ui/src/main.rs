@@ -83,8 +83,10 @@ impl Workspace {
 
     fn search(&mut self, query: &str, cx: &mut Context<Self>) {
         let started = Instant::now();
+        // like IntelliJ's navigation: a leading `*` lets the pattern match anywhere in the name
+        let pattern = format!("*{query}");
         let matcher =
-            FixingLayoutMatcher::new(query, MatchingMode::IgnoreCase, "", &RussianToEnglish);
+            FixingLayoutMatcher::new(&pattern, MatchingMode::IgnoreCase, "", &RussianToEnglish);
         let results: Vec<usize> = self
             .names
             .iter()
