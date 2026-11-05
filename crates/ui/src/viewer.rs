@@ -10,7 +10,7 @@ use std::{
 
 use gpui_kit::*;
 use zide_syntax::{Class, LanguageId, Span, highlight, language_for_path};
-use zide_text::{Buffer, Position, Revision};
+use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
 /// Files larger than this are not opened.
@@ -19,6 +19,9 @@ const TAB_WIDTH: usize = 4;
 const ROW_HEIGHT: f32 = 20.;
 
 struct Line {
+    /// Char offset of the line in the buffer, and its length in chars.
+    start: usize,
+    chars: usize,
     text: String,
     colors: Vec<(Range<usize>, HighlightStyle)>,
     /// Display byte of each `char` of the line (and of its end), when that is not the identity
@@ -80,7 +83,34 @@ fn disk_stamp(path: &Path) -> Option<DiskStamp> {
     Some((metadata.modified().ok()?, metadata.len()))
 }
 
+/// What the editor asks the workspace to do, beyond changing its own text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    None,
+    /// `/` was typed: open the find panel.
+    OpenFind,
+}
+
+/// A search over the buffer: the query, and where it matches (char ranges).
+struct FindState {
+    finder: Option<Finder>,
+    error: Option<String>,
+    matches: Arc<Vec<Range<usize>>>,
+    built_at: Option<Revision>,
+    /// Matches are painted only while the panel is open; `n`/`N` keep working after it closes.
+    visible: bool,
+}
+
+/// What the find panel shows about the current search.
+pub struct FindStatus {
+    pub total: usize,
+    /// 1-based index of the match the cursor is on.
+    pub current: Option<usize>,
+    pub error: Option<String>,
+}
+
 pub struct Viewer {
+    find: Option<FindState>,
     path: String,
     full_path: PathBuf,
     /// False when the file could not be read: the buffer then holds an error message.
@@ -113,6 +143,7 @@ impl Viewer {
         let buffer = Buffer::new(&text);
         let language = language_for_path(relative);
         let mut viewer = Self {
+            find: None,
             path: relative.to_string(),
             full_path: full,
             editable,
@@ -163,14 +194,28 @@ impl Viewer {
         }
     }
 
-    pub fn handle_key(&mut self, key: Key) {
+    pub fn handle_key(&mut self, key: Key) -> Effect {
+        if self.vim.mode() == Mode::Normal && self.vim.pending().is_empty() {
+            match key {
+                Key::Char('/') => return Effect::OpenFind,
+                Key::Char('n') if self.find.is_some() => {
+                    self.jump(true, false);
+                    return Effect::None;
+                }
+                Key::Char('N') if self.find.is_some() => {
+                    self.jump(false, false);
+                    return Effect::None;
+                }
+                _ => {}
+            }
+        }
         if !self.editable
             && !matches!(
                 key,
                 Key::Char('h' | 'j' | 'k' | 'l' | 'w' | 'b' | 'e' | 'G' | 'g' | '0' | '$' | '^')
             )
         {
-            return; // an error message is not a document
+            return Effect::None; // an error message is not a document
         }
         self.vim.handle(&mut self.buffer, key);
         if self.buffer.revision() != self.built_at {
@@ -178,6 +223,168 @@ impl Viewer {
         }
         let line = self.buffer.position_of(self.vim.cursor()).line;
         self.scroll.scroll_to_item(line, ScrollStrategy::Nearest);
+        Effect::None
+    }
+
+    /// Starts (or updates) the search. The cursor goes to the first match at or after it.
+    pub fn set_find(&mut self, query: &FindQuery) {
+        let (finder, error) = match query.compile() {
+            Ok(finder) => (finder, None),
+            Err(message) => (None, Some(message)),
+        };
+        self.find = Some(FindState {
+            finder,
+            error,
+            matches: Arc::default(),
+            built_at: None,
+            visible: true,
+        });
+        self.refresh_matches();
+        self.jump(true, true);
+    }
+
+    /// Hides the highlights; `n` and `N` still use the last search.
+    pub fn hide_find(&mut self) {
+        if let Some(find) = &mut self.find {
+            find.visible = false;
+        }
+    }
+
+    pub fn find_status(&self) -> Option<FindStatus> {
+        let find = self.find.as_ref()?;
+        Some(FindStatus {
+            total: find.matches.len(),
+            current: self.match_at_cursor().map(|i| i + 1),
+            error: find.error.clone(),
+        })
+    }
+
+    /// The text selected in Visual mode, when it is a single line: what the panel starts with.
+    pub fn selected_text(&self) -> Option<String> {
+        let (range, linewise) = self.vim.selection(&self.buffer)?;
+        let text = self.buffer.slice(range);
+        (!linewise && !text.is_empty() && !text.contains('\n')).then_some(text)
+    }
+
+    /// Moves to the next (or previous) match, wrapping around. `inclusive` accepts one that
+    /// starts at the cursor.
+    pub fn jump(&mut self, forward: bool, inclusive: bool) {
+        self.refresh_matches();
+        let Some(find) = &self.find else {
+            return;
+        };
+        let matches = &find.matches;
+        if matches.is_empty() {
+            return;
+        }
+        let cursor = self.vim.cursor();
+        let index = if forward {
+            let next = matches.partition_point(|m| {
+                if inclusive {
+                    m.start < cursor
+                } else {
+                    m.start <= cursor
+                }
+            });
+            if next == matches.len() { 0 } else { next }
+        } else {
+            matches
+                .partition_point(|m| m.start < cursor)
+                .checked_sub(1)
+                .unwrap_or(matches.len() - 1)
+        };
+        let start = matches[index].start;
+        self.vim.set_cursor(&self.buffer, start);
+        let line = self.buffer.position_of(start).line;
+        self.scroll.scroll_to_item(line, ScrollStrategy::Nearest);
+    }
+
+    fn match_at_cursor(&self) -> Option<usize> {
+        let find = self.find.as_ref()?;
+        let cursor = self.vim.cursor();
+        find.matches.binary_search_by_key(&cursor, |m| m.start).ok()
+    }
+
+    /// Recomputes the matches when the text changed since they were found.
+    fn refresh_matches(&mut self) {
+        let revision = self.buffer.revision();
+        let Some(find) = &mut self.find else {
+            return;
+        };
+        if find.built_at == Some(revision) {
+            return;
+        }
+        let text = self.buffer.text();
+        let matches = find.finder.as_ref().map_or_else(Vec::new, |finder| {
+            finder
+                .find_all(&text)
+                .into_iter()
+                .map(|r| self.buffer.offset_of_byte(r.start)..self.buffer.offset_of_byte(r.end))
+                .collect()
+        });
+        find.matches = Arc::new(matches);
+        find.built_at = Some(revision);
+    }
+
+    /// Replaces the match the cursor is on and moves to the next one; with the cursor
+    /// elsewhere it only moves to the next match.
+    pub fn replace_current(&mut self, template: &str) {
+        if !self.editable {
+            return;
+        }
+        self.refresh_matches();
+        let Some(index) = self.match_at_cursor() else {
+            return self.jump(true, true);
+        };
+        let Some(find) = &self.find else {
+            return;
+        };
+        let range = find.matches[index].clone();
+        let Some(finder) = &find.finder else {
+            return;
+        };
+        let text = self.buffer.text();
+        let bytes = self.buffer.byte_of(range.start)..self.buffer.byte_of(range.end);
+        let replacement = finder.replacement(&text, bytes, template);
+        let end = range.start + replacement.chars().count();
+        self.buffer.edit(range, &replacement);
+        self.buffer.commit();
+        self.rebuild();
+        self.vim.set_cursor(&self.buffer, end);
+        self.jump(true, true);
+    }
+
+    /// Replaces every match; one undo step. Returns how many there were.
+    pub fn replace_all(&mut self, template: &str) -> usize {
+        if !self.editable {
+            return 0;
+        }
+        self.refresh_matches();
+        let Some(find) = &self.find else {
+            return 0;
+        };
+        let Some(finder) = &find.finder else {
+            return 0;
+        };
+        let text = self.buffer.text();
+        let edits: Vec<_> = find
+            .matches
+            .iter()
+            .map(|range| {
+                let bytes = self.buffer.byte_of(range.start)..self.buffer.byte_of(range.end);
+                (range.clone(), finder.replacement(&text, bytes, template))
+            })
+            .collect();
+        // from the end, so earlier offsets stay valid
+        for (range, replacement) in edits.iter().rev() {
+            self.buffer.edit(range.clone(), replacement);
+        }
+        self.buffer.commit();
+        self.rebuild();
+        self.refresh_matches();
+        let cursor = self.vim.cursor();
+        self.vim.set_cursor(&self.buffer, cursor);
+        edits.len()
     }
 
     /// Re-highlights the whole text. Fine for ordinary files; large ones will need a debounce.
@@ -219,12 +426,37 @@ impl Viewer {
                 end: self.buffer.position_of(range.end),
                 linewise,
             });
+        let matches = self
+            .find
+            .as_ref()
+            .filter(|find| find.visible)
+            .map(|find| find.matches.clone());
+        let current_match = self
+            .match_at_cursor()
+            .and_then(|i| matches.as_ref().map(|m| m[i].start));
         let list = uniform_list("viewer", lines.len(), move |range, _, _| {
             range
                 .map(|row| {
                     let line = &lines[row];
                     let mut text = line.text.clone();
                     let mut colors = line.colors.clone();
+                    if let Some(matches) = &matches {
+                        let first = matches.partition_point(|m| m.end <= line.start);
+                        for found in &matches[first..] {
+                            if found.start >= line.start + line.chars {
+                                break;
+                            }
+                            let from = found.start.max(line.start) - line.start;
+                            let to = found.end.min(line.start + line.chars) - line.start;
+                            let color = if Some(found.start) == current_match {
+                                0xffc766
+                            } else {
+                                0xfff1a8
+                            };
+                            let range = line.display_byte(from)..line.display_byte(to);
+                            colors = paint(&colors, range, rgb(color).into());
+                        }
+                    }
                     if let Some(range) = selection.and_then(|s| s.on_line(row, line)) {
                         colors = paint(&colors, range, rgb(0xcfe3ff).into());
                     }
@@ -256,7 +488,9 @@ impl Viewer {
         div()
             .flex()
             .flex_col()
-            .size_full()
+            .flex_1()
+            .min_h_0()
+            .w_full()
             .child(
                 div()
                     .px_3()
@@ -381,7 +615,13 @@ fn build_lines(buffer: &Buffer, spans: &[Span]) -> Vec<Line> {
                         .chain(std::iter::once(map[raw.len()]))
                         .collect()
                 });
-            Line { text, colors, cols }
+            Line {
+                start: buffer.line_start(index),
+                chars: buffer.line_len(index),
+                text,
+                colors,
+                cols,
+            }
         })
         .collect()
 }
@@ -491,6 +731,8 @@ mod tests {
     fn plain(text: &str) -> Line {
         let (text, _) = expand_tabs(text);
         Line {
+            start: 0,
+            chars: text.chars().count(),
             text,
             colors: Vec::new(),
             cols: None,
@@ -539,5 +781,80 @@ mod tests {
         assert_eq!(painted[1].1.color, red.color); // keeps its color
         assert!(painted[2].1.background_color.is_some()); // the gap is painted too
         assert!(painted[4].1.background_color.is_none());
+    }
+
+    fn query(pattern: &str) -> FindQuery {
+        FindQuery {
+            pattern: pattern.into(),
+            ..Default::default()
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn find_moves_the_cursor_and_n_steps_through_matches() {
+        let (dir, file) = temp_file("find", "foo bar\nfoo baz\nfoo");
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.set_find(&query("foo"));
+        assert_eq!(viewer.find_status().unwrap().total, 3);
+        assert_eq!(viewer.find_status().unwrap().current, Some(1));
+        viewer.handle_key(Key::Char('n'));
+        assert_eq!(viewer.find_status().unwrap().current, Some(2));
+        viewer.handle_key(Key::Char('N'));
+        viewer.handle_key(Key::Char('N'));
+        assert_eq!(viewer.find_status().unwrap().current, Some(3)); // wraps backwards
+        viewer.handle_key(Key::Char('n'));
+        assert_eq!(viewer.find_status().unwrap().current, Some(1)); // and forwards
+        assert_eq!(viewer.handle_key(Key::Char('/')), Effect::OpenFind);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn replace_current_replaces_one_match_and_moves_on() {
+        let (dir, file) = temp_file("replace-one", "a a a");
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.set_find(&query("a"));
+        viewer.replace_current("bb");
+        assert_eq!(viewer.buffer.text(), "bb a a");
+        assert_eq!(viewer.find_status().unwrap().total, 2);
+        assert_eq!(viewer.find_status().unwrap().current, Some(1));
+        viewer.replace_current("c");
+        assert_eq!(viewer.buffer.text(), "bb c a");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn replace_all_is_one_undo_step() {
+        let (dir, file) = temp_file("replace-all", "x1 x2\nx3");
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.set_find(&FindQuery {
+            pattern: r"x(\d)".into(),
+            regex: true,
+            ..Default::default()
+        });
+        assert_eq!(viewer.replace_all("y$1"), 3);
+        assert_eq!(viewer.buffer.text(), "y1 y2\ny3");
+        viewer.handle_key(Key::Char('u'));
+        assert_eq!(viewer.buffer.text(), "x1 x2\nx3");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn matches_follow_edits_and_invalid_patterns_report_an_error() {
+        let (dir, file) = temp_file("follow", "foo foo");
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.set_find(&query("foo"));
+        viewer.handle_key(Key::Char('d'));
+        viewer.handle_key(Key::Char('w')); // deletes the first foo
+        viewer.jump(true, true);
+        assert_eq!(viewer.find_status().unwrap().total, 1);
+        viewer.set_find(&FindQuery {
+            pattern: "(".into(),
+            regex: true,
+            ..Default::default()
+        });
+        let status = viewer.find_status().unwrap();
+        assert!(status.error.is_some());
+        assert_eq!(status.total, 0);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

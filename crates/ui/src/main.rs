@@ -18,7 +18,7 @@ mod viewer;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
-use viewer::Viewer;
+use viewer::{Effect, FindStatus, Viewer};
 use zide_core::{Change, DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
 use zide_index::FileIndex;
 use zide_search::{
@@ -26,10 +26,25 @@ use zide_search::{
     search_files_with_recent, search_text,
 };
 use zide_stubs::{StubCache, StubKind, StubStore, SymbolHit, search_symbols};
+use zide_text::FindQuery;
 
 actions!(
     zide,
-    [SwitchTab, ToggleRegex, ToggleCase, ToggleWord, OpenSearch]
+    [
+        SwitchTab,
+        ToggleRegex,
+        ToggleCase,
+        ToggleWord,
+        FindInFile,
+        ReplaceInFile,
+        ReplaceAll,
+        FindNext,
+        FindPrevious,
+        GoToFile,
+        GoToSymbol,
+        FindAction,
+        FindInFiles,
+    ]
 );
 
 /// Text search toggles, like IntelliJ's Regex / Match Case / Words buttons.
@@ -78,16 +93,44 @@ struct ActionDef {
 fn action_registry() -> Vec<ActionDef> {
     vec![
         ActionDef {
-            name: "Find Files",
-            synonyms: &["open file", "go to file"],
-            action: None,
+            name: "Go to File",
+            synonyms: &["find files", "open file"],
+            action: Some(Box::new(GoToFile)),
             closes_popup: false,
             run: |ws, _, cx| ws.show_tab(Tab::Files, cx),
         },
         ActionDef {
+            name: "Go to Symbol",
+            synonyms: &["symbols", "function", "class", "method"],
+            action: Some(Box::new(GoToSymbol)),
+            closes_popup: false,
+            run: |ws, _, cx| ws.show_tab(Tab::Symbols, cx),
+        },
+        ActionDef {
+            name: "Find Action",
+            synonyms: &["commands", "actions"],
+            action: Some(Box::new(FindAction)),
+            closes_popup: false,
+            run: |ws, _, cx| ws.show_tab(Tab::Actions, cx),
+        },
+        ActionDef {
+            name: "Find in File",
+            synonyms: &["search in file", "find in editor"],
+            action: Some(Box::new(FindInFile)),
+            closes_popup: true,
+            run: |ws, window, cx| ws.open_find(false, window, cx),
+        },
+        ActionDef {
+            name: "Replace in File",
+            synonyms: &["find and replace", "substitute"],
+            action: Some(Box::new(ReplaceInFile)),
+            closes_popup: true,
+            run: |ws, window, cx| ws.open_find(true, window, cx),
+        },
+        ActionDef {
             name: "Find in Files",
             synonyms: &["grep", "ripgrep", "search text"],
-            action: None,
+            action: Some(Box::new(FindInFiles)),
             closes_popup: false,
             run: |ws, _, cx| ws.show_tab(Tab::Text, cx),
         },
@@ -134,6 +177,15 @@ fn action_registry() -> Vec<ActionDef> {
             run: |_, _, cx| cx.quit(),
         },
     ]
+}
+
+/// The find / replace bar of the editor (not a popup: it lives in the window layout).
+struct FindPanel {
+    find: Entity<InputState>,
+    replace: Entity<InputState>,
+    show_replace: bool,
+    options: TextOptions,
+    _subscriptions: Vec<Subscription>,
 }
 
 /// What the background text search tells the UI.
@@ -192,6 +244,8 @@ struct Workspace {
     index: Option<Arc<FileIndex>>,
     popup: Option<Popup>,
     viewer: Option<Viewer>,
+    /// The find / replace panel above the editor.
+    find: Option<FindPanel>,
     /// Bumped on every search; results of an older search are dropped.
     search_generation: u64,
     cancel_search: Option<Arc<AtomicBool>>,
@@ -239,6 +293,7 @@ impl Workspace {
             index: None,
             popup: None,
             viewer: None,
+            find: None,
             search_generation: 0,
             cancel_search: None,
             recent: Vec::new(),
@@ -436,13 +491,145 @@ impl Workspace {
 
     fn toggle_option(&mut self, toggle: fn(&mut TextOptions), cx: &mut Context<Self>) {
         let Some(popup) = &mut self.popup else {
-            return;
+            return self.toggle_find_option(toggle, cx);
         };
         if popup.tab != Tab::Text {
             return;
         }
         toggle(&mut popup.options);
         self.search_again(cx);
+    }
+
+    /// Opens the find panel (with the replace row when `replace`) for the open file.
+    fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(viewer) = &self.viewer else {
+            return;
+        };
+        let selected = viewer.selected_text();
+        if self.popup.is_some() {
+            self.close_popup(window, cx);
+        }
+        if self.find.is_none() {
+            let find = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+            let replace_input = cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
+            let on_find = cx.subscribe(&find, |this, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => this.run_find(cx),
+                InputEvent::PressEnter { shift, .. } => this.find_step(!*shift, cx),
+                _ => {}
+            });
+            let on_replace = cx.subscribe(&replace_input, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.replace_one(cx);
+                }
+            });
+            self.find = Some(FindPanel {
+                find,
+                replace: replace_input,
+                show_replace: false,
+                options: TextOptions::default(),
+                _subscriptions: vec![on_find, on_replace],
+            });
+        }
+        if let Some(panel) = &mut self.find {
+            panel.show_replace |= replace;
+            if let Some(text) = selected {
+                panel
+                    .find
+                    .update(cx, |state, cx| state.set_value(text, window, cx));
+            }
+            panel.find.update(cx, |state, cx| state.focus(window, cx));
+        }
+        self.run_find(cx);
+        cx.notify();
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(viewer) = &mut self.viewer {
+            viewer.hide_find();
+        }
+        self.find = None;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Searches the open file for what the panel says.
+    fn run_find(&mut self, cx: &mut Context<Self>) {
+        let (Some(panel), Some(viewer)) = (&self.find, &mut self.viewer) else {
+            return;
+        };
+        viewer.set_find(&FindQuery {
+            pattern: panel.find.read(cx).value().to_string(),
+            case_sensitive: panel.options.case_sensitive,
+            whole_word: panel.options.whole_word,
+            regex: panel.options.regex,
+        });
+        cx.notify();
+    }
+
+    fn find_step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if let Some(viewer) = &mut self.viewer {
+            viewer.jump(forward, false);
+            cx.notify();
+        }
+    }
+
+    fn replace_one(&mut self, cx: &mut Context<Self>) {
+        let (Some(panel), Some(viewer)) = (&self.find, &mut self.viewer) else {
+            return;
+        };
+        viewer.replace_current(panel.replace.read(cx).value().as_ref());
+        cx.notify();
+    }
+
+    fn replace_everywhere(&mut self, cx: &mut Context<Self>) {
+        let (Some(panel), Some(viewer)) = (&self.find, &mut self.viewer) else {
+            return;
+        };
+        viewer.replace_all(panel.replace.read(cx).value().as_ref());
+        cx.notify();
+    }
+
+    fn toggle_find_option(&mut self, toggle: fn(&mut TextOptions), cx: &mut Context<Self>) {
+        if let Some(panel) = &mut self.find {
+            toggle(&mut panel.options);
+            self.run_find(cx);
+        }
+    }
+
+    /// Opens the popup on `tab` (Go to File, Go to Symbol, Find Action, Find in Files).
+    fn open_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popup.is_none() {
+            self.open_popup(window, cx);
+        }
+        self.show_tab(tab, cx);
+    }
+
+    /// A key typed while no popup is open: the find panel or the editor gets it.
+    fn editor_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let in_panel = self.find.as_ref().is_some_and(|panel| {
+            [&panel.find, &panel.replace]
+                .iter()
+                .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
+        });
+        if in_panel {
+            if event.keystroke.key == "escape" {
+                self.close_find(window, cx);
+                cx.stop_propagation();
+            }
+            return; // the input handles its own keys
+        }
+        let (Some(viewer), Some(key)) = (&mut self.viewer, vim_key(event)) else {
+            return;
+        };
+        let effect = viewer.handle_key(key);
+        if key == zide_vim::Key::Esc && self.find.is_some() {
+            self.close_find(window, cx);
+        }
+        if effect == Effect::OpenFind {
+            self.open_find(false, window, cx);
+        }
+        cx.stop_propagation();
+        cx.notify();
     }
 
     fn switch_tab(&mut self, cx: &mut Context<Self>) {
@@ -805,12 +992,29 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleWord, _, cx| {
                 this.toggle_option(|o| o.whole_word = !o.whole_word, cx)
             }))
-            .on_action(cx.listener(|this, _: &OpenSearch, window, cx| {
-                if this.popup.is_none() {
-                    this.open_popup(window, cx);
-                }
-                this.show_tab(Tab::Text, cx); // Find in Files
+            .on_action(
+                cx.listener(|this, _: &FindInFile, window, cx| this.open_find(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ReplaceInFile, window, cx| this.open_find(true, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ReplaceAll, _, cx| this.replace_everywhere(cx)))
+            .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find_step(true, cx)))
+            .on_action(cx.listener(|this, _: &FindPrevious, _, cx| this.find_step(false, cx)))
+            .on_action(
+                cx.listener(|this, _: &GoToFile, window, cx| this.open_tab(Tab::Files, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &GoToSymbol, window, cx| {
+                this.open_tab(Tab::Symbols, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &FindAction, window, cx| {
+                this.open_tab(Tab::Actions, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &FindInFiles, window, cx| {
+                    this.open_tab(Tab::Text, window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &SwitchTab, _, cx| {
                 if this.popup.is_some() {
                     this.switch_tab(cx);
@@ -831,11 +1035,7 @@ impl Render for Workspace {
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.detector.key_pressed();
                 let Some(popup) = &mut this.popup else {
-                    if let (Some(viewer), Some(key)) = (&mut this.viewer, vim_key(event)) {
-                        viewer.handle_key(key);
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
+                    this.editor_key(event, window, cx);
                     return;
                 };
                 match event.keystroke.key.as_str() {
@@ -851,7 +1051,12 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .child(match &self.viewer {
-                Some(viewer) => viewer.render(),
+                Some(viewer) => div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .children(self.find_panel(cx))
+                    .child(viewer.render()),
                 None => div().p_4().child(
                     "Press Shift twice to open the popup. Tab switches tabs, Esc closes it.",
                 ),
@@ -994,6 +1199,117 @@ impl Render for Workspace {
     }
 }
 
+impl Workspace {
+    fn find_panel(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let panel = self.find.as_ref()?;
+        let status = self.viewer.as_ref().and_then(Viewer::find_status);
+        let options = panel.options;
+        let pattern_empty = panel.find.read(cx).value().is_empty();
+        let summary = match &status {
+            Some(FindStatus { error: Some(e), .. }) => e.clone(),
+            Some(_) if pattern_empty => String::new(),
+            Some(FindStatus { total: 0, .. }) => "No matches".to_string(),
+            Some(FindStatus {
+                total,
+                current: Some(i),
+                ..
+            }) => format!("{i}/{total}"),
+            Some(FindStatus { total, .. }) => format!("{total} matches"),
+            None => String::new(),
+        };
+        let failed = status
+            .as_ref()
+            .is_some_and(|s| s.error.is_some() || (s.total == 0 && !pattern_empty));
+        let mut column =
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_3()
+                .py_1()
+                .border_b_1()
+                .border_color(rgb(0xd0d0d0))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().flex_1().child(Input::new(&panel.find)))
+                        .child(
+                            div()
+                                .min_w(px(90.))
+                                .text_color(rgb(if failed { 0xc02020 } else { 0x777777 }))
+                                .child(summary),
+                        )
+                        .child(
+                            small_button("find-case", "Cc", options.case_sensitive).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.toggle_find_option(
+                                        |o| o.case_sensitive = !o.case_sensitive,
+                                        cx,
+                                    )
+                                }),
+                            ),
+                        )
+                        .child(small_button("find-word", "W", options.whole_word).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_find_option(|o| o.whole_word = !o.whole_word, cx)
+                            }),
+                        ))
+                        .child(small_button("find-regex", ".*", options.regex).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_find_option(|o| o.regex = !o.regex, cx)
+                            }),
+                        ))
+                        .child(
+                            small_button("find-prev", "↑", false)
+                                .on_click(cx.listener(|this, _, _, cx| this.find_step(false, cx))),
+                        )
+                        .child(
+                            small_button("find-next", "↓", false)
+                                .on_click(cx.listener(|this, _, _, cx| this.find_step(true, cx))),
+                        )
+                        .child(small_button("find-close", "✕", false).on_click(
+                            cx.listener(|this, _, window, cx| this.close_find(window, cx)),
+                        )),
+                );
+        if panel.show_replace {
+            column = column.child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().child(Input::new(&panel.replace)))
+                    .child(
+                        small_button("replace-one", "Replace", false)
+                            .on_click(cx.listener(|this, _, _, cx| this.replace_one(cx))),
+                    )
+                    .child(
+                        small_button("replace-all", "Replace all", false)
+                            .on_click(cx.listener(|this, _, _, cx| this.replace_everywhere(cx))),
+                    ),
+            );
+        }
+        Some(column)
+    }
+}
+
+fn small_button(id: &'static str, label: &'static str, on: bool) -> Stateful<Div> {
+    let button = div()
+        .id(id)
+        .px_2()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(0xc8c8c8))
+        .cursor_pointer()
+        .child(label);
+    if on {
+        button.bg(rgb(0xd6e4ff)).border_color(rgb(0x1a5fd0))
+    } else {
+        button
+    }
+}
+
 /// The editor key for a key press, `None` for chords the editor does not handle.
 fn vim_key(event: &KeyDownEvent) -> Option<zide_vim::Key> {
     use zide_vim::Key;
@@ -1003,6 +1319,10 @@ fn vim_key(event: &KeyDownEvent) -> Option<zide_vim::Key> {
         return None;
     }
     if modifiers.control {
+        // Ctrl+R is Replace here (IntelliJ), so redo moves to Ctrl+Y and Ctrl+Shift+Z
+        if keystroke.key == "y" || (keystroke.key == "z" && modifiers.shift) {
+            return Some(Key::Ctrl('r'));
+        }
         let mut chars = keystroke.key.chars();
         return match (chars.next(), chars.next()) {
             (Some(c), None) => Some(Key::Ctrl(c)),
@@ -1179,7 +1499,17 @@ fn main() {
         // Root binds Tab to focus-next; a deeper context wins over it.
         cx.bind_keys([
             KeyBinding::new("tab", SwitchTab, Some("Workspace")),
-            KeyBinding::new("ctrl-f", OpenSearch, Some("Workspace")),
+            // IntelliJ's keymap
+            KeyBinding::new("ctrl-f", FindInFile, Some("Workspace")),
+            KeyBinding::new("ctrl-r", ReplaceInFile, Some("Workspace")),
+            KeyBinding::new("ctrl-alt-enter", ReplaceAll, Some("Workspace")),
+            KeyBinding::new("f3", FindNext, Some("Workspace")),
+            KeyBinding::new("shift-f3", FindPrevious, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-f", FindInFiles, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-n", GoToFile, Some("Workspace")),
+            KeyBinding::new("ctrl-alt-shift-n", GoToSymbol, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-a", FindAction, Some("Workspace")),
+            KeyBinding::new("alt-x", ToggleRegex, Some("Workspace")),
             KeyBinding::new("alt-r", ToggleRegex, Some("Workspace")),
             KeyBinding::new("alt-c", ToggleCase, Some("Workspace")),
             KeyBinding::new("alt-w", ToggleWord, Some("Workspace")),

@@ -108,7 +108,7 @@ mod tests {
             find("a.c", "A.C abc a.c", false, false, false),
             [0..3, 8..11]
         );
-        assert_eq!(find("a.c", "A.C abc a.c", true, false, false), [8..11]);
+        assert_eq!(find("a.c", "A.C abc a.c", true, false, false), vec![8..11]);
     }
 
     #[test]
