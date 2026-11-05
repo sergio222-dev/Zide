@@ -1,0 +1,55 @@
+name: Release
+
+# Push a tag like v0.2.0 (it must match the workspace version) to publish a release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    # old glibc: the binary runs on most current distributions
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System libraries (GPUI)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libxkbcommon-dev libwayland-dev \
+            libxcb1-dev libx11-xcb-dev libfontconfig-dev libasound2-dev libvulkan-dev
+      - name: Tag matches the crate version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          built=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="zide-ui"))')
+          test "$version" = "$built" || { echo "tag $version != crate $built"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - run: cargo test --workspace
+      - run: cargo build --release -p zide-ui
+      - name: Package
+        run: |
+          name="zide-${VERSION}-x86_64-unknown-linux-gnu"
+          install -D target/release/zide "dist/${name}/zide"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          echo "ARCHIVE=dist/${name}.tar.gz" >> "$GITHUB_ENV"
+      - name: Sign
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          test -n "$MINISIGN_KEY" || { echo "secret MINISIGN_SECRET_KEY is not set"; exit 1; }
+          sudo apt-get install -y minisign
+          printf '%s' "$MINISIGN_KEY" > "$RUNNER_TEMP/zide.key"
+          printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s "$RUNNER_TEMP/zide.key" -m "$ARCHIVE"
+          rm "$RUNNER_TEMP/zide.key"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "$ARCHIVE" "$ARCHIVE.minisig" --title "Zide $VERSION" --generate-notes
