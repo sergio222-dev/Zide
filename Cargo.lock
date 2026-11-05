@@ -8337,6 +8337,9 @@ dependencies = [
 [[package]]
 name = "zide-core"
 version = "0.0.0"
+dependencies = [
+ "ignore",
+]
 
 [[package]]
 name = "zide-index"
@@ -8349,6 +8352,12 @@ version = "0.0.0"
 [[package]]
 name = "zide-search"
 version = "0.0.0"
+dependencies = [
+ "rayon",
+ "zide-core",
+ "zide-index",
+ "zide-matcher",
+]
 
 [[package]]
 name = "zide-ui"

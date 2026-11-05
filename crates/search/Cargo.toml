@@ -6,3 +6,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+rayon = "1"
+zide-index = { path = "../index" }
+zide-matcher = { path = "../matcher" }
+
+[dev-dependencies]
+zide-core = { path = "../core" }

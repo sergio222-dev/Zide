@@ -1,14 +1,23 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+/// In-memory list of the project's files, as `/`-separated paths relative to the project root.
+#[derive(Debug, Default, Clone)]
+pub struct FileIndex {
+    paths: Vec<String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl FileIndex {
+    pub fn new(paths: Vec<String>) -> Self {
+        Self { paths }
+    }
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    pub fn paths(&self) -> &[String] {
+        &self.paths
+    }
+
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
     }
 }
