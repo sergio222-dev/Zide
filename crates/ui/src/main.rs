@@ -27,7 +27,10 @@ use zide_search::{
 };
 use zide_stubs::{StubCache, StubKind, StubStore, SymbolHit, search_symbols};
 
-actions!(zide, [SwitchTab, ToggleRegex, ToggleCase, ToggleWord]);
+actions!(
+    zide,
+    [SwitchTab, ToggleRegex, ToggleCase, ToggleWord, OpenSearch]
+);
 
 /// Text search toggles, like IntelliJ's Regex / Match Case / Words buttons.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -481,7 +484,7 @@ impl Workspace {
             Tab::Actions => None,
         };
         if let Some((file, line)) = target {
-            let viewer = Viewer::open(&self.root, &index.paths()[file]);
+            let mut viewer = Viewer::open(&self.root, &index.paths()[file]);
             if let Some(line) = line {
                 viewer.go_to_line(line);
             }
@@ -790,6 +793,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleWord, _, cx| {
                 this.toggle_option(|o| o.whole_word = !o.whole_word, cx)
             }))
+            .on_action(cx.listener(|this, _: &OpenSearch, window, cx| {
+                if this.popup.is_none() {
+                    this.open_popup(window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &SwitchTab, _, cx| {
                 if this.popup.is_some() {
                     this.switch_tab(cx);
@@ -810,6 +818,11 @@ impl Render for Workspace {
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.detector.key_pressed();
                 let Some(popup) = &mut this.popup else {
+                    if let (Some(viewer), Some(key)) = (&mut this.viewer, vim_key(event)) {
+                        viewer.handle_key(key);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
                     return;
                 };
                 match event.keystroke.key.as_str() {
@@ -965,6 +978,35 @@ impl Render for Workspace {
         }
         root = root.child(frame);
         root
+    }
+}
+
+/// The editor key for a key press, `None` for chords the editor does not handle.
+fn vim_key(event: &KeyDownEvent) -> Option<zide_vim::Key> {
+    use zide_vim::Key;
+    let keystroke = &event.keystroke;
+    let modifiers = keystroke.modifiers;
+    if modifiers.alt || modifiers.platform {
+        return None;
+    }
+    if modifiers.control {
+        let mut chars = keystroke.key.chars();
+        return match (chars.next(), chars.next()) {
+            (Some(c), None) => Some(Key::Ctrl(c)),
+            _ => None,
+        };
+    }
+    match keystroke.key.as_str() {
+        "escape" => Some(Key::Esc),
+        "enter" => Some(Key::Enter),
+        "backspace" => Some(Key::Backspace),
+        "space" => Some(Key::Char(' ')),
+        "tab" => Some(Key::Char('\t')),
+        _ => keystroke
+            .key_char
+            .as_ref()
+            .and_then(|text| text.chars().next())
+            .map(Key::Char),
     }
 }
 
@@ -1124,6 +1166,7 @@ fn main() {
         // Root binds Tab to focus-next; a deeper context wins over it.
         cx.bind_keys([
             KeyBinding::new("tab", SwitchTab, Some("Workspace")),
+            KeyBinding::new("ctrl-f", OpenSearch, Some("Workspace")),
             KeyBinding::new("alt-r", ToggleRegex, Some("Workspace")),
             KeyBinding::new("alt-c", ToggleCase, Some("Workspace")),
             KeyBinding::new("alt-w", ToggleWord, Some("Workspace")),

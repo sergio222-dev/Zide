@@ -1,10 +1,11 @@
-//! Read-only file viewer: line numbers and syntax colors.
+//! File editor view: line numbers, syntax colors, a block cursor and Vim keys.
 
 use std::{fs, ops::Range, path::Path, sync::Arc};
 
 use gpui_kit::*;
-use zide_syntax::{Class, Span, highlight, language_for_path};
-use zide_text::Buffer;
+use zide_syntax::{Class, LanguageId, Span, highlight, language_for_path};
+use zide_text::{Buffer, Revision};
+use zide_vim::{Key, Mode, Vim};
 
 /// Files larger than this are not opened.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -18,7 +19,12 @@ struct Line {
 
 pub struct Viewer {
     path: String,
+    buffer: Buffer,
+    vim: Vim,
+    language: Option<LanguageId>,
+    /// Display lines of `buffer` as of `built_at`.
     lines: Arc<Vec<Line>>,
+    built_at: Revision,
     scroll: UniformListScrollHandle,
 }
 
@@ -33,29 +39,78 @@ impl Viewer {
         };
         let text = text.unwrap_or_else(|message| message);
         let buffer = Buffer::new(&text);
-        let spans = language_for_path(relative)
-            .map(|language| highlight(language, &text))
-            .unwrap_or_default();
-        Self {
+        let language = language_for_path(relative);
+        let mut viewer = Self {
             path: relative.to_string(),
-            lines: Arc::new(build_lines(&buffer, &spans)),
+            vim: Vim::default(),
+            language,
+            lines: Arc::default(),
+            built_at: buffer.revision(),
+            buffer,
             scroll: UniformListScrollHandle::new(),
-        }
+        };
+        viewer.rebuild();
+        viewer
     }
 
-    /// Brings 1-based `line` to the top.
-    pub fn go_to_line(&self, line: u32) {
+    /// Puts the cursor on 1-based `line` and brings it into view.
+    pub fn go_to_line(&mut self, line: u32) {
         let row = (line as usize).saturating_sub(1).min(self.lines.len() - 1);
+        let offset = self.buffer.line_start(row);
+        self.vim.set_cursor(&self.buffer, offset);
+        self.vim.handle(&mut self.buffer, Key::Char('^')); // first non-blank of the line
         self.scroll.scroll_to_item(row, ScrollStrategy::Top);
+    }
+
+    pub fn handle_key(&mut self, key: Key) {
+        self.vim.handle(&mut self.buffer, key);
+        if self.buffer.revision() != self.built_at {
+            self.rebuild();
+        }
+        let line = self.buffer.position_of(self.vim.cursor()).line;
+        self.scroll.scroll_to_item(line, ScrollStrategy::Nearest);
+    }
+
+    /// Re-highlights the whole text. Fine for ordinary files; large ones will need a debounce.
+    fn rebuild(&mut self) {
+        let spans = self
+            .language
+            .map(|language| highlight(language, &self.buffer.text()))
+            .unwrap_or_default();
+        self.lines = Arc::new(build_lines(&self.buffer, &spans));
+        self.built_at = self.buffer.revision();
+    }
+
+    /// The cursor line and, in display bytes of that line, the cell the cursor covers.
+    fn cursor_cell(&self) -> (usize, Range<usize>) {
+        let position = self.buffer.position_of(self.vim.cursor());
+        let raw = self.buffer.line(position.line);
+        let (_, map) = expand_tabs(&raw);
+        let byte = raw
+            .char_indices()
+            .nth(position.column)
+            .map_or(raw.len(), |(b, _)| b);
+        let end = raw[byte..]
+            .chars()
+            .next()
+            .map_or(byte, |c| byte + c.len_utf8());
+        (position.line, map[byte]..map[end].max(map[byte] + 1))
     }
 
     pub fn render(&self) -> Div {
         let lines = self.lines.clone();
         let digits = lines.len().to_string().len();
+        let (cursor_line, cursor_cell) = self.cursor_cell();
+        let insert = self.vim.mode() == Mode::Insert;
         let list = uniform_list("viewer", lines.len(), move |range, _, _| {
             range
                 .map(|row| {
                     let line = &lines[row];
+                    let (text, colors) = if row == cursor_line {
+                        with_cursor(line, cursor_cell.clone(), insert)
+                    } else {
+                        (line.text.clone(), line.colors.clone())
+                    };
                     div()
                         .flex()
                         .h(px(ROW_HEIGHT))
@@ -68,9 +123,7 @@ impl Viewer {
                                 .text_color(rgb(0x888888))
                                 .child((row + 1).to_string()),
                         )
-                        .child(
-                            StyledText::new(line.text.clone()).with_highlights(line.colors.clone()),
-                        )
+                        .child(StyledText::new(text).with_highlights(colors))
                 })
                 .collect()
         })
@@ -94,7 +147,61 @@ impl Viewer {
                     .whitespace_nowrap()
                     .child(list),
             )
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .flex()
+                    .gap_3()
+                    .text_color(rgb(0x555555))
+                    .child(match self.vim.mode() {
+                        Mode::Normal => "NORMAL",
+                        Mode::Insert => "INSERT",
+                    })
+                    .child(self.vim.pending())
+                    .child(div().ml_auto().child({
+                        let at = self.buffer.position_of(self.vim.cursor());
+                        format!("{}:{}", at.line + 1, at.column + 1)
+                    })),
+            )
     }
+}
+
+/// The text of `line` with the cursor cell painted over its colors. At the end of the line
+/// the cell is an extra space.
+fn with_cursor(
+    line: &Line,
+    cell: Range<usize>,
+    insert: bool,
+) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
+    let mut text = line.text.clone();
+    if cell.start >= text.len() {
+        text.push(' ');
+    }
+    let paint = |mut style: HighlightStyle| {
+        style.background_color = Some(rgb(if insert { 0xb3d4ff } else { 0xc8c8c8 }).into());
+        style
+    };
+    let mut colors = Vec::new();
+    let mut under = HighlightStyle::default();
+    let mut right = None;
+    for (range, style) in &line.colors {
+        if range.end <= cell.start || range.start >= cell.end {
+            colors.push((range.clone(), *style));
+            continue;
+        }
+        under = *style;
+        if range.start < cell.start {
+            colors.push((range.start..cell.start, *style));
+        }
+        if range.end > cell.end {
+            right = Some((cell.end..range.end, *style));
+        }
+    }
+    colors.push((cell.start..cell.end, paint(under)));
+    colors.extend(right);
+    colors.sort_by_key(|(range, _)| range.start);
+    (text, colors)
 }
 
 fn style(class: Class) -> HighlightStyle {
