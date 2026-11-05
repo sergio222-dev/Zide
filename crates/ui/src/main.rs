@@ -22,6 +22,8 @@ use zide_search::{
     FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_files_cancellable, search_text,
 };
 
+actions!(zide, [SwitchTab]);
+
 const MAX_FILE_RESULTS: usize = 200;
 const MAX_TEXT_RESULTS: usize = 1000;
 
@@ -375,7 +377,13 @@ impl Render for Workspace {
         let mut root = div()
             .id("workspace")
             .size_full()
+            .key_context("Workspace")
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &SwitchTab, _, cx| {
+                if this.popup.is_some() {
+                    this.switch_tab(cx);
+                }
+            }))
             .on_modifiers_changed(
                 cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
                     let m = event.modifiers;
@@ -395,7 +403,6 @@ impl Render for Workspace {
                 };
                 match event.keystroke.key.as_str() {
                     "escape" => this.close_popup(window, cx),
-                    "tab" => this.switch_tab(cx),
                     "down" => popup.move_selection(1),
                     "up" => popup.move_selection(-1),
                     "pagedown" => popup.move_selection(10),
@@ -542,6 +549,8 @@ fn main() {
 
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
+        // Root binds Tab to focus-next; a deeper context wins over it.
+        cx.bind_keys([KeyBinding::new("tab", SwitchTab, Some("Workspace"))]);
         gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
             let workspace = cx.new(|cx| Workspace::new(root, cx));
             workspace.read(cx).focus.clone().focus(window, cx);
