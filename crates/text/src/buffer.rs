@@ -70,6 +70,10 @@ impl Buffer {
         self.rope.len_lines()
     }
 
+    pub fn char_at(&self, offset: usize) -> Option<char> {
+        self.rope.get_char(offset)
+    }
+
     pub fn text(&self) -> String {
         self.rope.to_string()
     }
