@@ -695,6 +695,40 @@ impl Workspace {
         self.semantic_usages(word, cx);
     }
 
+    /// Starts the language server of `path`'s language in the background, once, so it has
+    /// loaded the project by the time it is asked something.
+    fn warm_server(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some((spec, _)) = server_for(path) else {
+            return;
+        };
+        if self.lsp.contains_key(spec.name) {
+            return;
+        }
+        self.lsp.insert(spec.name, LspState::Starting);
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let started = cx
+                .background_executor()
+                .spawn(async move { Client::start(spec, &root).map(Arc::new) })
+                .await;
+            this.update(cx, |this, cx| {
+                match started {
+                    Ok(client) => {
+                        this.lsp.insert(spec.name, LspState::Ready(client));
+                    }
+                    Err(e) => {
+                        eprintln!("{}: {e}", spec.command);
+                        this.lsp
+                            .insert(spec.name, LspState::Unavailable(setup_hint(spec, &e)));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Asks the language server of the open file for the real usages of the symbol under the
     /// cursor and swaps them in for the text matches when they arrive.
     fn semantic_usages(&mut self, word: String, cx: &mut Context<Self>) {
@@ -704,73 +738,39 @@ impl Workspace {
         let Some((spec, language)) = server_for(viewer.path()) else {
             return; // no server for this language: the text matches stand
         };
+        let client = match self.lsp.get(spec.name) {
+            Some(LspState::Ready(client)) => client.clone(),
+            Some(LspState::Unavailable(why)) => {
+                return self.set_usages_note(&word, format!("{why} · text matches"), cx);
+            }
+            Some(LspState::Starting) | None => {
+                let path = viewer.path().to_string();
+                self.warm_server(&path, cx); // it died, or was never asked for: start it
+                let note = format!("{} is starting · text matches", spec.command);
+                return self.set_usages_note(&word, note, cx);
+            }
+        };
         let (line, character) = viewer.lsp_position();
         let text = viewer.text();
         let path = self.root.join(viewer.path());
         let root = self.root.clone();
-        let running = match self.lsp.get(spec.name) {
-            Some(LspState::Ready(client)) => Some(client.clone()),
-            Some(LspState::Starting) => {
-                return self.set_usages_note(
-                    &word,
-                    format!("{} is starting · text matches", spec.command),
-                    cx,
-                );
-            }
-            Some(LspState::Unavailable(why)) => {
-                return self.set_usages_note(&word, format!("{why} · text matches"), cx);
-            }
-            None => None,
-        };
-        if running.is_none() {
-            self.lsp.insert(spec.name, LspState::Starting);
-        }
         cx.spawn(async move |this, cx| {
             let started = Instant::now();
             let outcome = cx
                 .background_executor()
-                .spawn({
-                    let root = root.clone();
-                    async move {
-                        let client = match running {
-                            Some(client) => client,
-                            None => Arc::new(Client::start(spec, &root)?),
-                        };
-                        client.sync(&path, language, &text)?;
-                        let found = client.references(&path, line, character)?;
-                        Ok::<_, LspError>((client, usages::hits(&root, &index, &found)))
-                    }
+                .spawn(async move {
+                    client.sync(&path, language, &text)?;
+                    let found = client.references(&path, line, character)?;
+                    Ok::<_, LspError>(usages::hits(&root, &index, &found))
                 })
                 .await;
             eprintln!("usages from {} in {:?}", spec.command, started.elapsed());
             this.update(cx, |this, cx| {
-                let result = match outcome {
-                    Ok((client, hits)) => {
-                        this.lsp.insert(spec.name, LspState::Ready(client));
-                        Ok(hits)
-                    }
-                    Err(e) => {
-                        let starting = matches!(this.lsp.get(spec.name), Some(LspState::Starting));
-                        match &e {
-                            // it never came up: say why and do not retry every time
-                            LspError::NotInstalled(_) | LspError::Server { .. } if starting => {
-                                this.lsp
-                                    .insert(spec.name, LspState::Unavailable(e.to_string()));
-                            }
-                            // it died, or hung while starting: next time, start anew
-                            LspError::Closed | LspError::Io(_) => {
-                                this.lsp.remove(spec.name);
-                            }
-                            LspError::Timeout if starting => {
-                                this.lsp.remove(spec.name);
-                            }
-                            // a refusal of this one request (content modified): the server stays
-                            _ => {}
-                        }
-                        Err(e)
-                    }
-                };
-                this.apply_usages(&word, spec.command, result, cx);
+                // a dead server is started anew by the next request
+                if matches!(outcome, Err(LspError::Closed | LspError::Io(_))) {
+                    this.lsp.remove(spec.name);
+                }
+                this.apply_usages(&word, spec.command, outcome, cx);
             })
             .ok();
         })
@@ -1067,6 +1067,7 @@ impl Workspace {
     /// comes back as it was, unless it changed on disk in the meantime.
     fn open_file(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
         self.autosave();
+        self.warm_server(path, cx);
         // every way of opening a file (popup, tree) counts as a recent one
         if let Some(file) = self
             .index
@@ -1786,6 +1787,14 @@ fn vim_key(event: &KeyDownEvent) -> Option<zide_vim::Key> {
             .and_then(|text| text.chars().next())
             .map(Key::Char),
     }
+}
+
+/// Why a language server is not available and what to do about it.
+fn setup_hint(spec: &zide_lsp::ServerSpec, error: &LspError) -> String {
+    format!(
+        "{error}. Setup: {} (docs/language-servers.md)",
+        spec.install
+    )
 }
 
 fn kind_label(kind: StubKind) -> &'static str {

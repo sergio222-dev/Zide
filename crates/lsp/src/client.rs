@@ -23,18 +23,22 @@ pub struct ServerSpec {
     pub name: &'static str,
     pub command: &'static str,
     pub args: &'static [&'static str],
+    /// What to run to get it, shown when the server is missing.
+    pub install: &'static str,
 }
 
 const RUST: ServerSpec = ServerSpec {
     name: "rust",
     command: "rust-analyzer",
     args: &[],
+    install: "rustup component add rust-analyzer",
 };
 
 const TYPESCRIPT: ServerSpec = ServerSpec {
     name: "typescript",
     command: "typescript-language-server",
     args: &["--stdio"],
+    install: "npm install -g typescript-language-server typescript",
 };
 
 /// The server for the file at `path` and the `languageId` it is opened with.
@@ -408,6 +412,7 @@ mod tests {
             name: "none",
             command: "zide-no-such-language-server",
             args: &[],
+            install: "",
         };
         let error = Client::start(&spec, Path::new("/tmp")).err().unwrap();
         assert!(matches!(
