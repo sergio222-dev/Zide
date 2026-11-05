@@ -14,7 +14,7 @@ Zide looks for each server in this order:
 | Language | Files | Command | Install (pick one) |
 | --- | --- | --- | --- |
 | Rust | `.rs` | `rust-analyzer` | `rustup component add rust-analyzer` (on the `PATH`), or put the binary in `<folder>/bin/` |
-| TypeScript / JavaScript | `.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs` | `typescript-language-server --stdio` | `npm install --prefix ~/.local/share/zide/servers typescript-language-server typescript` (Zide's folder), or `npm install -g typescript-language-server typescript` (`PATH`) |
+| TypeScript / JavaScript | `.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs` | `typescript-language-server --stdio` | `npm install --prefix ~/.local/share/zide/servers typescript-language-server typescript@5` (Zide's folder), or `npm install -g typescript-language-server typescript@5` (`PATH`) |
 
 The npm servers are Node scripts: `node` has to be on the `PATH` when Zide runs them.
 
@@ -33,3 +33,12 @@ If it prints an error and exits, Zide reports the same problem.
   of that language, so by the time you ask it has usually finished.
 
 Restart Zide after installing a server.
+
+## TypeScript 7
+
+`typescript@latest` is now TypeScript 7 (the native port), which has no `tsserver.js`, and
+`typescript-language-server` cannot use it yet: it fails with *"Could not find a valid TypeScript
+installation"*. Install `typescript@5` next to the server (as in the table above). A project's own
+`typescript` in its `node_modules` is used first when it is a version the server supports; the
+copy in Zide's folder is the fallback for projects that have none, or where it is not at the
+folder you opened (for example a monorepo opened from its top folder).

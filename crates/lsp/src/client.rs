@@ -39,7 +39,7 @@ const TYPESCRIPT: ServerSpec = ServerSpec {
     name: "typescript",
     command: "typescript-language-server",
     args: &["--stdio"],
-    install: "npm install --prefix {dir} typescript-language-server typescript",
+    install: "npm install --prefix {dir} typescript-language-server typescript@5",
 };
 
 /// The server for the file at `path` and the `languageId` it is opened with.
