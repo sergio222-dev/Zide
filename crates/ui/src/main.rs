@@ -24,8 +24,29 @@ struct Popup {
     input: Entity<InputState>,
     query: String,
     hits: Arc<Vec<FileHit>>,
+    selected: usize,
+    scroll: UniformListScrollHandle,
     opened_at: Option<Instant>,
     _subscription: Subscription,
+}
+
+impl Popup {
+    fn set_hits(&mut self, hits: Vec<FileHit>) {
+        self.hits = Arc::new(hits);
+        self.select(0);
+    }
+
+    fn select(&mut self, row: usize) {
+        self.selected = row;
+        if !self.hits.is_empty() {
+            self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+        }
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let last = self.hits.len().saturating_sub(1);
+        self.select(self.selected.saturating_add_signed(delta).min(last));
+    }
 }
 
 struct Workspace {
@@ -90,10 +111,24 @@ impl Workspace {
             input,
             query: String::new(),
             hits: Arc::default(),
+            selected: 0,
+            scroll: UniformListScrollHandle::new(),
             opened_at: Some(Instant::now()),
             _subscription: subscription,
         });
         self.search("", cx);
+    }
+
+    /// There is no editor yet: "opening" a file logs it and closes the popup.
+    fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(popup) = &self.popup else {
+            return;
+        };
+        if let (Some(hit), Some(index)) = (popup.hits.get(popup.selected), &self.index) {
+            let line = FileQuery::parse(&popup.query).line;
+            eprintln!("open {} line {line:?}", index.paths()[hit.index]);
+            self.close_popup(window, cx);
+        }
     }
 
     fn close_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -123,7 +158,7 @@ impl Workspace {
             let hits = (0..index.len().min(MAX_RESULTS))
                 .map(|index| FileHit { index, score: 0 })
                 .collect();
-            popup.hits = Arc::new(hits);
+            popup.set_hits(hits);
             cx.notify();
             return;
         }
@@ -159,7 +194,7 @@ impl Workspace {
                     started.elapsed()
                 );
                 if let Some(popup) = &mut this.popup {
-                    popup.hits = Arc::new(hits);
+                    popup.set_hits(hits);
                     cx.notify();
                 }
             })
@@ -201,28 +236,46 @@ impl Render for Workspace {
                     }
                 }),
             )
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.detector.key_pressed();
-                if event.keystroke.key == "escape" {
-                    this.close_popup(window, cx);
+                let Some(popup) = &mut this.popup else {
+                    return;
+                };
+                match event.keystroke.key.as_str() {
+                    "escape" => this.close_popup(window, cx),
+                    "down" => popup.move_selection(1),
+                    "up" => popup.move_selection(-1),
+                    "pagedown" => popup.move_selection(10),
+                    "pageup" => popup.move_selection(-10),
+                    "enter" => this.open_selected(window, cx),
+                    _ => return,
                 }
+                cx.stop_propagation();
+                cx.notify();
             }))
             .p_4()
             .child("Press Shift twice to open the popup. Esc closes it.");
 
         if let (Some(popup), Some(index)) = (&self.popup, &self.index) {
-            let (index, hits) = (index.clone(), popup.hits.clone());
+            let (index, hits, selected) = (index.clone(), popup.hits.clone(), popup.selected);
             root = root.child(
                 popup_frame(&popup.input, self.status()).child(
                     uniform_list("results", hits.len(), move |range, _, _| {
                         range
                             .map(|row| {
-                                div()
+                                let item = div()
                                     .h(px(24.))
-                                    .child(index.paths()[hits[row].index].clone())
+                                    .px_2()
+                                    .child(index.paths()[hits[row].index].clone());
+                                if row == selected {
+                                    item.bg(rgb(0xd6e4ff))
+                                } else {
+                                    item
+                                }
                             })
                             .collect()
                     })
+                    .track_scroll(&popup.scroll)
                     .w_full()
                     .h(px(340.)),
                 ),
