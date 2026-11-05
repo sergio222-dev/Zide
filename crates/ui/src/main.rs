@@ -886,9 +886,6 @@ impl Workspace {
         if let Some((file, line)) = target {
             let path = index.paths()[file].clone();
             self.open_file(&path, line, cx);
-            self.recent.retain(|&i| i != file);
-            self.recent.insert(0, file);
-            self.recent.truncate(MAX_RECENT);
             self.close_popup(window, cx);
         }
     }
@@ -897,6 +894,16 @@ impl Workspace {
     /// comes back as it was, unless it changed on disk in the meantime.
     fn open_file(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
         self.autosave();
+        // every way of opening a file (popup, tree) counts as a recent one
+        if let Some(file) = self
+            .index
+            .as_ref()
+            .and_then(|index| index.paths().iter().position(|p| p == path))
+        {
+            self.recent.retain(|&i| i != file);
+            self.recent.insert(0, file);
+            self.recent.truncate(MAX_RECENT);
+        }
         if let Some(old) = self.viewer.take() {
             self.parked.insert(old.path().to_string(), old);
             if self.parked.len() > MAX_RECENT
