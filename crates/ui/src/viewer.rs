@@ -170,6 +170,15 @@ impl Viewer {
         self.scroll.scroll_to_item(row, ScrollStrategy::Top);
     }
 
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// True when the file changed on disk and there is nothing of ours to lose by re-reading it.
+    pub fn is_stale(&self) -> bool {
+        !self.is_dirty() && disk_stamp(&self.full_path) != self.disk
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.editable && self.buffer.revision() != self.saved_at
     }
@@ -859,6 +868,19 @@ mod tests {
         let status = viewer.find_status().unwrap();
         assert!(status.error.is_some());
         assert_eq!(status.total, 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_parked_file_is_stale_only_if_clean_and_changed_on_disk() {
+        let (dir, file) = temp_file("stale", "one\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        assert!(!viewer.is_stale());
+        fs::write(dir.join(&file), "two, longer\n").unwrap();
+        assert!(viewer.is_stale());
+        // with unsaved edits the file is kept, so nothing of ours is lost
+        type_keys(&mut viewer, "x");
+        assert!(!viewer.is_stale());
         fs::remove_dir_all(dir).unwrap();
     }
 }

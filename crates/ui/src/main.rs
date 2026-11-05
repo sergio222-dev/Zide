@@ -23,7 +23,7 @@ use zide_core::{Change, DoubleShiftDetector, ProjectWatcher, Scan, scan_project,
 use zide_index::FileIndex;
 use zide_search::{
     ActionHit, ActionText, FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_actions,
-    search_files_with_recent, search_text,
+    search_files, search_files_with_recent, search_text,
 };
 use zide_stubs::{StubCache, StubKind, StubStore, SymbolHit, search_symbols};
 use zide_text::FindQuery;
@@ -44,6 +44,7 @@ actions!(
         GoToSymbol,
         FindAction,
         FindInFiles,
+        RecentFiles,
     ]
 );
 
@@ -66,6 +67,8 @@ enum Tab {
     Symbols,
     Text,
     Actions,
+    /// Files opened in this session (Ctrl+E); not part of the Tab cycle.
+    Recent,
 }
 
 impl Tab {
@@ -74,7 +77,7 @@ impl Tab {
             Tab::Files => Tab::Symbols,
             Tab::Symbols => Tab::Text,
             Tab::Text => Tab::Actions,
-            Tab::Actions => Tab::Files,
+            Tab::Actions | Tab::Recent => Tab::Files,
         }
     }
 }
@@ -98,6 +101,13 @@ fn action_registry() -> Vec<ActionDef> {
             action: Some(Box::new(GoToFile)),
             closes_popup: false,
             run: |ws, _, cx| ws.show_tab(Tab::Files, cx),
+        },
+        ActionDef {
+            name: "Recent Files",
+            synonyms: &["recent", "history", "switcher"],
+            action: Some(Box::new(RecentFiles)),
+            closes_popup: false,
+            run: |ws, _, cx| ws.show_tab(Tab::Recent, cx),
         },
         ActionDef {
             name: "Go to Symbol",
@@ -220,6 +230,7 @@ impl Popup {
             Tab::Symbols => self.symbols.len(),
             Tab::Text => self.text.len(),
             Tab::Actions => self.actions.len(),
+            Tab::Recent => self.files.len(),
         }
     }
 
@@ -244,6 +255,8 @@ struct Workspace {
     index: Option<Arc<FileIndex>>,
     popup: Option<Popup>,
     viewer: Option<Viewer>,
+    /// Files opened earlier in the session, with their cursor, undo history and search.
+    parked: std::collections::HashMap<String, Viewer>,
     /// The find / replace panel above the editor.
     find: Option<FindPanel>,
     /// Bumped on every search; results of an older search are dropped.
@@ -293,6 +306,7 @@ impl Workspace {
             index: None,
             popup: None,
             viewer: None,
+            parked: std::collections::HashMap::new(),
             find: None,
             search_generation: 0,
             cancel_search: None,
@@ -654,6 +668,12 @@ impl Workspace {
             popup.selected = 0;
         }
         self.search_again(cx);
+        // like IntelliJ: the first row is the open file, so Enter goes back to the one before
+        if let (Tab::Recent, Some(popup)) = (tab, &mut self.popup)
+            && popup.query.is_empty()
+        {
+            popup.select(1.min(popup.len().saturating_sub(1)));
+        }
     }
 
     /// Flips a text option from the Actions tab: shows the Text tab and clears the query typed
@@ -666,7 +686,6 @@ impl Workspace {
         self.toggle_option(toggle, cx);
     }
 
-    /// There is no editor yet: "opening" a result logs it and closes the popup.
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.as_ref().is_some_and(|p| p.tab == Tab::Actions) {
             return self.run_selected_action(window, cx);
@@ -675,7 +694,7 @@ impl Workspace {
             return;
         };
         let target = match popup.tab {
-            Tab::Files => popup
+            Tab::Files | Tab::Recent => popup
                 .files
                 .get(popup.selected)
                 .map(|hit| (hit.index, FileQuery::parse(&popup.query).line)),
@@ -691,16 +710,36 @@ impl Workspace {
         };
         if let Some((file, line)) = target {
             let path = index.paths()[file].clone();
-            self.autosave();
-            let mut viewer = Viewer::open(&self.root, &path);
-            if let Some(line) = line {
-                viewer.go_to_line(line);
-            }
-            self.viewer = Some(viewer);
+            self.open_file(&path, line, cx);
             self.recent.retain(|&i| i != file);
             self.recent.insert(0, file);
             self.recent.truncate(MAX_RECENT);
             self.close_popup(window, cx);
+        }
+    }
+
+    /// Shows `path`, parking the open file with its cursor and undo history. A parked file
+    /// comes back as it was, unless it changed on disk in the meantime.
+    fn open_file(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
+        self.autosave();
+        if let Some(old) = self.viewer.take() {
+            self.parked.insert(old.path().to_string(), old);
+            if self.parked.len() > MAX_RECENT
+                && let Some(oldest) = self.parked.keys().find(|k| k.as_str() != path).cloned()
+            {
+                self.parked.remove(&oldest);
+            }
+        }
+        let mut viewer = match self.parked.remove(path) {
+            Some(parked) if !parked.is_stale() => parked,
+            _ => Viewer::open(&self.root, path),
+        };
+        if let Some(line) = line {
+            viewer.go_to_line(line);
+        }
+        self.viewer = Some(viewer);
+        if self.find.is_some() {
+            self.run_find(cx); // the panel stays open: search the new file
         }
     }
 
@@ -767,6 +806,36 @@ impl Workspace {
                             index,
                             score: 0,
                             fragments: Vec::new(),
+                        })
+                        .collect(),
+                );
+                popup.select(0);
+                cx.notify();
+            }
+            Tab::Recent => {
+                // at most MAX_RECENT files: matched here, synchronously, in a small index of their own
+                let paths = self
+                    .recent
+                    .iter()
+                    .map(|&i| index.paths()[i].clone())
+                    .collect();
+                let recent_index = FileIndex::new(paths);
+                let hits = if query.trim().is_empty() {
+                    (0..recent_index.len())
+                        .map(|index| FileHit {
+                            index,
+                            score: 0,
+                            fragments: Vec::new(),
+                        })
+                        .collect()
+                } else {
+                    search_files(&recent_index, &FileQuery::parse(&query), MAX_RECENT)
+                };
+                popup.files = Arc::new(
+                    hits.into_iter()
+                        .map(|hit| FileHit {
+                            index: self.recent[hit.index],
+                            ..hit
                         })
                         .collect(),
                 );
@@ -966,6 +1035,7 @@ impl Workspace {
     fn status(&self, popup: &Popup) -> String {
         match (&self.index, popup.tab) {
             (_, Tab::Actions) => format!("{} actions", popup.actions.len()),
+            (_, Tab::Recent) => format!("{} recent files", popup.files.len()),
             (None, _) => format!("Indexing {}…", self.root.display()),
             (Some(_), Tab::Symbols) => match &self.symbols {
                 None => "Indexing symbols…".into(),
@@ -1022,6 +1092,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &FindAction, window, cx| {
                 this.open_tab(Tab::Actions, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RecentFiles, window, cx| {
+                this.open_tab(Tab::Recent, window, cx)
             }))
             .on_action(
                 cx.listener(|this, _: &FindInFiles, window, cx| {
@@ -1120,7 +1193,7 @@ impl Render for Workspace {
         );
         let selected = popup.selected;
         let list = match (popup.tab, &self.index) {
-            (Tab::Files, Some(index)) => {
+            (Tab::Files | Tab::Recent, Some(index)) => {
                 let (index, hits) = (index.clone(), popup.files.clone());
                 Some(uniform_list("files", hits.len(), move |range, _, _| {
                     range
@@ -1489,6 +1562,7 @@ fn popup_frame(
             div()
                 .flex()
                 .gap_1()
+                .children((tab == Tab::Recent).then(|| tab_label("Recent files", Tab::Recent)))
                 .child(tab_label("Files", Tab::Files))
                 .child(tab_label("Symbols", Tab::Symbols))
                 .child(tab_label("Text", Tab::Text))
@@ -1519,6 +1593,7 @@ fn main() {
             KeyBinding::new("f3", FindNext, Some("Workspace")),
             KeyBinding::new("shift-f3", FindPrevious, Some("Workspace")),
             KeyBinding::new("ctrl-shift-f", FindInFiles, Some("Workspace")),
+            KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("ctrl-shift-n", GoToFile, Some("Workspace")),
             KeyBinding::new("ctrl-alt-shift-n", GoToSymbol, Some("Workspace")),
             KeyBinding::new("ctrl-shift-a", FindAction, Some("Workspace")),
