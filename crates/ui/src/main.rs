@@ -27,6 +27,7 @@ use zide_search::{
 };
 use zide_stubs::{StubCache, StubKind, StubStore, SymbolHit, search_symbols};
 use zide_text::FindQuery;
+use zide_tree::{Outcome as TreeOutcome, Tree};
 
 actions!(
     zide,
@@ -45,6 +46,7 @@ actions!(
         FindAction,
         FindInFiles,
         RecentFiles,
+        ToggleProjectTree,
     ]
 );
 
@@ -101,6 +103,13 @@ fn action_registry() -> Vec<ActionDef> {
             action: Some(Box::new(GoToFile)),
             closes_popup: false,
             run: |ws, _, cx| ws.show_tab(Tab::Files, cx),
+        },
+        ActionDef {
+            name: "Toggle Project Tree",
+            synonyms: &["file explorer", "project view", "sidebar"],
+            action: Some(Box::new(ToggleProjectTree)),
+            closes_popup: true,
+            run: |ws, _, cx| ws.toggle_tree(cx),
         },
         ActionDef {
             name: "Recent Files",
@@ -251,6 +260,14 @@ struct Workspace {
     focus: FocusHandle,
     /// When the last Space was pressed in Normal mode: two in a row open the popup.
     last_space: Option<Instant>,
+    /// The project tree on the left.
+    tree: Tree,
+    tree_visible: bool,
+    /// Keys go to the tree instead of the editor.
+    tree_focused: bool,
+    /// A `g` was typed in the tree (`gg` goes to the top).
+    tree_g: bool,
+    tree_scroll: UniformListScrollHandle,
     root: PathBuf,
     /// `None` while the project is still being scanned.
     index: Option<Arc<FileIndex>>,
@@ -303,6 +320,11 @@ impl Workspace {
         let mut workspace = Self {
             focus: cx.focus_handle(),
             last_space: None,
+            tree: Tree::new(),
+            tree_visible: true,
+            tree_focused: false,
+            tree_g: false,
+            tree_scroll: UniformListScrollHandle::new(),
             root,
             index: None,
             popup: None,
@@ -342,7 +364,7 @@ impl Workspace {
             let started = Instant::now();
             // scan, then watch the directories of that scan (a new directory means another
             // rescan); adding thousands of watches must not block the UI thread either
-            let (paths, watcher) = cx
+            let (paths, dirs, watcher) = cx
                 .background_executor()
                 .spawn(async move {
                     let scan = scan_project(&root).unwrap_or_else(|e| {
@@ -352,7 +374,7 @@ impl Workspace {
                     let watcher = watch_project(&root, &scan.dirs, move |change| {
                         let _ = changes.send_blocking(change);
                     });
-                    (scan.files, watcher)
+                    (scan.files, scan.dirs, watcher)
                 })
                 .await;
             match &watcher {
@@ -365,6 +387,7 @@ impl Workspace {
                 if this.scan_generation != generation {
                     return;
                 }
+                this.tree.set_entries(&paths, &dirs);
                 this.replace_index(FileIndex::new(paths));
                 this._watcher = watcher.ok();
                 // the old store indexes the old file list: keep it only to reuse its stubs
@@ -520,6 +543,7 @@ impl Workspace {
         let Some(viewer) = &self.viewer else {
             return;
         };
+        self.tree_focused = false; // the search box takes the keys
         let selected = viewer.selected_text();
         if self.popup.is_some() {
             self.close_popup(window, cx);
@@ -629,6 +653,133 @@ impl Workspace {
     }
 
     /// A key typed while no popup is open: the find panel or the editor gets it.
+    fn scroll_tree_to_selection(&self) {
+        if let Some(row) = self.tree.selected() {
+            self.tree_scroll
+                .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
+    }
+
+    /// Alt+1: shows the tree and focuses it; from the tree, hides it again (like IntelliJ).
+    fn toggle_tree(&mut self, cx: &mut Context<Self>) {
+        match (self.tree_visible, self.tree_focused) {
+            (true, true) => {
+                self.tree_visible = false;
+                self.tree_focused = false;
+            }
+            _ => {
+                self.tree_visible = true;
+                self.tree_focused = true;
+                self.scroll_tree_to_selection();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Keys while the tree has the focus: Vim motions, arrows and Enter.
+    fn tree_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        use zide_vim::Key;
+        let pending_g = std::mem::take(&mut self.tree_g);
+        let outcome = match (event.keystroke.key.as_str(), vim_key(event)) {
+            ("down", _) | (_, Some(Key::Char('j'))) => {
+                self.tree.move_by(1);
+                TreeOutcome::None
+            }
+            ("up", _) | (_, Some(Key::Char('k'))) => {
+                self.tree.move_by(-1);
+                TreeOutcome::None
+            }
+            ("right", _) | (_, Some(Key::Char('l'))) => self.tree.expand(),
+            ("left", _) | (_, Some(Key::Char('h'))) => {
+                self.tree.collapse();
+                TreeOutcome::None
+            }
+            (_, Some(Key::Enter)) => self.tree.activate(),
+            (_, Some(Key::Char('G'))) => {
+                self.tree.select_last();
+                TreeOutcome::None
+            }
+            (_, Some(Key::Char('g'))) => {
+                if pending_g {
+                    self.tree.select_first();
+                } else {
+                    self.tree_g = true;
+                }
+                TreeOutcome::None
+            }
+            (_, Some(Key::Esc)) => {
+                self.tree_focused = false;
+                TreeOutcome::None
+            }
+            _ => TreeOutcome::None,
+        };
+        self.apply_tree_outcome(outcome, cx);
+    }
+
+    fn apply_tree_outcome(&mut self, outcome: TreeOutcome, cx: &mut Context<Self>) {
+        if let TreeOutcome::Open(path) = outcome {
+            self.open_file(&path, None, cx);
+            self.tree_focused = false; // the file is for editing
+        }
+        self.scroll_tree_to_selection();
+        cx.notify();
+    }
+
+    fn project_tree(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let rows = self.tree.shared_rows();
+        let selected = self.tree.selected();
+        let focused = self.tree_focused;
+        let workspace = cx.entity();
+        let list = uniform_list("project-tree", rows.len(), move |range, _, _| {
+            range
+                .map(|index| {
+                    let row = &rows[index];
+                    let workspace = workspace.clone();
+                    let background = match (selected == Some(index), focused) {
+                        (true, true) => Some(0xcfe3ff),
+                        (true, false) => Some(0xe6e6e6),
+                        _ => None,
+                    };
+                    let line = div()
+                        .id(("tree-row", index))
+                        .h(px(22.))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .pl(px(8. + 14. * row.depth as f32))
+                        .whitespace_nowrap()
+                        .child(div().w(px(12.)).child(match (row.dir, row.expanded) {
+                            (false, _) => "",
+                            (true, true) => "▾",
+                            (true, false) => "▸",
+                        }))
+                        .child(row.name.clone())
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            workspace.update(cx, |this, cx| {
+                                this.tree_focused = true;
+                                let outcome = this.tree.click(index);
+                                this.apply_tree_outcome(outcome, cx);
+                            });
+                        });
+                    match background {
+                        Some(color) => line.bg(rgb(color)),
+                        None => line,
+                    }
+                })
+                .collect()
+        })
+        .track_scroll(&self.tree_scroll)
+        .size_full();
+        div()
+            .id("project-tree")
+            .flex_shrink_0()
+            .w(px(260.))
+            .h_full()
+            .border_r_1()
+            .border_color(rgb(0xdddddd))
+            .child(list)
+    }
+
     fn editor_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let in_panel = self.find.as_ref().is_some_and(|panel| {
             [&panel.find, &panel.replace]
@@ -641,6 +792,11 @@ impl Workspace {
                 cx.stop_propagation();
             }
             return; // the input handles its own keys
+        }
+        if self.tree_focused && self.tree_visible {
+            self.tree_key(event, cx);
+            cx.stop_propagation();
+            return;
         }
         let m = event.keystroke.modifiers;
         let plain = !(m.control || m.alt || m.platform || m.shift);
@@ -757,6 +913,9 @@ impl Workspace {
             viewer.go_to_line(line);
         }
         self.viewer = Some(viewer);
+        self.tree.reveal(path);
+        self.tree_focused = false; // a file was opened: the keys are the editor's
+        self.scroll_tree_to_selection();
         if self.find.is_some() {
             self.run_find(cx); // the panel stays open: search the new file
         }
@@ -1123,6 +1282,7 @@ impl Render for Workspace {
                     this.open_tab(Tab::Text, window, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &ToggleProjectTree, _, cx| this.toggle_tree(cx)))
             .on_action(cx.listener(|this, _: &SwitchTab, _, cx| {
                 if this.popup.is_some() {
                     this.switch_tab(cx);
@@ -1145,17 +1305,25 @@ impl Render for Workspace {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(match &self.viewer {
-                Some(viewer) => div()
+            .child(
+                div()
                     .flex()
-                    .flex_col()
                     .size_full()
-                    .children(self.find_panel(cx))
-                    .child(viewer.render()),
-                None => div().p_4().child(
-                    "Press Space twice to open the popup. Tab switches tabs, Esc closes it.",
-                ),
-            });
+                    .children(self.tree_visible.then(|| self.project_tree(cx)))
+                    .child(match &self.viewer {
+                        Some(viewer) => div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .children(self.find_panel(cx))
+                            .child(viewer.render()),
+                        None => div().flex_1().p_4().child(
+                            "Press Space twice to open the popup. Alt+1 shows the project tree.",
+                        ),
+                    }),
+            );
 
         let Some(popup) = &self.popup else {
             return root;
@@ -1603,6 +1771,7 @@ fn main() {
             KeyBinding::new("shift-f3", FindPrevious, Some("Workspace")),
             KeyBinding::new("ctrl-shift-f", FindInFiles, Some("Workspace")),
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
+            KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
             KeyBinding::new("ctrl-shift-n", GoToFile, Some("Workspace")),
             KeyBinding::new("ctrl-alt-shift-n", GoToSymbol, Some("Workspace")),
             KeyBinding::new("ctrl-shift-a", FindAction, Some("Workspace")),

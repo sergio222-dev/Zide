@@ -14,5 +14,6 @@ zide-search = { path = "../search" }
 zide-stubs = { path = "../stubs" }
 zide-syntax = { path = "../syntax" }
 zide-text = { path = "../text" }
+zide-tree = { path = "../tree" }
 zide-vim = { path = "../vim" }
 async-channel = "2"

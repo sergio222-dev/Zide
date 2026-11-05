@@ -8582,6 +8582,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zide-tree"
+version = "0.0.0"
+
+[[package]]
 name = "zide-ui"
 version = "0.0.0"
 dependencies = [
@@ -8594,6 +8598,7 @@ dependencies = [
  "zide-stubs",
  "zide-syntax",
  "zide-text",
+ "zide-tree",
  "zide-vim",
 ]
 
