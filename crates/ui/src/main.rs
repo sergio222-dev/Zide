@@ -249,7 +249,8 @@ impl Popup {
 
 struct Workspace {
     focus: FocusHandle,
-    detector: DoubleShiftDetector,
+    /// When the last Space was pressed in Normal mode: two in a row open the popup.
+    last_space: Option<Instant>,
     root: PathBuf,
     /// `None` while the project is still being scanned.
     index: Option<Arc<FileIndex>>,
@@ -301,7 +302,7 @@ impl Workspace {
         let registry = action_registry();
         let mut workspace = Self {
             focus: cx.focus_handle(),
-            detector: DoubleShiftDetector::default(),
+            last_space: None,
             root,
             index: None,
             popup: None,
@@ -641,6 +642,24 @@ impl Workspace {
             }
             return; // the input handles its own keys
         }
+        let m = event.keystroke.modifiers;
+        let plain = !(m.control || m.alt || m.platform || m.shift);
+        let idle = self.viewer.as_ref().is_none_or(Viewer::awaits_command);
+        if event.keystroke.key == "space" && plain && idle {
+            let now = Instant::now();
+            let double = self
+                .last_space
+                .take()
+                .is_some_and(|t| now.duration_since(t) <= DoubleShiftDetector::DEFAULT_INTERVAL);
+            if double {
+                self.open_popup(window, cx);
+            } else {
+                self.last_space = Some(now);
+            }
+            cx.stop_propagation();
+            return;
+        }
+        self.last_space = None;
         let (Some(viewer), Some(key)) = (&mut self.viewer, vim_key(event)) else {
             return;
         };
@@ -1109,20 +1128,7 @@ impl Render for Workspace {
                     this.switch_tab(cx);
                 }
             }))
-            .on_modifiers_changed(
-                cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
-                    let m = event.modifiers;
-                    let others = m.control || m.alt || m.platform;
-                    if this
-                        .detector
-                        .modifiers_changed(m.shift, others, Instant::now())
-                    {
-                        this.open_popup(window, cx);
-                    }
-                }),
-            )
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.detector.key_pressed();
                 let Some(popup) = &mut this.popup else {
                     this.editor_key(event, window, cx);
                     return;
@@ -1147,7 +1153,7 @@ impl Render for Workspace {
                     .children(self.find_panel(cx))
                     .child(viewer.render()),
                 None => div().p_4().child(
-                    "Press Shift twice to open the popup. Tab switches tabs, Esc closes it.",
+                    "Press Space twice to open the popup. Tab switches tabs, Esc closes it.",
                 ),
             });
 

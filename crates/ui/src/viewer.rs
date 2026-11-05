@@ -18,6 +18,7 @@ use zide_vim::{Key, Mode, Vim};
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 const TAB_WIDTH: usize = 4;
 const ROW_HEIGHT: f32 = 20.;
+const EDITOR_FONT: &str = "monospace";
 
 struct Line {
     /// Char offset of the line in the buffer, and its length in chars.
@@ -139,6 +140,8 @@ pub struct Viewer {
     /// A `z` was typed and its second key (`t`, `z`, `b`...) is awaited.
     z_pending: bool,
     anim: Option<ScrollAnim>,
+    /// Advance of one monospace cell in pixels, measured on the first frame.
+    cell_width: Option<f32>,
 }
 
 impl Viewer {
@@ -171,6 +174,7 @@ impl Viewer {
             scroll: UniformListScrollHandle::new(),
             z_pending: false,
             anim: None,
+            cell_width: None,
         };
         viewer.rebuild();
         viewer
@@ -250,6 +254,15 @@ impl Viewer {
 
     /// Advances the glide one frame; asks for another while it lasts.
     pub fn tick(&mut self, window: &mut Window) {
+        if self.cell_width.is_none() {
+            let text_system = window.text_system();
+            let size = window.text_style().font_size.to_pixels(window.rem_size());
+            let id = text_system.resolve_font(&font(EDITOR_FONT));
+            self.cell_width = text_system
+                .advance(id, size, 'm')
+                .ok()
+                .map(|advance| f32::from(advance.width));
+        }
         let Some(anim) = &self.anim else { return };
         let t = (anim.start.elapsed().as_secs_f32() / SCROLL_DURATION.as_secs_f32()).min(1.);
         let eased = 1. - (1. - t).powi(3);
@@ -294,6 +307,11 @@ impl Viewer {
         let shift = half as f32 * ROW_HEIGHT;
         let top = top as f32 * ROW_HEIGHT;
         self.glide_to(|_| if down { top + shift } else { top - shift }, |_| {});
+    }
+
+    /// True when the next key starts a Normal-mode command (nothing half typed).
+    pub fn awaits_command(&self) -> bool {
+        self.vim.mode() == Mode::Normal && self.vim.pending().is_empty() && !self.z_pending
     }
 
     /// What is typed so far of an unfinished command, for the status bar.
@@ -587,11 +605,12 @@ impl Viewer {
         let current_match = self
             .match_at_cursor()
             .and_then(|i| matches.as_ref().map(|m| m[i].start));
+        let cell_width = self.cell_width.unwrap_or(8.);
         let list = uniform_list("viewer", lines.len(), move |range, _, _| {
             range
                 .map(|row| {
                     let line = &lines[row];
-                    let mut text = line.text.clone();
+                    let text = line.text.clone();
                     let mut colors = line.colors.clone();
                     if let Some(matches) = &matches {
                         let first = matches.partition_point(|m| m.end <= line.start);
@@ -613,14 +632,22 @@ impl Viewer {
                     if let Some(range) = selection.and_then(|s| s.on_line(row, line)) {
                         colors = paint(&colors, range, rgb(0xcfe3ff).into());
                     }
-                    if row == cursor_line {
-                        if cursor_cell.start >= text.len() {
-                            text.push(' '); // the cursor at the end of the line needs a cell
-                        }
-                        let bg = if insert { 0xb3d4ff } else { 0xb0b0b0 };
-                        colors = paint(&colors, cursor_cell.clone(), rgb(bg).into());
-                    }
+                    // The caret is drawn on the cell grid, so it is as wide on a space or
+                    // a thin letter as on any other character.
+                    let caret = (row == cursor_line).then(|| {
+                        let column = text[..cursor_cell.start.min(text.len())].chars().count();
+                        let color = if insert { 0xb3d4ff } else { 0xb0b0b0 };
+                        let gutter = 12. * digits as f32 + 16.;
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px(gutter + column as f32 * cell_width))
+                            .w(px(cell_width))
+                            .h(px(ROW_HEIGHT))
+                            .bg(rgba(color << 8 | 0x99))
+                    });
                     div()
+                        .relative()
                         .flex()
                         .h(px(ROW_HEIGHT))
                         .child(
@@ -633,6 +660,7 @@ impl Viewer {
                                 .child((row + 1).to_string()),
                         )
                         .child(StyledText::new(text).with_highlights(colors))
+                        .children(caret)
                 })
                 .collect()
         })
@@ -654,7 +682,7 @@ impl Viewer {
             .child(
                 div()
                     .flex_1()
-                    .font_family("monospace")
+                    .font_family(EDITOR_FONT)
                     .whitespace_nowrap()
                     .child(list),
             )
