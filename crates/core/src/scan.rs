@@ -2,17 +2,28 @@ use std::{io, path::Path, sync::mpsc};
 
 use ignore::{WalkBuilder, WalkState};
 
+/// What a scan found, as paths relative to `root` with `/` as the separator, in no particular order.
+#[derive(Debug, Default)]
+pub struct Scan {
+    pub files: Vec<String>,
+    /// Directories, including empty ones and excluding `root` itself.
+    pub dirs: Vec<String>,
+}
+
 /// Lists the files under `root`, in parallel, honoring `.gitignore` and skipping `.git`.
-///
-/// Paths are relative to `root`, with `/` as the separator, in no particular order.
 pub fn scan_files(root: &Path) -> io::Result<Vec<String>> {
+    scan_project(root).map(|scan| scan.files)
+}
+
+/// Like [`scan_files`], but also lists the directories (what a watcher has to watch).
+pub fn scan_project(root: &Path) -> io::Result<Scan> {
     if !root.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotADirectory,
             root.display().to_string(),
         ));
     }
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, rx) = mpsc::channel::<(bool, String)>();
     WalkBuilder::new(root)
         .hidden(false)
         .require_git(false)
@@ -24,16 +35,28 @@ pub fn scan_files(root: &Path) -> io::Result<Vec<String>> {
                 let Ok(entry) = entry else {
                     return WalkState::Continue;
                 };
-                if entry.file_type().is_some_and(|t| t.is_file())
+                let Some(kind) = entry.file_type() else {
+                    return WalkState::Continue;
+                };
+                if (kind.is_file() || kind.is_dir())
                     && let Ok(relative) = entry.path().strip_prefix(root)
+                    && !relative.as_os_str().is_empty()
                 {
-                    let _ = tx.send(relative.to_string_lossy().replace('\\', "/"));
+                    let _ = tx.send((kind.is_dir(), relative.to_string_lossy().replace('\\', "/")));
                 }
                 WalkState::Continue
             })
         });
     drop(tx);
-    Ok(rx.into_iter().collect())
+    let mut scan = Scan::default();
+    for (is_dir, path) in rx {
+        if is_dir {
+            scan.dirs.push(path)
+        } else {
+            scan.files.push(path)
+        }
+    }
+    Ok(scan)
 }
 
 #[cfg(test)]
@@ -59,6 +82,18 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(files, [".gitignore", "src/main.rs", "src/nested/lib.rs"]);
+    }
+
+    #[test]
+    fn lists_directories_including_empty_ones() {
+        let dir = std::env::temp_dir().join(format!("zide-dirs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src/empty")).unwrap();
+        fs::write(dir.join("src/a.rs"), "").unwrap();
+        let mut dirs = scan_project(&dir).unwrap().dirs;
+        dirs.sort();
+        assert_eq!(dirs, ["src", "src/empty"]);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

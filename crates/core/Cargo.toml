@@ -7,3 +7,4 @@ publish.workspace = true
 
 [dependencies]
 ignore = "0.4"
+notify = "8"

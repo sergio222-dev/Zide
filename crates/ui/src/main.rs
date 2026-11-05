@@ -16,7 +16,7 @@ use std::{
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
-use zide_core::{DoubleShiftDetector, scan_files};
+use zide_core::{DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
 use zide_index::FileIndex;
 use zide_search::{
     FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_files_with_recent, search_text,
@@ -107,31 +107,26 @@ struct Workspace {
     cancel_search: Option<Arc<AtomicBool>>,
     /// Files opened from the popup (indices into `index`), most recent first.
     recent: Vec<usize>,
+    /// Bumped on every scan; the result of an older scan is dropped.
+    scan_generation: u64,
+    changes_tx: async_channel::Sender<()>,
+    _watcher: Option<ProjectWatcher>,
 }
 
 impl Workspace {
     fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
-        let scan_root = root.clone();
+        // file-system changes arrive on a watcher thread; a foreground task rescans
+        let (changes_tx, changes_rx) = async_channel::unbounded::<()>();
         cx.spawn(async move |this, cx| {
-            let started = Instant::now();
-            let paths = cx
-                .background_executor()
-                .spawn(async move { scan_files(&scan_root) })
-                .await;
-            let index = FileIndex::new(paths.unwrap_or_else(|e| {
-                eprintln!("scan failed: {e}");
-                Vec::new()
-            }));
-            eprintln!("indexed {} files in {:?}", index.len(), started.elapsed());
-            this.update(cx, |this, cx| {
-                this.index = Some(Arc::new(index));
-                this.search_again(cx);
-            })
-            .ok();
+            while changes_rx.recv().await.is_ok() {
+                if this.update(cx, |this, cx| this.rescan(cx)).is_err() {
+                    break;
+                }
+            }
         })
         .detach();
 
-        Self {
+        let mut workspace = Self {
             focus: cx.focus_handle(),
             detector: DoubleShiftDetector::default(),
             root,
@@ -140,7 +135,74 @@ impl Workspace {
             search_generation: 0,
             cancel_search: None,
             recent: Vec::new(),
+            scan_generation: 0,
+            changes_tx,
+            _watcher: None,
+        };
+        workspace.rescan(cx);
+        workspace
+    }
+
+    /// Scans the project in the background and swaps the index in when done. Used at startup
+    /// and whenever the watcher reports changes; only the latest scan is applied.
+    fn rescan(&mut self, cx: &mut Context<Self>) {
+        self.scan_generation += 1;
+        let generation = self.scan_generation;
+        let root = self.root.clone();
+        let changes = self.changes_tx.clone();
+        cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            // scan, then watch the directories of that scan (a new directory means another
+            // rescan); adding thousands of watches must not block the UI thread either
+            let (paths, watcher) = cx
+                .background_executor()
+                .spawn(async move {
+                    let scan = scan_project(&root).unwrap_or_else(|e| {
+                        eprintln!("scan failed: {e}");
+                        Scan::default()
+                    });
+                    let watcher = watch_project(&root, &scan.dirs, move || {
+                        let _ = changes.send_blocking(());
+                    });
+                    (scan.files, watcher)
+                })
+                .await;
+            match &watcher {
+                Ok(w) if w.unwatched > 0 => eprintln!("{} directories not watched", w.unwatched),
+                Err(e) => eprintln!("watching failed: {e}"),
+                _ => {}
+            }
+            eprintln!("indexed {} files in {:?}", paths.len(), started.elapsed());
+            this.update(cx, |this, cx| {
+                if this.scan_generation != generation {
+                    return;
+                }
+                this.replace_index(FileIndex::new(paths));
+                this._watcher = watcher.ok();
+                this.search_again(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Swaps in a fresh index, keeping the recent files that still exist.
+    fn replace_index(&mut self, index: FileIndex) {
+        if let Some(old) = &self.index {
+            let wanted: Vec<&String> = self.recent.iter().map(|&i| &old.paths()[i]).collect();
+            let found: std::collections::HashMap<&str, usize> = index
+                .paths()
+                .iter()
+                .enumerate()
+                .filter(|(_, path)| wanted.contains(path))
+                .map(|(i, path)| (path.as_str(), i))
+                .collect();
+            self.recent = wanted
+                .iter()
+                .filter_map(|path| found.get(path.as_str()).copied())
+                .collect();
         }
+        self.index = Some(Arc::new(index));
     }
 
     fn open_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {

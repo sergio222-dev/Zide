@@ -8376,6 +8376,7 @@ name = "zide-core"
 version = "0.0.0"
 dependencies = [
  "ignore",
+ "notify",
 ]
 
 [[package]]
