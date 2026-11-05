@@ -6,13 +6,10 @@ use std::{ops::Range, sync::OnceLock};
 
 use tree_sitter::{Node, Parser};
 
-use crate::{
-    ImportTarget, Modifiers, StubKind, StubNode,
-    rust::{self},
-};
+use crate::{ImportTarget, Modifiers, StubKind, StubNode, js, rust};
 
 /// Bump when any language's rules change: stubs built with other rules are rebuilt.
-pub const RULES_VERSION: u32 = 1;
+pub const RULES_VERSION: u32 = 2;
 
 const MAX_SIGNATURE_CHARS: usize = 200;
 
@@ -23,6 +20,8 @@ pub(crate) struct Item {
     pub name_range: Range<usize>,
     pub modifiers: Modifiers,
     pub import: Option<ImportTarget>,
+    /// Where the signature ends, when it is not at the start of the body.
+    pub signature_end: Option<usize>,
 }
 
 pub(crate) enum Step {
@@ -45,12 +44,29 @@ struct Language {
 fn languages() -> &'static [Language] {
     static LANGUAGES: OnceLock<Vec<Language>> = OnceLock::new();
     LANGUAGES.get_or_init(|| {
-        vec![Language {
-            extensions: &["rs"],
-            grammar: tree_sitter_rust::LANGUAGE.into(),
-            classify: rust::classify,
+        let js = |extensions, grammar| Language {
+            extensions,
+            grammar,
+            classify: js::classify,
             signature_ends_at: &["body", "value"],
-        }]
+        };
+        vec![
+            Language {
+                extensions: &["rs"],
+                grammar: tree_sitter_rust::LANGUAGE.into(),
+                classify: rust::classify,
+                signature_ends_at: &["body", "value"],
+            },
+            js(
+                &["js", "mjs", "cjs", "jsx"],
+                tree_sitter_javascript::LANGUAGE.into(),
+            ),
+            js(
+                &["ts", "mts", "cts"],
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            ),
+            js(&["tsx"], tree_sitter_typescript::LANGUAGE_TSX.into()),
+        ]
     })
 }
 
@@ -102,6 +118,7 @@ pub fn extract_nodes(language: usize, source: &str) -> Vec<StubNode> {
                     node,
                     source,
                     language.signature_ends_at,
+                    item.signature_end,
                     item.import.is_some(),
                 ),
                 import: item.import,
@@ -118,17 +135,27 @@ pub fn extract_nodes(language: usize, source: &str) -> Vec<StubNode> {
 }
 
 /// The declaration text from its start to its body (or constant value), whitespace collapsed.
-fn signature(node: Node, source: &str, end_fields: &[&str], is_import: bool) -> Option<Box<str>> {
+fn signature(
+    node: Node,
+    source: &str,
+    end_fields: &[&str],
+    end_override: Option<usize>,
+    is_import: bool,
+) -> Option<Box<str>> {
     if is_import {
         return None;
     }
-    let end = end_fields
-        .iter()
-        .find_map(|field| node.child_by_field_name(field))
-        .map_or(node.end_byte(), |body| body.start_byte());
+    let end = end_override.unwrap_or_else(|| {
+        end_fields
+            .iter()
+            .find_map(|field| node.child_by_field_name(field))
+            .map_or(node.end_byte(), |body| body.start_byte())
+    });
     let text = source.get(node.start_byte()..end)?;
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let collapsed = collapsed.trim_end_matches(['{', '=', ' ']).to_string();
+    let collapsed = collapsed
+        .trim_end_matches(['{', '=', ' ', ';', ','])
+        .to_string();
     let signature: String = collapsed.chars().take(MAX_SIGNATURE_CHARS).collect();
     (!signature.is_empty()).then(|| signature.into())
 }

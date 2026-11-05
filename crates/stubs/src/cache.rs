@@ -17,7 +17,7 @@ use crate::{FileStubs, StubStore};
 
 const MAGIC: &[u8; 4] = b"ZSTB";
 /// Bump when the serialized layout of [`FileStubs`] changes.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 /// Stubs by project-relative path.
 #[derive(Debug, Default)]

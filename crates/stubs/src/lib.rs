@@ -7,6 +7,7 @@
 
 mod cache;
 mod extract;
+mod js;
 mod model;
 mod rust;
 mod store;

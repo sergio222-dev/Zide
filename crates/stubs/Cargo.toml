@@ -12,6 +12,8 @@ rayon = "1"
 serde = { version = "1", features = ["derive"] }
 tree-sitter = "0.25"
 tree-sitter-rust = "0.24"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zide-index = { path = "../index" }
 zide-matcher = { path = "../matcher" }

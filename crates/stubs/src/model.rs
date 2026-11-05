@@ -11,6 +11,8 @@ pub enum StubKind {
     Function,
     Method,
     Struct,
+    Class,
+    Interface,
     Enum,
     Variant,
     Field,
@@ -51,9 +53,13 @@ impl Modifiers {
 /// One imported path as written in the source, e.g. `std::collections::HashMap`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportTarget {
+    /// Rust: the whole path (`std::io::Read`). JS/TS: the module specifier (`react`).
     pub path: Box<str>,
+    /// JS/TS: the imported name of that module (`useState`, or `default`); `None` for
+    /// side-effect imports, namespace imports and Rust paths.
+    pub member: Option<Box<str>>,
     pub alias: Option<Box<str>>,
-    /// `use path::*`.
+    /// `use path::*` and `import * as ns`.
     pub glob: bool,
 }
 

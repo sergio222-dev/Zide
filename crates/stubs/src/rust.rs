@@ -53,6 +53,7 @@ pub(crate) fn classify(node: Node, source: &str, parent: Option<StubKind>) -> St
             name_range: name_node.map_or(0..0, |n| n.start_byte()..n.end_byte()),
             modifiers: modifiers(node, source),
             import: None,
+            signature_end: None,
         }],
         descend,
     }
@@ -107,6 +108,7 @@ fn imports(node: Node, source: &str) -> Step {
                 name_range: 0..0,
                 modifiers: public,
                 import: Some(target),
+                signature_end: None,
             }
         })
         .collect::<Vec<_>>();
@@ -131,6 +133,7 @@ fn join(prefix: &str, rest: &str) -> String {
 fn use_leaves(node: Node, source: &str, prefix: &str, out: &mut Vec<ImportTarget>) {
     let target = |path: String, alias: Option<String>, glob: bool| ImportTarget {
         path: path.into(),
+        member: None,
         alias: alias.map(Into::into),
         glob,
     };

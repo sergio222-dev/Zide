@@ -960,6 +960,8 @@ fn kind_label(kind: StubKind) -> &'static str {
         StubKind::Function => "fn",
         StubKind::Method => "method",
         StubKind::Struct => "struct",
+        StubKind::Class => "class",
+        StubKind::Interface => "interface",
         StubKind::Enum => "enum",
         StubKind::Variant => "variant",
         StubKind::Field => "field",
