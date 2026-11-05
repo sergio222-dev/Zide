@@ -277,6 +277,38 @@ impl Viewer {
         Some((top, rows.max(1)))
     }
 
+    /// Where the word under the caret appears in the rows on screen (and a screenful around
+    /// them, which absorbs a scroll glide), as char ranges: IntelliJ's usage highlighting,
+    /// by text. Nothing while selecting or searching, when it would only add noise.
+    fn word_highlights(&self) -> Arc<Vec<Range<usize>>> {
+        let searching = self.find.as_ref().is_some_and(|find| find.visible);
+        if searching || self.vim.selection(&self.buffer).is_some() {
+            return Arc::default();
+        }
+        let Some(word) = self.word_at_cursor() else {
+            return Arc::default();
+        };
+        let (top, rows) = self.view_metrics().unwrap_or((0, 60));
+        let first = top.saturating_sub(rows);
+        let last = (top + 2 * rows).min(self.buffer.line_count());
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let mut found = Vec::new();
+        for row in first..last {
+            let line = self.buffer.line(row);
+            let start = self.buffer.line_start(row);
+            for (at, _) in line.match_indices(&word) {
+                let before = line[..at].chars().next_back();
+                let after = line[at + word.len()..].chars().next();
+                if before.is_some_and(is_word) || after.is_some_and(is_word) {
+                    continue;
+                }
+                let from = start + line[..at].chars().count();
+                found.push(from..from + word.chars().count());
+            }
+        }
+        Arc::new(found)
+    }
+
     /// `(viewport height, current top)` in pixels, once the list has been laid out.
     fn view_pixels(&self) -> Option<(f32, f32)> {
         let state = self.scroll.0.borrow();
@@ -881,6 +913,7 @@ impl Viewer {
         let current_match = self
             .match_at_cursor()
             .and_then(|i| matches.as_ref().map(|m| m[i].start));
+        let word_matches = self.word_highlights();
         let cell_width = self.cell_width.unwrap_or(8.);
         let list = uniform_list("viewer", lines.len(), move |range, _, _| {
             range
@@ -888,6 +921,16 @@ impl Viewer {
                     let line = &lines[row];
                     let text = line.text.clone();
                     let mut colors = line.colors.clone();
+                    let first = word_matches.partition_point(|m| m.end <= line.start);
+                    for found in &word_matches[first..] {
+                        if found.start >= line.start + line.chars {
+                            break;
+                        }
+                        let from = found.start - line.start;
+                        let to = found.end - line.start;
+                        let range = line.display_byte(from)..line.display_byte(to);
+                        colors = paint(&colors, range, rgb(0xdcdcf5).into());
+                    }
                     if let Some(matches) = &matches {
                         let first = matches.partition_point(|m| m.end <= line.start);
                         for found in &matches[first..] {
@@ -1313,6 +1356,20 @@ mod tests {
         viewer.shrink_selection();
         assert_ne!(viewer.selected_text().as_deref(), Some("o"));
         assert_eq!(viewer.vim.mode(), Mode::Visual);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_word_under_the_caret_is_highlighted_where_it_stands_alone() {
+        let (dir, file) = temp_file("word-hl", "foo foobar foo_x (foo)\nfoo\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        // caret on the first `foo`: whole words only, on every line
+        assert_eq!(
+            *viewer.word_highlights(),
+            [0..3, 18..21, 23..26] // "foo", "(foo)" and the one on line 2
+        );
+        type_keys(&mut viewer, "v"); // selecting: no highlighting
+        assert!(viewer.word_highlights().is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
 

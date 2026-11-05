@@ -52,6 +52,8 @@ actions!(
         FindUsages,
         ReformatCode,
         ExtendSelection,
+        FocusTree,
+        FocusEditor,
         ShrinkSelection,
     ]
 );
@@ -936,6 +938,20 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Ctrl+H / Ctrl+L: moves the focus to the project tree (showing it if hidden) or back to
+    /// the editor.
+    fn focus_tree(&mut self, tree: bool, cx: &mut Context<Self>) {
+        if self.popup.is_some() || (!tree && self.viewer.is_none()) {
+            return;
+        }
+        if tree {
+            self.tree_visible = true;
+            self.scroll_tree_to_selection();
+        }
+        self.tree_focused = tree;
+        cx.notify();
+    }
+
     /// Keys while the tree has the focus: Vim motions, arrows and Enter.
     fn tree_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         use zide_vim::Key;
@@ -1548,6 +1564,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleProjectTree, _, cx| this.toggle_tree(cx)))
             .on_action(cx.listener(|this, _: &FindUsages, window, cx| this.find_usages(window, cx)))
             .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
+            .on_action(cx.listener(|this, _: &FocusTree, _, cx| this.focus_tree(true, cx)))
+            .on_action(cx.listener(|this, _: &FocusEditor, _, cx| this.focus_tree(false, cx)))
             .on_action(
                 cx.listener(|this, _: &ExtendSelection, _, cx| this.change_selection(true, cx)),
             )
@@ -2052,6 +2070,8 @@ fn main() {
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
             KeyBinding::new("alt-f7", FindUsages, Some("Workspace")),
             KeyBinding::new("ctrl-alt-l", ReformatCode, Some("Workspace")),
+            KeyBinding::new("ctrl-h", FocusTree, Some("Workspace")),
+            KeyBinding::new("ctrl-l", FocusEditor, Some("Workspace")),
             KeyBinding::new("ctrl-w", ExtendSelection, Some("Workspace")),
             KeyBinding::new("ctrl-shift-w", ShrinkSelection, Some("Workspace")),
             KeyBinding::new("ctrl-shift-n", GoToFile, Some("Workspace")),
