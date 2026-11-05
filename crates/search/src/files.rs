@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use rayon::prelude::*;
 use zide_index::FileIndex;
 use zide_matcher::{FixingLayoutMatcher, Matcher, MatchingMode, RussianToEnglish};
@@ -39,9 +41,19 @@ pub struct FileHit {
 /// `dir/Name` matches `Name` against the file name and `dir` against the directories,
 /// so `lang/Goto` finds `lang-impl/src/GotoFileAction.java`.
 pub fn search_files(index: &FileIndex, query: &FileQuery<'_>, limit: usize) -> Vec<FileHit> {
+    search_files_cancellable(index, query, limit, &AtomicBool::new(false)).unwrap_or_default()
+}
+
+/// Like [`search_files`], but gives up with `None` as soon as `cancel` is set.
+pub fn search_files_cancellable(
+    index: &FileIndex,
+    query: &FileQuery<'_>,
+    limit: usize,
+    cancel: &AtomicBool,
+) -> Option<Vec<FileHit>> {
     let pattern = query.pattern.trim();
     if pattern.is_empty() || limit == 0 {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let (dir_pattern, name_pattern) = match pattern.rsplit_once('/') {
         Some((dir, name)) => (Some(dir), name),
@@ -57,10 +69,16 @@ pub fn search_files(index: &FileIndex, query: &FileQuery<'_>, limit: usize) -> V
         .par_iter()
         .enumerate()
         .filter_map(|(i, path)| {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
             score_path(path, &name_matcher, dir_matcher.as_ref())
                 .map(|score| FileHit { index: i, score })
         })
         .collect();
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
 
     let order = |a: &FileHit, b: &FileHit| {
         b.score
@@ -77,7 +95,7 @@ pub fn search_files(index: &FileIndex, query: &FileQuery<'_>, limit: usize) -> V
         hits.truncate(limit);
     }
     hits.sort_unstable_by(order);
-    hits
+    Some(hits)
 }
 
 /// Like IntelliJ's navigation: a leading `*` lets the pattern match anywhere in the name.
@@ -177,6 +195,23 @@ mod tests {
     fn exact_name_ranks_before_longer_matches() {
         let idx = index(&["a/FooBarBaz.rs", "b/Foo.rs", "c/FooBar.rs"]);
         assert_eq!(found(&idx, "Foo")[0], "b/Foo.rs");
+    }
+
+    #[test]
+    fn a_cancelled_search_returns_nothing() {
+        let idx = index(&["a/x1.rs", "a/x2.rs"]);
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            search_files_cancellable(&idx, &FileQuery::parse("x"), 10, &cancelled),
+            None
+        );
+        let live = AtomicBool::new(false);
+        assert_eq!(
+            search_files_cancellable(&idx, &FileQuery::parse("x"), 10, &live)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]

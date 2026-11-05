@@ -3,13 +3,20 @@
 //! `zide-ui [root]` indexes `root` (default: the current directory) in the background;
 //! the window shows up before the index is ready (ADR-009). Timings go to stderr.
 
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
+};
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
 use zide_core::{DoubleShiftDetector, scan_files};
 use zide_index::FileIndex;
-use zide_search::{FileHit, FileQuery, search_files};
+use zide_search::{FileHit, FileQuery, search_files_cancellable};
 
 const MAX_RESULTS: usize = 200;
 
@@ -28,6 +35,9 @@ struct Workspace {
     /// `None` while the project is still being scanned.
     index: Option<Arc<FileIndex>>,
     popup: Option<Popup>,
+    /// Bumped on every search; a finished search applies only if it is still the latest.
+    search_generation: u64,
+    cancel_search: Option<Arc<AtomicBool>>,
 }
 
 impl Workspace {
@@ -62,6 +72,8 @@ impl Workspace {
             root,
             index: None,
             popup: None,
+            search_generation: 0,
+            cancel_search: None,
         }
     }
 
@@ -90,29 +102,70 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Runs the search on a background thread. Typing again cancels the running search
+    /// and drops its results, so the UI thread never waits and never shows stale hits.
     fn search(&mut self, query: &str, cx: &mut Context<Self>) {
+        if let Some(cancel) = self.cancel_search.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.search_generation += 1;
         let Some(popup) = &mut self.popup else {
             return;
         };
         popup.query = query.to_string();
-        if let Some(index) = &self.index {
-            let started = Instant::now();
-            let hits = if query.trim().is_empty() {
-                // nothing typed yet: show the first files
-                (0..index.len().min(MAX_RESULTS))
-                    .map(|index| FileHit { index, score: 0 })
-                    .collect()
-            } else {
-                search_files(index, &FileQuery::parse(query), MAX_RESULTS)
-            };
-            eprintln!(
-                "search {query:?}: {} hits in {:?}",
-                hits.len(),
-                started.elapsed()
-            );
+        let Some(index) = self.index.clone() else {
+            cx.notify();
+            return;
+        };
+
+        if query.trim().is_empty() {
+            // nothing typed yet: show the first files
+            let hits = (0..index.len().min(MAX_RESULTS))
+                .map(|index| FileHit { index, score: 0 })
+                .collect();
             popup.hits = Arc::new(hits);
+            cx.notify();
+            return;
         }
-        cx.notify();
+
+        let generation = self.search_generation;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel_search = Some(cancel.clone());
+        let query = query.to_string();
+        cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            let label = query.clone();
+            let hits = cx
+                .background_executor()
+                .spawn(async move {
+                    search_files_cancellable(
+                        &index,
+                        &FileQuery::parse(&query),
+                        MAX_RESULTS,
+                        &cancel,
+                    )
+                })
+                .await;
+            let Some(hits) = hits else {
+                return; // cancelled by a newer keystroke
+            };
+            this.update(cx, |this, cx| {
+                if this.search_generation != generation {
+                    return;
+                }
+                eprintln!(
+                    "search {label:?}: {} hits in {:?}",
+                    hits.len(),
+                    started.elapsed()
+                );
+                if let Some(popup) = &mut this.popup {
+                    popup.hits = Arc::new(hits);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn status(&self) -> String {
