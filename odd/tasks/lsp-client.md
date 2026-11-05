@@ -15,4 +15,4 @@ S4. The UI never blocks on the server: start and requests run in the background.
 
 ## Log
 L1 (2026-11-05) user: "si, arrancá con el cliente LSP"
-L2 (2026-11-05) rust-analyzer is a rustup shim without the component: end-to-end check pending the user's 'rustup component add rust-analyzer'.
+L2 (2026-11-05) rust-analyzer installed by the user; end-to-end verified with the references example (waits for indexing, ~12s cold; finds usages under cfg(test) too).

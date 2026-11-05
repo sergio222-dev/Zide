@@ -4,8 +4,8 @@ use std::{
     collections::HashMap,
     path::Path,
     process::{Child, Command, Stdio},
-    sync::Mutex,
-    time::Duration,
+    sync::{Arc, Condvar, Mutex},
+    time::{Duration, Instant},
 };
 
 use lsp_types::Location;
@@ -51,9 +51,64 @@ pub fn server_for(path: &str) -> Option<(&'static ServerSpec, &'static str)> {
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a request waits for the server to finish loading the project.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// What the server says about being busy: work-done progress and, for servers that send it
+/// (rust-analyzer), its own `experimental/serverStatus`.
+#[derive(Default)]
+struct Activity {
+    /// Progress items begun and not yet ended.
+    active: usize,
+    quiescent: Option<bool>,
+    /// Notifications of either kind seen so far.
+    signals: usize,
+}
+
+#[derive(Default)]
+struct Busy {
+    state: Mutex<Activity>,
+    changed: Condvar,
+}
+
+impl Busy {
+    fn notification(&self, method: &str, params: &Value) {
+        let mut state = self.state.lock().unwrap();
+        match method {
+            "$/progress" => match params["value"]["kind"].as_str() {
+                Some("begin") => state.active += 1,
+                Some("end") => state.active = state.active.saturating_sub(1),
+                _ => return,
+            },
+            "experimental/serverStatus" => state.quiescent = params["quiescent"].as_bool(),
+            _ => return,
+        }
+        state.signals += 1;
+        self.changed.notify_all();
+    }
+
+    /// Waits until nothing is going on, for at most `max`. A server that never says anything
+    /// is taken as idle after a short grace period.
+    fn wait_idle(&self, since: Instant, max: Duration) {
+        const GRACE: Duration = Duration::from_secs(2);
+        let deadline = Instant::now() + max;
+        let mut state = self.state.lock().unwrap();
+        loop {
+            let silent_for_long = state.signals == 0 && since.elapsed() >= GRACE;
+            let idle = state.active == 0 && state.quiescent != Some(false);
+            if (idle && (state.signals > 0 || silent_for_long)) || Instant::now() >= deadline {
+                return;
+            }
+            let wait = Duration::from_millis(100).min(deadline - Instant::now());
+            state = self.changed.wait_timeout(state, wait).unwrap().0;
+        }
+    }
+}
 
 pub struct Client {
     connection: Connection,
+    busy: Arc<Busy>,
+    started: Instant,
     child: Option<Mutex<Child>>,
     /// Version of each open document, by URI.
     versions: Mutex<HashMap<String, i32>>,
@@ -76,8 +131,12 @@ impl Client {
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(Error::Closed);
         };
-        let connection = Connection::new(stdout, stdin, |_, _| {});
-        match Self::with_connection(connection, root) {
+        let busy = Arc::new(Busy::default());
+        let connection = Connection::new(stdout, stdin, {
+            let busy = busy.clone();
+            move |method, params| busy.notification(method, &params)
+        });
+        match Self::handshake(connection, busy, root) {
             Ok(mut client) => {
                 client.child = Some(Mutex::new(child));
                 Ok(client)
@@ -101,7 +160,12 @@ impl Client {
     }
 
     /// The handshake over an existing connection.
+    #[cfg(test)]
     pub(crate) fn with_connection(connection: Connection, root: &Path) -> Result<Self, Error> {
+        Self::handshake(connection, Arc::default(), root)
+    }
+
+    fn handshake(connection: Connection, busy: Arc<Busy>, root: &Path) -> Result<Self, Error> {
         let uri = path_to_uri(root);
         let name = root
             .file_name()
@@ -119,6 +183,8 @@ impl Client {
                         "references": {},
                     },
                     "workspace": {"workspaceFolders": true, "configuration": true},
+                    "window": {"workDoneProgress": true},
+                    "experimental": {"serverStatusNotification": true},
                 },
             }),
             INITIALIZE_TIMEOUT,
@@ -128,6 +194,8 @@ impl Client {
             .map_err(Error::Io)?;
         Ok(Self {
             connection,
+            busy,
+            started: Instant::now(),
             child: None,
             versions: Mutex::default(),
         })
@@ -172,6 +240,8 @@ impl Client {
         line: u32,
         character: u32,
     ) -> Result<Vec<Location>, Error> {
+        // right after startup a server is still loading the project and would say "none"
+        self.busy.wait_idle(self.started, LOAD_TIMEOUT);
         let result = self.connection.request(
             "textDocument/references",
             json!({
