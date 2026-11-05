@@ -636,15 +636,14 @@ impl Viewer {
                     // a thin letter as on any other character.
                     let caret = (row == cursor_line).then(|| {
                         let column = text[..cursor_cell.start.min(text.len())].chars().count();
-                        let color = if insert { 0xb3d4ff } else { 0xb0b0b0 };
                         let gutter = 12. * digits as f32 + 16.;
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left(px(gutter + column as f32 * cell_width))
-                            .w(px(cell_width))
-                            .h(px(ROW_HEIGHT))
-                            .bg(rgba(color << 8 | 0x99))
+                        let left = px(gutter + column as f32 * cell_width);
+                        let caret = div().absolute().top_0().left(left).h(px(ROW_HEIGHT));
+                        if insert {
+                            caret.w(px(2.)).bg(rgb(0x1a5fff)) // a bar, like a terminal's
+                        } else {
+                            caret.w(px(cell_width)).bg(rgba(0xff7a0099)) // a block you can see
+                        }
                     });
                     div()
                         .relative()
