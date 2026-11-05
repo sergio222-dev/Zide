@@ -5,11 +5,13 @@
 //! apart from the parser the editor uses. It never resolves types or references.
 //! A language is a tree-sitter grammar plus a rules table; see `extract`.
 
+mod cache;
 mod extract;
 mod model;
 mod rust;
 mod store;
 
+pub use cache::StubCache;
 pub use extract::{RULES_VERSION, extract_nodes, language_for_path};
 pub use model::{FileStubs, ImportTarget, Modifiers, Stamp, StubKind, StubNode};
 pub use store::{StubStore, Symbol, SymbolHit, SymbolRef, search_symbols};

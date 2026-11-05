@@ -4,7 +4,9 @@
 
 use std::ops::Range;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StubKind {
     Function,
     Method,
@@ -29,7 +31,7 @@ impl StubKind {
 }
 
 /// Bit set of declaration modifiers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Modifiers(u8);
 
 impl Modifiers {
@@ -47,7 +49,7 @@ impl Modifiers {
 }
 
 /// One imported path as written in the source, e.g. `std::collections::HashMap`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportTarget {
     pub path: Box<str>,
     pub alias: Option<Box<str>>,
@@ -55,7 +57,7 @@ pub struct ImportTarget {
     pub glob: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StubNode {
     pub kind: StubKind,
     /// Index of the parent in [`FileStubs::nodes`]; `None` for top-level declarations.
@@ -74,7 +76,7 @@ pub struct StubNode {
 }
 
 /// Content identity of a file when its stubs were built.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stamp {
     pub mtime_ns: u64,
     pub len: u64,
@@ -83,7 +85,7 @@ pub struct Stamp {
 }
 
 /// All stubs of one file, in source order (parents before their children).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileStubs {
     pub stamp: Stamp,
     /// [`crate::RULES_VERSION`] at build time; a different one invalidates the stubs.

@@ -22,7 +22,7 @@ use zide_search::{
     ActionHit, ActionText, FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_actions,
     search_files_with_recent, search_text,
 };
-use zide_stubs::{StubKind, StubStore, SymbolHit, search_symbols};
+use zide_stubs::{StubCache, StubKind, StubStore, SymbolHit, search_symbols};
 
 actions!(zide, [SwitchTab, ToggleRegex, ToggleCase, ToggleWord]);
 
@@ -310,7 +310,20 @@ impl Workspace {
             let symbols = cx
                 .background_executor()
                 .spawn(async move {
-                    StubStore::build(index, &root, previous.as_deref(), &AtomicBool::new(false))
+                    // reuse the running store, or else what the last run left on disk
+                    let cache_path = StubCache::path_for(&root);
+                    let cache = match &previous {
+                        Some(previous) => Some(previous.cache()),
+                        None => cache_path.as_deref().and_then(StubCache::load),
+                    };
+                    let store =
+                        StubStore::build(index, &root, cache.as_ref(), &AtomicBool::new(false))?;
+                    if let Some(path) = cache_path
+                        && let Err(e) = store.save(&path)
+                    {
+                        eprintln!("saving the stub cache failed: {e}");
+                    }
+                    Some(store)
                 })
                 .await;
             let Some(symbols) = symbols else {

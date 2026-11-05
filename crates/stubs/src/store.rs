@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     path::Path,
     sync::{
         Arc,
@@ -13,7 +12,9 @@ use xxhash_rust::xxh3::xxh3_64;
 use zide_index::FileIndex;
 use zide_matcher::{FixingLayoutMatcher, MatchedFragment, Matcher, MatchingMode, RussianToEnglish};
 
-use crate::{FileStubs, RULES_VERSION, Stamp, StubNode, extract_nodes, language_for_path};
+use crate::{
+    FileStubs, RULES_VERSION, Stamp, StubCache, StubNode, extract_nodes, language_for_path,
+};
 
 /// Larger files (generated code, bundles) are not worth parsing.
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -52,20 +53,9 @@ impl StubStore {
     pub fn build(
         files: Arc<FileIndex>,
         root: &Path,
-        previous: Option<&StubStore>,
+        previous: Option<&StubCache>,
         cancel: &AtomicBool,
     ) -> Option<Self> {
-        let known: HashMap<&str, &Arc<FileStubs>> = previous
-            .map(|p| {
-                p.files
-                    .paths()
-                    .iter()
-                    .zip(&p.stubs)
-                    .filter_map(|(path, stubs)| Some((path.as_str(), stubs.as_ref()?)))
-                    .collect()
-            })
-            .unwrap_or_default();
-
         let built: Vec<(Option<Arc<FileStubs>>, bool)> = files
             .paths()
             .par_iter()
@@ -73,7 +63,11 @@ impl StubStore {
                 if cancel.load(Ordering::Relaxed) {
                     return (None, false);
                 }
-                stubs_of_file(root, path, known.get(path.as_str()).copied())
+                stubs_of_file(
+                    root,
+                    path,
+                    previous.and_then(|p| p.files.get(path.as_str())),
+                )
             })
             .collect();
         if cancel.load(Ordering::Relaxed) {
@@ -108,6 +102,14 @@ impl StubStore {
     /// How many files kept their stubs from the previous store.
     pub fn reused(&self) -> usize {
         self.reused
+    }
+
+    pub(crate) fn files(&self) -> &FileIndex {
+        &self.files
+    }
+
+    pub(crate) fn all_stubs(&self) -> &[Option<Arc<FileStubs>>] {
+        &self.stubs
     }
 
     pub fn len(&self) -> usize {
@@ -290,7 +292,8 @@ mod tests {
     }
 
     fn build(files: &Arc<FileIndex>, root: &Path, previous: Option<&StubStore>) -> StubStore {
-        StubStore::build(files.clone(), root, previous, &AtomicBool::new(false)).unwrap()
+        let cache = previous.map(StubStore::cache);
+        StubStore::build(files.clone(), root, cache.as_ref(), &AtomicBool::new(false)).unwrap()
     }
 
     fn names(store: &StubStore, pattern: &str) -> Vec<String> {
