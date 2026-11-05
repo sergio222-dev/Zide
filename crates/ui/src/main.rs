@@ -203,6 +203,7 @@ struct Workspace {
     /// Bumped on every symbol indexing; the result of an older one is dropped.
     symbols_generation: u64,
     _watcher: Option<ProjectWatcher>,
+    _activation: Option<Subscription>,
     /// `None` until the symbols of the current index are parsed.
     symbols: Option<Arc<StubStore>>,
     registry: std::rc::Rc<Vec<ActionDef>>,
@@ -245,6 +246,7 @@ impl Workspace {
             changes_tx,
             symbols_generation: 0,
             _watcher: None,
+            _activation: None,
             symbols: None,
             action_texts: registry
                 .iter()
@@ -373,7 +375,15 @@ impl Workspace {
         self.index = Some(Arc::new(index));
     }
 
+    /// Saves the open file; called whenever the user's attention leaves the editor.
+    fn autosave(&mut self) {
+        if let Some(viewer) = &mut self.viewer {
+            viewer.save();
+        }
+    }
+
     fn open_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.autosave();
         let input = cx.new(|cx| InputState::new(window, cx));
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -484,7 +494,9 @@ impl Workspace {
             Tab::Actions => None,
         };
         if let Some((file, line)) = target {
-            let mut viewer = Viewer::open(&self.root, &index.paths()[file]);
+            let path = index.paths()[file].clone();
+            self.autosave();
+            let mut viewer = Viewer::open(&self.root, &path);
             if let Some(line) = line {
                 viewer.go_to_line(line);
             }
@@ -1174,6 +1186,20 @@ fn main() {
         ]);
         gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
             let workspace = cx.new(|cx| Workspace::new(root, cx));
+            workspace.update(cx, |this, cx| {
+                this._activation =
+                    Some(cx.observe_window_activation(window, |this, window, cx| {
+                        if !window.is_window_active() {
+                            this.autosave();
+                            cx.notify();
+                        }
+                    }));
+            });
+            let saver = workspace.downgrade();
+            window.on_window_should_close(cx, move |_, cx| {
+                saver.update(cx, |this, _| this.autosave()).ok();
+                true
+            });
             workspace.read(cx).focus.clone().focus(window, cx);
             workspace
         })

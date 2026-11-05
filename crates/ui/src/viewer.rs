@@ -1,6 +1,12 @@
 //! File editor view: line numbers, syntax colors, a block cursor and Vim keys.
 
-use std::{fs, ops::Range, path::Path, sync::Arc};
+use std::{
+    fs,
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::SystemTime,
+};
 
 use gpui_kit::*;
 use zide_syntax::{Class, LanguageId, Span, highlight, language_for_path};
@@ -17,8 +23,23 @@ struct Line {
     colors: Vec<(Range<usize>, HighlightStyle)>,
 }
 
+/// What the file looked like on disk when it was read or last written.
+type DiskStamp = (SystemTime, u64);
+
+fn disk_stamp(path: &Path) -> Option<DiskStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
 pub struct Viewer {
     path: String,
+    full_path: PathBuf,
+    /// False when the file could not be read: the buffer then holds an error message.
+    editable: bool,
+    saved_at: Revision,
+    disk: Option<DiskStamp>,
+    /// Last thing worth telling the user (a failed save).
+    notice: Option<String>,
     buffer: Buffer,
     vim: Vim,
     language: Option<LanguageId>,
@@ -32,16 +53,23 @@ impl Viewer {
     /// Opens `root/relative`. Errors are shown as the file's content, not propagated.
     pub fn open(root: &Path, relative: &str) -> Self {
         let full = root.join(relative);
+        let disk = disk_stamp(&full);
         let text = match fs::metadata(&full) {
             Ok(m) if m.len() > MAX_BYTES => Err(format!("{relative}: file too large to open")),
             Ok(_) => fs::read_to_string(&full).map_err(|e| format!("{relative}: {e}")),
             Err(e) => Err(format!("{relative}: {e}")),
         };
+        let editable = text.is_ok();
         let text = text.unwrap_or_else(|message| message);
         let buffer = Buffer::new(&text);
         let language = language_for_path(relative);
         let mut viewer = Self {
             path: relative.to_string(),
+            full_path: full,
+            editable,
+            saved_at: Revision::default(),
+            disk,
+            notice: None,
             vim: Vim::default(),
             language,
             lines: Arc::default(),
@@ -62,7 +90,39 @@ impl Viewer {
         self.scroll.scroll_to_item(row, ScrollStrategy::Top);
     }
 
+    pub fn is_dirty(&self) -> bool {
+        self.editable && self.buffer.revision() != self.saved_at
+    }
+
+    /// Writes the buffer to its file when it has unsaved changes. Refuses to overwrite a file
+    /// that changed on disk since it was read: the notice says so and the edits stay in memory.
+    pub fn save(&mut self) {
+        if !self.is_dirty() {
+            return;
+        }
+        if disk_stamp(&self.full_path) != self.disk {
+            self.notice = Some("not saved: the file changed on disk".into());
+            return;
+        }
+        match fs::write(&self.full_path, self.buffer.text()) {
+            Ok(()) => {
+                self.saved_at = self.buffer.revision();
+                self.disk = disk_stamp(&self.full_path);
+                self.notice = None;
+            }
+            Err(e) => self.notice = Some(format!("not saved: {e}")),
+        }
+    }
+
     pub fn handle_key(&mut self, key: Key) {
+        if !self.editable
+            && !matches!(
+                key,
+                Key::Char('h' | 'j' | 'k' | 'l' | 'w' | 'b' | 'e' | 'G' | 'g' | '0' | '$' | '^')
+            )
+        {
+            return; // an error message is not a document
+        }
         self.vim.handle(&mut self.buffer, key);
         if self.buffer.revision() != self.built_at {
             self.rebuild();
@@ -159,6 +219,8 @@ impl Viewer {
                         Mode::Insert => "INSERT",
                     })
                     .child(self.vim.pending())
+                    .child(if self.is_dirty() { "[+]" } else { "" })
+                    .child(self.notice.clone().unwrap_or_default())
                     .child(div().ml_auto().child({
                         let at = self.buffer.position_of(self.vim.cursor());
                         format!("{}:{}", at.line + 1, at.column + 1)
@@ -294,5 +356,59 @@ mod tests {
         assert_eq!(lines[0].colors[0].0, 0..4);
         assert_eq!(lines[1].colors[0].0, 0..5);
         assert!(lines[1].colors.len() == 1);
+    }
+
+    fn temp_file(name: &str, content: &str) -> (PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("zide-viewer-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.txt"), content).unwrap();
+        (dir, "a.txt".into())
+    }
+
+    fn type_keys(viewer: &mut Viewer, keys: &str) {
+        for c in keys.chars() {
+            viewer.handle_key(Key::Char(c));
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn save_writes_only_changes_and_clears_the_dirty_mark() {
+        let (dir, file) = temp_file("save", "one\ntwo\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.save(); // nothing to write
+        assert!(!viewer.is_dirty());
+        type_keys(&mut viewer, "dd");
+        assert!(viewer.is_dirty());
+        viewer.save();
+        assert!(!viewer.is_dirty());
+        assert_eq!(fs::read_to_string(dir.join(&file)).unwrap(), "two\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn save_refuses_to_overwrite_a_file_changed_on_disk() {
+        let (dir, file) = temp_file("conflict", "one\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "x");
+        fs::write(dir.join(&file), "changed elsewhere, longer\n").unwrap();
+        viewer.save();
+        assert!(viewer.is_dirty());
+        assert!(viewer.notice.is_some());
+        assert_eq!(
+            fs::read_to_string(dir.join(&file)).unwrap(),
+            "changed elsewhere, longer\n"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_unreadable_file_is_never_written() {
+        let dir = std::env::temp_dir().join(format!("zide-viewer-{}-missing", std::process::id()));
+        let mut viewer = Viewer::open(&dir, "nope.txt");
+        type_keys(&mut viewer, "x");
+        assert!(!viewer.is_dirty());
+        viewer.save();
+        assert!(!dir.join("nope.txt").exists());
     }
 }
