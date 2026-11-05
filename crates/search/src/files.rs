@@ -53,6 +53,18 @@ pub fn search_files_cancellable(
     limit: usize,
     cancel: &AtomicBool,
 ) -> Option<Vec<FileHit>> {
+    search_files_with_recent(index, query, limit, cancel, &[])
+}
+
+/// Like [`search_files_cancellable`], but among equally good matches the files in `recent`
+/// (file indices, most recent first) come first, in that order.
+pub fn search_files_with_recent(
+    index: &FileIndex,
+    query: &FileQuery<'_>,
+    limit: usize,
+    cancel: &AtomicBool,
+    recent: &[usize],
+) -> Option<Vec<FileHit>> {
     let pattern = query.pattern.trim();
     if pattern.is_empty() || limit == 0 {
         return Some(Vec::new());
@@ -85,9 +97,16 @@ pub fn search_files_cancellable(
         return None;
     }
 
+    let recency: std::collections::HashMap<usize, usize> = recent
+        .iter()
+        .enumerate()
+        .map(|(rank, &i)| (i, rank))
+        .collect();
+    let rank = |hit: &FileHit| recency.get(&hit.index).copied().unwrap_or(usize::MAX);
     let order = |a: &FileHit, b: &FileHit| {
         b.score
             .cmp(&a.score)
+            .then_with(|| rank(a).cmp(&rank(b)))
             .then_with(|| {
                 index.paths()[a.index]
                     .len()
@@ -244,6 +263,31 @@ mod tests {
     fn exact_name_ranks_before_longer_matches() {
         let idx = index(&["a/FooBarBaz.rs", "b/Foo.rs", "c/FooBar.rs"]);
         assert_eq!(found(&idx, "Foo")[0], "b/Foo.rs");
+    }
+
+    fn found_with_recent(idx: &FileIndex, pattern: &str, recent: &[usize]) -> Vec<String> {
+        let query = FileQuery::parse(pattern);
+        search_files_with_recent(idx, &query, 10, &AtomicBool::new(false), recent)
+            .unwrap()
+            .iter()
+            .map(|h| idx.paths()[h.index].clone())
+            .collect()
+    }
+
+    #[test]
+    fn recent_files_win_ties_in_recency_order() {
+        let idx = index(&["a/Foo.rs", "b/Foo.rs", "c/Foo.rs"]);
+        assert_eq!(found(&idx, "Foo"), ["a/Foo.rs", "b/Foo.rs", "c/Foo.rs"]);
+        assert_eq!(
+            found_with_recent(&idx, "Foo", &[2, 1]),
+            ["c/Foo.rs", "b/Foo.rs", "a/Foo.rs"]
+        );
+    }
+
+    #[test]
+    fn recency_never_beats_a_better_match() {
+        let idx = index(&["a/BarFoo.rs", "b/Foo.rs"]);
+        assert_eq!(found_with_recent(&idx, "Foo", &[0])[0], "b/Foo.rs");
     }
 
     #[test]

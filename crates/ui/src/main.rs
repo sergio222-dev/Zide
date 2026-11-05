@@ -19,7 +19,7 @@ use gpui_kit::*;
 use zide_core::{DoubleShiftDetector, scan_files};
 use zide_index::FileIndex;
 use zide_search::{
-    FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_files_cancellable, search_text,
+    FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_files_with_recent, search_text,
 };
 
 actions!(zide, [SwitchTab, ToggleRegex, ToggleCase, ToggleWord]);
@@ -33,6 +33,7 @@ struct TextOptions {
 }
 
 const MAX_FILE_RESULTS: usize = 200;
+const MAX_RECENT: usize = 50;
 const MAX_TEXT_RESULTS: usize = 1000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -104,6 +105,8 @@ struct Workspace {
     /// Bumped on every search; results of an older search are dropped.
     search_generation: u64,
     cancel_search: Option<Arc<AtomicBool>>,
+    /// Files opened from the popup (indices into `index`), most recent first.
+    recent: Vec<usize>,
 }
 
 impl Workspace {
@@ -136,6 +139,7 @@ impl Workspace {
             popup: None,
             search_generation: 0,
             cancel_search: None,
+            recent: Vec::new(),
         }
     }
 
@@ -213,19 +217,20 @@ impl Workspace {
             return;
         };
         let target = match popup.tab {
-            Tab::Files => popup.files.get(popup.selected).map(|hit| {
-                (
-                    index.paths()[hit.index].clone(),
-                    FileQuery::parse(&popup.query).line,
-                )
-            }),
+            Tab::Files => popup
+                .files
+                .get(popup.selected)
+                .map(|hit| (hit.index, FileQuery::parse(&popup.query).line)),
             Tab::Text => popup
                 .text
                 .get(popup.selected)
-                .map(|hit| (index.paths()[hit.file].clone(), Some(hit.line as u32))),
+                .map(|hit| (hit.file, Some(hit.line as u32))),
         };
-        if let Some((path, line)) = target {
-            eprintln!("open {path} line {line:?}");
+        if let Some((file, line)) = target {
+            eprintln!("open {} line {line:?}", index.paths()[file]);
+            self.recent.retain(|&i| i != file);
+            self.recent.insert(0, file);
+            self.recent.truncate(MAX_RECENT);
             self.close_popup(window, cx);
         }
     }
@@ -260,9 +265,13 @@ impl Workspace {
 
         match popup.tab {
             Tab::Files if query.trim().is_empty() => {
-                // nothing typed yet: show the first files
+                // nothing typed yet: recent files first, then the first files
                 popup.files = Arc::new(
-                    (0..index.len().min(MAX_FILE_RESULTS))
+                    self.recent
+                        .iter()
+                        .copied()
+                        .chain((0..index.len()).filter(|i| !self.recent.contains(i)))
+                        .take(MAX_FILE_RESULTS)
                         .map(|index| FileHit {
                             index,
                             score: 0,
@@ -273,7 +282,10 @@ impl Workspace {
                 popup.select(0);
                 cx.notify();
             }
-            Tab::Files => self.search_files(query, index, generation, cancel, cx),
+            Tab::Files => {
+                let recent = self.recent.clone();
+                self.search_files(query, recent, index, generation, cancel, cx)
+            }
             Tab::Text => {
                 popup.text = Arc::default();
                 popup.text_status = String::new();
@@ -301,6 +313,7 @@ impl Workspace {
     fn search_files(
         &mut self,
         query: String,
+        recent: Vec<usize>,
         index: Arc<FileIndex>,
         generation: u64,
         cancel: Arc<AtomicBool>,
@@ -313,7 +326,7 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let query = FileQuery::parse(&query);
-                    search_files_cancellable(&index, &query, MAX_FILE_RESULTS, &cancel)
+                    search_files_with_recent(&index, &query, MAX_FILE_RESULTS, &cancel, &recent)
                 })
                 .await;
             let Some(hits) = hits else {
