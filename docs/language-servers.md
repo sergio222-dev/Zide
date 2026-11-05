@@ -14,7 +14,7 @@ Zide looks for each server in this order:
 | Language | Files | Command | Install (pick one) |
 | --- | --- | --- | --- |
 | Rust | `.rs` | `rust-analyzer` | `rustup component add rust-analyzer` (on the `PATH`), or put the binary in `<folder>/bin/` |
-| TypeScript / JavaScript | `.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs` | `typescript-language-server --stdio` | `npm install --prefix ~/.local/share/zide/servers typescript-language-server typescript@5` (Zide's folder), or `npm install -g typescript-language-server typescript@5` (`PATH`) |
+| TypeScript / JavaScript | `.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs` | `tsc --lsp --stdio` (TypeScript 7, native) | `npm install --prefix ~/.local/share/zide/servers typescript` (Zide's folder). Fallback when that is absent: `typescript-language-server --stdio`, installed with `npm install --prefix ~/.local/share/zide/servers typescript-language-server typescript@5` or `npm install -g typescript-language-server typescript@5` (`PATH`) |
 
 The npm servers are Node scripts: `node` has to be on the `PATH` when Zide runs them.
 
@@ -36,9 +36,13 @@ Restart Zide after installing a server.
 
 ## TypeScript 7
 
-`typescript@latest` is now TypeScript 7 (the native port), which has no `tsserver.js`, and
-`typescript-language-server` cannot use it yet: it fails with *"Could not find a valid TypeScript
-installation"*. Install `typescript@5` next to the server (as in the table above). A project's own
-`typescript` in its `node_modules` is used first when it is a version the server supports; the
-copy in Zide's folder is the fallback for projects that have none, or where it is not at the
-folder you opened (for example a monorepo opened from its top folder).
+`typescript@latest` is TypeScript 7, the native port. It ships its own language server
+(`tsc --lsp --stdio`, a Go binary inside `@typescript/typescript-<os>-<arch>`): Zide uses it when
+it is in its folder, which needs no Node at run time and starts in milliseconds.
+
+`typescript-language-server` cannot use TypeScript 7 (no `tsserver.js`; it fails with *"Could not
+find a valid TypeScript installation"*). If you use it as the fallback, install `typescript@5` or
+`typescript@6` next to it. A project's own `typescript` in its `node_modules` is used first when
+it is a version the server supports; the copy in Zide's folder is the fallback for projects that
+have none, or where it is not at the folder you opened (for example a monorepo opened from its top
+folder).

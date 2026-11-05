@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::ServerSpec;
+
 /// `~/.local/share/zide/servers` on Linux; the data folder of the platform elsewhere.
 pub fn servers_dir() -> Option<PathBuf> {
     Some(dirs::data_dir()?.join("zide").join("servers"))
@@ -27,6 +29,37 @@ pub fn resolve(command: &str) -> PathBuf {
     servers_dir()
         .and_then(|folder| find_in(&folder, command))
         .unwrap_or_else(|| PathBuf::from(command))
+}
+
+/// What to run for `spec`: its native build when Zide's folder has one, else the program
+/// from [`resolve`] with the usual arguments.
+pub fn launch(spec: &ServerSpec) -> (PathBuf, &'static [&'static str]) {
+    let native = spec.native.as_ref().and_then(|native| {
+        let found = (native.find)(&servers_dir()?)?;
+        Some((found, native.args))
+    });
+    native.unwrap_or_else(|| (resolve(spec.command), spec.args))
+}
+
+/// The TypeScript 7 executable that npm installs as `@typescript/typescript-<os>-<arch>`.
+pub fn native_typescript(folder: &Path) -> Option<PathBuf> {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    let exe = if cfg!(windows) { "tsc.exe" } else { "tsc" };
+    let path = folder
+        .join("node_modules/@typescript")
+        .join(format!("typescript-{os}-{arch}"))
+        .join("lib")
+        .join(exe);
+    path.is_file().then_some(path)
 }
 
 #[cfg(test)]
@@ -70,6 +103,28 @@ mod tests {
         fs::write(dir.join("node_modules/.bin/tool"), "").unwrap();
         assert_eq!(find_in(&dir, "tool"), Some(dir.join("bin/tool")));
         assert_eq!(find_in(&dir, "imposter"), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_native_typescript_is_found_by_platform() {
+        let dir = folder("native");
+        assert_eq!(native_typescript(&dir), None);
+        let os = match std::env::consts::OS {
+            "macos" => "darwin",
+            "windows" => "win32",
+            other => other,
+        };
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "x64",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        let lib = dir.join(format!("node_modules/@typescript/typescript-{os}-{arch}/lib"));
+        fs::create_dir_all(&lib).unwrap();
+        let exe = lib.join(if cfg!(windows) { "tsc.exe" } else { "tsc" });
+        fs::write(&exe, "").unwrap();
+        assert_eq!(native_typescript(&dir), Some(exe));
         fs::remove_dir_all(dir).unwrap();
     }
 

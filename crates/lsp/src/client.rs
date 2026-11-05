@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
@@ -17,7 +17,7 @@ use crate::{
 };
 
 /// How to run the server of some languages.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ServerSpec {
     /// Identifies the server: files whose languages share a server share its process.
     pub name: &'static str,
@@ -26,6 +26,15 @@ pub struct ServerSpec {
     /// What to run to get it, shown when the server is missing; `{dir}` stands for Zide's
     /// folder of servers.
     pub install: &'static str,
+    /// A faster build of the same server, preferred when installed in Zide's folder: where to
+    /// find it and the arguments it takes.
+    pub native: Option<Native>,
+}
+
+#[derive(Debug)]
+pub struct Native {
+    pub find: fn(&Path) -> Option<PathBuf>,
+    pub args: &'static [&'static str],
 }
 
 const RUST: ServerSpec = ServerSpec {
@@ -33,13 +42,18 @@ const RUST: ServerSpec = ServerSpec {
     command: "rust-analyzer",
     args: &[],
     install: "rustup component add rust-analyzer",
+    native: None,
 };
 
 const TYPESCRIPT: ServerSpec = ServerSpec {
     name: "typescript",
     command: "typescript-language-server",
     args: &["--stdio"],
-    install: "npm install --prefix {dir} typescript-language-server typescript@5",
+    install: "npm install --prefix {dir} typescript",
+    native: Some(Native {
+        find: crate::servers::native_typescript,
+        args: &["--lsp", "--stdio"],
+    }),
 };
 
 /// The server for the file at `path` and the `languageId` it is opened with.
@@ -122,8 +136,9 @@ pub struct Client {
 impl Client {
     /// Runs the server of `spec` with `root` as its workspace and waits for its handshake.
     pub fn start(spec: &ServerSpec, root: &Path) -> Result<Self, Error> {
-        let mut child = Command::new(crate::servers::resolve(spec.command))
-            .args(spec.args)
+        let (program, args) = crate::servers::launch(spec);
+        let mut child = Command::new(program)
+            .args(args)
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -299,8 +314,8 @@ mod tests {
             server_for("a.mjs").map(|s| (s.0.name, s.1)),
             Some(("typescript", "javascript"))
         );
-        assert_eq!(server_for("README.md"), None);
-        assert_eq!(server_for("Makefile"), None);
+        assert!(server_for("README.md").is_none());
+        assert!(server_for("Makefile").is_none());
     }
 
     fn owned(connection: std::sync::Arc<Connection>) -> Connection {
@@ -414,6 +429,7 @@ mod tests {
             command: "zide-no-such-language-server",
             args: &[],
             install: "",
+            native: None,
         };
         let error = Client::start(&spec, Path::new("/tmp")).err().unwrap();
         assert!(matches!(
