@@ -14,6 +14,7 @@ use std::{
     time::Instant,
 };
 
+mod usages;
 mod viewer;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -21,6 +22,7 @@ use gpui_kit::*;
 use viewer::{Effect, FindStatus, Viewer};
 use zide_core::{Change, DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
 use zide_index::FileIndex;
+use zide_lsp::{Client, Error as LspError, server_for};
 use zide_search::{
     ActionHit, ActionText, FileHit, FileQuery, TextHit, TextQuery, TextSearchError, search_actions,
     search_files, search_files_with_recent, search_text,
@@ -228,6 +230,8 @@ struct Popup {
     files: Arc<Vec<FileHit>>,
     text: Arc<Vec<TextHit>>,
     text_status: String,
+    /// Where the Text rows came from, beside the count (e.g. a language server).
+    note: String,
     actions: Arc<Vec<ActionHit>>,
     symbols: Arc<Vec<SymbolHit>>,
     options: TextOptions,
@@ -264,6 +268,14 @@ impl Popup {
     }
 }
 
+/// What is known of the language server of a language.
+enum LspState {
+    Starting,
+    Ready(Arc<Client>),
+    /// It could not run (not installed, crashed on startup): the reason, to show once.
+    Unavailable(String),
+}
+
 struct Workspace {
     focus: FocusHandle,
     /// When the last Space was pressed in Normal mode: two in a row open the popup.
@@ -276,6 +288,8 @@ struct Workspace {
     /// A `g` was typed in the tree (`gg` goes to the top).
     tree_g: bool,
     tree_scroll: UniformListScrollHandle,
+    /// Language servers by `ServerSpec::name`, started the first time they are needed.
+    lsp: std::collections::HashMap<&'static str, LspState>,
     root: PathBuf,
     /// `None` while the project is still being scanned.
     index: Option<Arc<FileIndex>>,
@@ -333,6 +347,7 @@ impl Workspace {
             tree_focused: false,
             tree_g: false,
             tree_scroll: UniformListScrollHandle::new(),
+            lsp: std::collections::HashMap::new(),
             root,
             index: None,
             popup: None,
@@ -491,6 +506,7 @@ impl Workspace {
                 let query = input.read(cx).value().to_string();
                 if let Some(popup) = &mut this.popup {
                     popup.query = query;
+                    popup.note.clear();
                 }
                 this.search_again(cx);
             }
@@ -519,6 +535,7 @@ impl Workspace {
             files: Arc::default(),
             text: Arc::default(),
             text_status: String::new(),
+            note: String::new(),
             actions: Arc::default(),
             symbols: Arc::default(),
             options: TextOptions::default(),
@@ -672,8 +689,133 @@ impl Workspace {
             whole_word: true,
         };
         let input = popup.input.clone();
-        input.update(cx, |state, cx| state.set_value(word, window, cx));
+        input.update(cx, |state, cx| state.set_value(word.clone(), window, cx));
         self.show_tab(Tab::Text, cx);
+        // the text matches above are shown at once; a language server refines them
+        self.semantic_usages(word, cx);
+    }
+
+    /// Asks the language server of the open file for the real usages of the symbol under the
+    /// cursor and swaps them in for the text matches when they arrive.
+    fn semantic_usages(&mut self, word: String, cx: &mut Context<Self>) {
+        let (Some(viewer), Some(index)) = (&self.viewer, self.index.clone()) else {
+            return;
+        };
+        let Some((spec, language)) = server_for(viewer.path()) else {
+            return; // no server for this language: the text matches stand
+        };
+        let (line, character) = viewer.lsp_position();
+        let text = viewer.text();
+        let path = self.root.join(viewer.path());
+        let root = self.root.clone();
+        let running = match self.lsp.get(spec.name) {
+            Some(LspState::Ready(client)) => Some(client.clone()),
+            Some(LspState::Starting) => {
+                return self.set_usages_note(
+                    &word,
+                    format!("{} is starting · text matches", spec.command),
+                    cx,
+                );
+            }
+            Some(LspState::Unavailable(why)) => {
+                return self.set_usages_note(&word, format!("{why} · text matches"), cx);
+            }
+            None => None,
+        };
+        if running.is_none() {
+            self.lsp.insert(spec.name, LspState::Starting);
+        }
+        cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            let outcome = cx
+                .background_executor()
+                .spawn({
+                    let root = root.clone();
+                    async move {
+                        let client = match running {
+                            Some(client) => client,
+                            None => Arc::new(Client::start(spec, &root)?),
+                        };
+                        client.sync(&path, language, &text)?;
+                        let found = client.references(&path, line, character)?;
+                        Ok::<_, LspError>((client, usages::hits(&root, &index, &found)))
+                    }
+                })
+                .await;
+            eprintln!("usages from {} in {:?}", spec.command, started.elapsed());
+            this.update(cx, |this, cx| {
+                let result = match outcome {
+                    Ok((client, hits)) => {
+                        this.lsp.insert(spec.name, LspState::Ready(client));
+                        Ok(hits)
+                    }
+                    Err(e) => {
+                        let starting = matches!(this.lsp.get(spec.name), Some(LspState::Starting));
+                        match &e {
+                            // it never came up: say why and do not retry every time
+                            LspError::NotInstalled(_) | LspError::Server { .. } if starting => {
+                                this.lsp
+                                    .insert(spec.name, LspState::Unavailable(e.to_string()));
+                            }
+                            // it died, or hung while starting: next time, start anew
+                            LspError::Closed | LspError::Io(_) => {
+                                this.lsp.remove(spec.name);
+                            }
+                            LspError::Timeout if starting => {
+                                this.lsp.remove(spec.name);
+                            }
+                            // a refusal of this one request (content modified): the server stays
+                            _ => {}
+                        }
+                        Err(e)
+                    }
+                };
+                this.apply_usages(&word, spec.command, result, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn set_usages_note(&mut self, word: &str, note: String, cx: &mut Context<Self>) {
+        if let Some(popup) = &mut self.popup
+            && popup.tab == Tab::Text
+            && popup.query == word
+        {
+            popup.note = note;
+            cx.notify();
+        }
+    }
+
+    /// Shows what the language server found, unless the popup moved on to another query.
+    fn apply_usages(
+        &mut self,
+        word: &str,
+        command: &str,
+        result: Result<Vec<TextHit>, LspError>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(hits) if !hits.is_empty() => {
+                if !self
+                    .popup
+                    .as_ref()
+                    .is_some_and(|p| p.tab == Tab::Text && p.query == word)
+                {
+                    return;
+                }
+                self.cancel_running_search(); // the text matches no longer matter
+                if let Some(popup) = &mut self.popup {
+                    popup.text_status = format!("{} usages", hits.len());
+                    popup.note = format!("by {command}");
+                    popup.text = Arc::new(hits);
+                    popup.select(0);
+                }
+                cx.notify();
+            }
+            Ok(_) => self.set_usages_note(word, format!("{command} found none · text matches"), cx),
+            Err(e) => self.set_usages_note(word, format!("{e} · text matches"), cx),
+        }
     }
 
     fn open_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
@@ -1259,7 +1401,8 @@ impl Workspace {
             },
             (Some(index), Tab::Files) => format!("{} files · {}", index.len(), self.root.display()),
             (Some(_), Tab::Text) if popup.query.is_empty() => "Type text to search in files".into(),
-            (Some(_), Tab::Text) => popup.text_status.clone(),
+            (Some(_), Tab::Text) if popup.note.is_empty() => popup.text_status.clone(),
+            (Some(_), Tab::Text) => format!("{} · {}", popup.text_status, popup.note),
         }
     }
 }

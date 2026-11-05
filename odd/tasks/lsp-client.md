@@ -11,7 +11,8 @@ S4. The UI never blocks on the server: start and requests run in the background.
 ## Tasks
 - [x] T1 (S1) zide-lsp: framing, connection with request/response correlation, tests with in-memory pipes.
 - [x] T2 (S1,S2) zide-lsp: client handshake, didOpen/didChange/didClose, references, server table by extension.
-- [ ] T3 (S3,S4) UI: lazy server start, document sync before request, references into the Text list, fallback + status.
+- [x] T3 (S3,S4) UI: lazy server start, document sync before request, references into the Text list, fallback + status.
 
 ## Log
 L1 (2026-11-05) user: "si, arrancá con el cliente LSP"
+L2 (2026-11-05) rust-analyzer is a rustup shim without the component: end-to-end check pending the user's 'rustup component add rust-analyzer'.

@@ -461,6 +461,21 @@ impl Viewer {
     }
 
     /// The text selected in Visual mode, when it is a single line: what the panel starts with.
+    /// The cursor as a language server wants it: 0-based line and UTF-16 column.
+    pub fn lsp_position(&self) -> (u32, u32) {
+        let position = self.buffer.position_of(self.vim.cursor());
+        let line = self.buffer.line(position.line);
+        (
+            position.line as u32,
+            zide_lsp::utf16_column(&line, position.column),
+        )
+    }
+
+    /// The whole text, as of now (saved or not).
+    pub fn text(&self) -> String {
+        self.buffer.text()
+    }
+
     /// The identifier under the cursor, if it is on one.
     pub fn word_at_cursor(&self) -> Option<String> {
         let position = self.buffer.position_of(self.vim.cursor());
