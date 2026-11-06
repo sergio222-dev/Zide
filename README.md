@@ -119,6 +119,11 @@ glide, for instance), the frames of the last second, the longest wait between tw
 burst and the time spent building the view. The window only redraws when
 something changes, so read it while scrolling or holding a movement key.
 
+### Update notification (debug)
+
+`ZIDE_FAKE_VERSION=0.0.1 zide` makes the update check believe it runs that version, so the
+"Update available" notification shows up. The Update button installs the real latest release.
+
 ### Language servers
 
 Zide does not ship language servers; it uses the ones you have for Rust, TypeScript/JavaScript,
