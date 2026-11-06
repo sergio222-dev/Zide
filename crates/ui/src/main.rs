@@ -2905,7 +2905,7 @@ enum Content {
 
 impl Shell {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let welcome = cx.new(|_| Welcome::new());
+        let welcome = cx.new(|cx| Welcome::new(window, cx));
         let opened = cx.subscribe_in(
             &welcome,
             window,
