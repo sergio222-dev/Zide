@@ -56,6 +56,12 @@ pub struct Launch {
     pub native: bool,
 }
 
+/// The `rust-glancer` binary in Zide's folder; unlike the other servers it is never taken from
+/// the `PATH`, so that having it installed elsewhere does not swap rust-analyzer out.
+pub fn native_rust(folder: &Path) -> Option<PathBuf> {
+    find_in(folder, "rust-glancer")
+}
+
 /// The TypeScript 7 executable that npm installs as `@typescript/typescript-<os>-<arch>`.
 pub fn native_typescript(folder: &Path) -> Option<PathBuf> {
     let os = match std::env::consts::OS {
@@ -142,6 +148,16 @@ mod tests {
         let exe = lib.join(if cfg!(windows) { "tsc.exe" } else { "tsc" });
         fs::write(&exe, "").unwrap();
         assert_eq!(native_typescript(&dir), Some(exe));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rust_glancer_is_found_only_in_zides_folder() {
+        let dir = folder("glancer");
+        assert_eq!(native_rust(&dir), None);
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        fs::write(dir.join("bin/rust-glancer"), "").unwrap();
+        assert_eq!(native_rust(&dir), Some(dir.join("bin/rust-glancer")));
         fs::remove_dir_all(dir).unwrap();
     }
 
