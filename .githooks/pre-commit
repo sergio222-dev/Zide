@@ -1,0 +1,6 @@
+#!/bin/sh
+# Same formatting check as CI; fast enough to run on every commit.
+cargo fmt --all --check || {
+    echo "pre-commit: run 'cargo fmt --all' and commit again" >&2
+    exit 1
+}
