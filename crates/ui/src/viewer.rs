@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui_kit::*;
+use gpui_kit::{component::scroll::Scrollbar, *};
 use zide_git::{BlameLine, LineChange};
 use zide_lsp::{
     Diagnostic, DiagnosticSeverity, NumberOrString, ParameterHint, char_column, uri_to_path,
@@ -2024,6 +2024,7 @@ impl Viewer {
                         .size_full(),
                     )
                     .child(list)
+                    .child(Scrollbar::new(&self.scroll))
                     .children(sticky)
                     .children(popup),
             )
