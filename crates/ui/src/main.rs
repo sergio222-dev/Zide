@@ -1963,6 +1963,8 @@ impl Workspace {
 
         let mut root = div()
             .id("workspace")
+            .flex()
+            .flex_col()
             .size_full()
             .bg(rgb(theme::BACKGROUND))
             .key_context("Workspace")
@@ -2050,7 +2052,9 @@ impl Workspace {
             .child(
                 div()
                     .flex()
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
                     .children(self.tree_visible.then(|| self.project_tree(cx)))
                     .child(match &self.viewer {
                         Some(viewer) => div()
@@ -2108,7 +2112,8 @@ impl Workspace {
                             "Press Space twice to open the popup. Alt+1 shows the project tree.",
                         ),
                     }),
-            );
+            )
+            .children(self.viewer.as_ref().map(Viewer::status_bar));
 
         let Some(popup) = &self.popup else {
             return root;

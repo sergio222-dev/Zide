@@ -13,6 +13,7 @@ use std::{
 };
 
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::*;
 use zide_git::{BlameLine, LineChange};
 use zide_lsp::{
@@ -881,6 +882,25 @@ impl Viewer {
     /// True when the next key starts a Normal-mode command (nothing half typed).
     pub fn awaits_command(&self) -> bool {
         self.vim.mode() == Mode::Normal && self.vim.pending().is_empty() && !self.z_pending
+    }
+
+    /// The status bar for this editor: mode and pending keys on the left, the notice in the
+    /// middle and the cursor position on the right.
+    pub fn status_bar(&self) -> StatusBar {
+        let at = self.buffer.position_of(self.vim.cursor());
+        StatusBar::new()
+            .bg(rgb(theme::BACKGROUND))
+            .text_color(rgb(theme::MUTED))
+            .left(match self.vim.mode() {
+                Mode::Normal => "NORMAL",
+                Mode::Insert => "INSERT",
+                Mode::Visual => "VISUAL",
+                Mode::VisualLine => "VISUAL LINE",
+            })
+            .left(self.pending_keys())
+            .left(if self.is_dirty() { "[+]" } else { "" })
+            .child(self.notice.clone().unwrap_or_default())
+            .right(format!("{}:{}", at.line + 1, at.column + 1))
     }
 
     /// What is typed so far of an unfinished command, for the status bar.
@@ -1892,27 +1912,6 @@ impl Viewer {
                     .vertical_scrollbar(&self.scroll)
                     .children(sticky)
                     .children(popup),
-            )
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .flex()
-                    .gap_3()
-                    .text_color(rgb(theme::MUTED))
-                    .child(match self.vim.mode() {
-                        Mode::Normal => "NORMAL",
-                        Mode::Insert => "INSERT",
-                        Mode::Visual => "VISUAL",
-                        Mode::VisualLine => "VISUAL LINE",
-                    })
-                    .child(self.pending_keys())
-                    .child(if self.is_dirty() { "[+]" } else { "" })
-                    .child(self.notice.clone().unwrap_or_default())
-                    .child(div().ml_auto().child({
-                        let at = self.buffer.position_of(self.vim.cursor());
-                        format!("{}:{}", at.line + 1, at.column + 1)
-                    })),
             )
     }
 }
