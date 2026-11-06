@@ -133,6 +133,7 @@ Go and Python. See [docs/language-servers.md](docs/language-servers.md).
 
 ```sh
 cargo test --workspace
+git config core.hooksPath .githooks   # once: formatting on commit, CI's checks on push
 ```
 
 Releasing is described in [docs/releasing.md](docs/releasing.md).
