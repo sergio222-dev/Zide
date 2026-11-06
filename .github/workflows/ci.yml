@@ -3,9 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    paths-ignore: ["docs/**", "odd/**", "**/*.md", "scripts/**"]
   pull_request:
-    paths-ignore: ["docs/**", "odd/**", "**/*.md", "scripts/**"]
 
 concurrency:
   group: ci-${{ github.ref }}
