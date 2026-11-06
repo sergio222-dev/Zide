@@ -14,6 +14,7 @@ use std::{
 
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::status_bar::StatusBar;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::*;
 use zide_git::{BlameLine, LineChange};
 use zide_lsp::{
@@ -1837,6 +1838,7 @@ impl Viewer {
                                 )
                                 .children(starts.contains(&row).then(|| {
                                     let on_fold = on_fold.clone();
+                                    let is_folded = folded.contains(&row);
                                     div()
                                         .absolute()
                                         .top_0()
@@ -1844,8 +1846,13 @@ impl Viewer {
                                         .w(px(14. * scale))
                                         .h(px(row_height))
                                         .text_center()
+                                        .id(("fold", row))
                                         .cursor_pointer()
-                                        .child(if folded.contains(&row) { "▸" } else { "▾" })
+                                        .tooltip(move |window, cx| {
+                                            let tip = if is_folded { "Unfold" } else { "Fold" };
+                                            Tooltip::new(tip).build(window, cx)
+                                        })
+                                        .child(if is_folded { "▸" } else { "▾" })
                                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                             cx.stop_propagation(); // not a click on the text
                                             on_fold(row, cx)
