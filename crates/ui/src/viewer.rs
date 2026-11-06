@@ -714,8 +714,10 @@ impl Viewer {
         let offset = self.buffer.line_start(line) + view.column;
         self.vim.set_cursor(&self.buffer, offset);
         let top = view.top.min(self.lines.len() - 1);
+        // strict: a line that already fits on screen from the top of the file still goes to the
+        // top of the view
         self.scroll
-            .scroll_to_item(self.rows.row_of(top), ScrollStrategy::Top);
+            .scroll_to_item_strict(self.rows.row_of(top), ScrollStrategy::Top);
     }
 
     /// `(first visible row, visible rows)` as of the last layout, if there was one.
