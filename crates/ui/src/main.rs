@@ -35,6 +35,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::*;
 use viewer::{Effect, FindStatus, FormatRequest, HighlightKey, Viewer};
 use welcome::{OpenProject, Welcome};
@@ -1300,7 +1301,31 @@ impl Workspace {
         if let Some(row) = self.tree.selected() {
             self.tree_scroll
                 .scroll_to_item(row, ScrollStrategy::Nearest);
+            self.scroll_tree_sideways(row);
         }
+    }
+
+    /// A row whose name is cut off on the right scrolls sideways so its icon sits at the left
+    /// edge; a row that fits shows the tree from the left again. Text width is estimated.
+    fn scroll_tree_sideways(&self, row: usize) {
+        const CHAR: f32 = 7.5; // approximate advance of one character
+        const ICON_AT: f32 = 24.; // chevron column + gap, after the indent
+        let rows = self.tree.shared_rows();
+        let Some(row) = rows.get(row) else { return };
+        let handle = self.tree_scroll.0.borrow().base_handle.clone();
+        let viewport = f32::from(handle.bounds().size.width);
+        let viewport = if viewport > 0. { viewport } else { 260. };
+        let icon_x = ICON_AT + 14. * row.depth as f32;
+        let right = icon_x + 20. + CHAR * row.name.chars().count() as f32 + 8.;
+        let max = f32::from(handle.max_offset().x);
+        let x = if right > viewport {
+            -icon_x.min(max)
+        } else {
+            0.
+        };
+        let mut offset = handle.offset();
+        offset.x = px(x);
+        handle.set_offset(offset);
     }
 
     /// Alt+1: shows the tree and focuses it; from the tree, hides it again (like IntelliJ).
@@ -1487,6 +1512,12 @@ impl Workspace {
         let selected = self.tree.selected();
         let focused = self.tree_focused;
         let workspace = cx.entity();
+        // the widest row sets the scrollable width (an indent step is about two characters)
+        let widest = rows
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, row)| row.depth * 2 + row.name.chars().count())
+            .map(|(index, _)| index);
         let list = uniform_list("project-tree", rows.len(), move |range, _, _| {
             range
                 .map(|index| {
@@ -1499,23 +1530,30 @@ impl Workspace {
                     };
                     let line = div()
                         .id(("tree-row", index))
+                        .w_full()
                         .h(px(TREE_ROW_HEIGHT))
                         .flex()
                         .items_center()
                         .gap_1()
                         .pl(px(8. + 14. * row.depth as f32))
+                        .pr(px(16.))
                         .whitespace_nowrap()
-                        .child(div().w(px(12.)).child(match (row.dir, row.expanded) {
-                            (false, _) => "",
-                            (true, true) => "▾",
-                            (true, false) => "▸",
-                        }))
+                        .child(div().w(px(12.)).flex_shrink_0().child(
+                            match (row.dir, row.expanded) {
+                                (false, _) => "",
+                                (true, true) => "▾",
+                                (true, false) => "▸",
+                            },
+                        ))
                         .child({
                             let (icon, color) =
                                 file_icon::for_row(&row.name, row.dir, row.expanded);
-                            Icon::new(icon).size_4().text_color(rgb(color))
+                            Icon::new(icon)
+                                .size_4()
+                                .flex_shrink_0()
+                                .text_color(rgb(color))
                         })
-                        .child(row.name.clone())
+                        .child(div().flex_shrink_0().child(row.name.clone()))
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             workspace.update(cx, |this, cx| {
                                 this.tree_focused = true;
@@ -1530,6 +1568,8 @@ impl Workspace {
                 })
                 .collect()
         })
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+        .with_width_from_item(widest)
         .track_scroll(&self.tree_scroll)
         .size_full();
         div()
@@ -1541,7 +1581,13 @@ impl Workspace {
             .border_color(rgb(theme::BORDER))
             .bg(rgb(theme::BACKGROUND))
             .text_color(rgb(theme::TEXT))
-            .child(list)
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .child(list)
+                    .child(Scrollbar::new(&self.tree_scroll)),
+            )
     }
 
     fn editor_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
