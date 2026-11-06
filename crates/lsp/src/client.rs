@@ -169,6 +169,8 @@ pub struct Client {
     /// Version of each open document, by URI.
     versions: Mutex<HashMap<String, (i32, u64)>>,
     published: Published,
+    /// The server answers `textDocument/diagnostic` (some, like TypeScript 7, never publish).
+    pulls_diagnostics: bool,
 }
 
 impl Client {
@@ -252,7 +254,7 @@ impl Client {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        connection.request(
+        let initialized = connection.request(
             "initialize",
             json!({
                 "processId": std::process::id(),
@@ -263,6 +265,7 @@ impl Client {
                         "synchronization": {"didSave": false},
                         "references": {},
                         "publishDiagnostics": {"relatedInformation": true},
+                        "diagnostic": {"dynamicRegistration": false},
                     },
                     "workspace": {"workspaceFolders": true, "configuration": true},
                     "window": {"workDoneProgress": true},
@@ -282,7 +285,30 @@ impl Client {
             label: String::new(),
             versions: Mutex::default(),
             published,
+            pulls_diagnostics: !initialized["capabilities"]["diagnosticProvider"].is_null(),
         })
+    }
+
+    /// Asks a server that does not publish for the diagnostics of `path` (synced before) and
+    /// keeps the answer for `diagnostics`. Does nothing for a server that publishes by itself.
+    pub fn pull_diagnostics(&self, path: &Path) -> Result<(), Error> {
+        if !self.pulls_diagnostics {
+            return Ok(());
+        }
+        let report = self.connection.request(
+            "textDocument/diagnostic",
+            json!({"textDocument": {"uri": path_to_uri(path)}}),
+            REQUEST_TIMEOUT,
+        )?;
+        // "unchanged" keeps what was stored by the last full report
+        if report["kind"] == "full" {
+            let items = serde_json::from_value(report["items"].clone()).unwrap_or_default();
+            self.published
+                .lock()
+                .unwrap()
+                .insert(path.to_path_buf(), items);
+        }
+        Ok(())
     }
 
     /// What the server last published about `path`: empty until it says something.
@@ -506,7 +532,7 @@ mod tests {
                     continue;
                 };
                 let result = if method == "initialize" {
-                    json!({"capabilities": {}})
+                    json!({"capabilities": {"diagnosticProvider": {}}})
                 } else {
                     answer(method)
                 };
@@ -566,6 +592,33 @@ mod tests {
         assert_eq!(
             &methods[2..],
             ["textDocument/didOpen", "textDocument/didChange"]
+        );
+        drop(client);
+    }
+
+    #[test]
+    fn a_server_that_does_not_publish_is_asked_for_the_diagnostics_of_a_file() {
+        let (connection, wire, server) = connect(|_, _| {});
+        let _server = serve(wire.clone(), server, |method| {
+            assert_eq!(method, "textDocument/diagnostic");
+            json!({"kind": "full", "items": [{
+                "range": {"start": {"line": 3, "character": 10}, "end": {"line": 3, "character": 12}},
+                "severity": 1,
+                "code": 2339,
+                "source": "ts",
+                "message": "Property 'id' does not exist",
+            }]})
+        });
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        let path = Path::new("/w/a.ts");
+        assert!(client.diagnostics(path).is_empty());
+        client.pull_diagnostics(path).unwrap();
+        let found = client.diagnostics(path);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].message, "Property 'id' does not exist");
+        assert_eq!(
+            wire.wait_for(3)[2]["params"]["textDocument"]["uri"],
+            "file:///w/a.ts"
         );
         drop(client);
     }

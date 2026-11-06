@@ -875,12 +875,17 @@ impl Workspace {
             }
             let outcome = cx
                 .background_executor()
-                .spawn(async move { client.sync(&path, language, &text) })
+                .spawn(async move {
+                    client.sync(&path, language, &text)?;
+                    client.pull_diagnostics(&path)
+                })
                 .await;
-            this.update(cx, |this, _| {
+            this.update(cx, |this, cx| {
                 if matches!(outcome, Err(LspError::Closed | LspError::Io(_))) {
                     this.lsp.remove(spec.name);
                     this.diagnosed = None; // a new server has not been sent the file
+                } else {
+                    this.apply_diagnostics(cx); // what a server that does not publish answered
                 }
             })
             .ok();
