@@ -2,6 +2,8 @@
 //!
 //! The window redraws only when something changes, so at rest there are no frames and the
 //! numbers are those of the last redraw. Read them while scrolling or holding a movement key.
+//! The rate is that of the burst of frames in progress (a 160 ms scroll glide is one burst), not
+//! an average over a second that is mostly idle.
 
 use std::{
     collections::VecDeque,
@@ -9,6 +11,8 @@ use std::{
 };
 
 const WINDOW: Duration = Duration::from_secs(1);
+/// A longer wait than this between two frames ends a burst.
+const BURST_GAP: Duration = Duration::from_millis(100);
 
 pub struct FrameMeter {
     /// When each frame of the last second began, and how long building it took.
@@ -39,16 +43,37 @@ impl FrameMeter {
         }
     }
 
-    /// `58 fps | worst gap 21.3 ms | build 0.8 ms (max 1.9)`: frames in the last second, the
-    /// longest wait between two of them, and the time spent building the view.
+    /// Frames per second of the burst in progress: the frames since the last wait longer than
+    /// `BURST_GAP`, over the time they span. `None` for a single frame.
+    fn burst_fps(&self) -> Option<f64> {
+        let mut count = 1;
+        let mut first = self.frames.back()?.0;
+        for (at, _) in self.frames.iter().rev().skip(1) {
+            if first.duration_since(*at) > BURST_GAP {
+                break;
+            }
+            first = *at;
+            count += 1;
+        }
+        let span = self.frames.back()?.0.duration_since(first).as_secs_f64();
+        (count > 1 && span > 0.).then(|| (count - 1) as f64 / span)
+    }
+
+    /// `62 fps | 11 frames | worst gap 21.3 ms | build 0.8 ms (max 1.9)`: the rate of the
+    /// burst in progress, the frames in the last second, the longest wait between two of them
+    /// and the time spent building the view.
     pub fn label(&self) -> String {
         let worst_gap = self
             .frames
             .iter()
             .zip(self.frames.iter().skip(1))
             .map(|((a, _), (b, _))| b.duration_since(*a))
+            .filter(|gap| *gap <= BURST_GAP)
             .max()
             .unwrap_or_default();
+        let fps = self
+            .burst_fps()
+            .map_or("-".to_string(), |fps| format!("{fps:.0}"));
         let last = self
             .frames
             .back()
@@ -61,7 +86,7 @@ impl FrameMeter {
             .max()
             .unwrap_or_default();
         format!(
-            "{} fps | worst gap {} | build {} (max {})",
+            "{fps} fps | {} frames | worst gap {} | build {} (max {})",
             self.frames.len(),
             ms(worst_gap),
             ms(last),
@@ -105,7 +130,7 @@ mod tests {
         }
         assert_eq!(
             meter.label(),
-            "6 fps | worst gap 40.0 ms | build 0.8 ms (max 0.8)"
+            "48 fps | 6 frames | worst gap 40.0 ms | build 0.8 ms (max 0.8)"
         );
     }
 
@@ -116,6 +141,19 @@ mod tests {
         meter.frame(t0, Duration::ZERO);
         meter.frame(t0 + Duration::from_millis(500), Duration::ZERO);
         meter.frame(t0 + Duration::from_millis(1_600), Duration::ZERO);
-        assert!(meter.label().starts_with("1 fps"));
+        assert!(meter.label().contains("1 frames"));
+    }
+
+    #[test]
+    fn the_rate_is_that_of_the_burst_not_of_the_whole_second() {
+        let mut meter = meter();
+        let t0 = Instant::now();
+        // a 160 ms glide at 100 Hz (17 frames), after half a second without frames
+        meter.frame(t0, Duration::ZERO);
+        for i in 0..=16 {
+            meter.frame(t0 + Duration::from_millis(500 + i * 10), Duration::ZERO);
+        }
+        let label = meter.label();
+        assert!(label.starts_with("100 fps | 18 frames"), "{label}");
     }
 }

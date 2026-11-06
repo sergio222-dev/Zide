@@ -113,8 +113,9 @@ Vim fold keys (`za`, `zo`, `zc`, `zM`, `zR`) and scroll keys (`zt`, `zz`, `zb`, 
 
 ### Frame rate (debug)
 
-`ZIDE_FPS=1 zide` shows an overlay with the frames drawn in the last second, the longest
-wait between two of them and the time spent building the view. The window only redraws when
+`ZIDE_FPS=1 zide` shows an overlay with the rate of the burst of frames in progress (a scroll
+glide, for instance), the frames of the last second, the longest wait between two frames of a
+burst and the time spent building the view. The window only redraws when
 something changes, so read it while scrolling or holding a movement key.
 
 ### Language servers
