@@ -1788,10 +1788,7 @@ impl Viewer {
                                 .text_color(rgb(theme::DIM))
                                 .child(rows.number(line, cursor_line).to_string()),
                         )
-                        .child(
-                            StyledText::new(shown.text.clone())
-                                .with_highlights(shown.styles()),
-                        )
+                        .child(StyledText::new(shown.text.clone()).with_highlights(shown.styles()))
                 }))
         });
         let list = uniform_list("viewer", rows.len(), move |range, _, _| {
