@@ -8,7 +8,8 @@ mod select;
 use std::{ops::Range, path::Path, sync::OnceLock};
 
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Language, Parser, Query, QueryCursor};
+use tree_sitter::{InputEdit, Language, Parser, Point, Query, QueryCursor, Tree};
+use zide_text::ByteEdit;
 
 /// What a piece of text is, for coloring. The UI maps classes to colors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,6 +40,16 @@ struct Grammar {
     extensions: &'static [&'static str],
     language: Language,
     query: String,
+    /// `query` compiled, the first time it is needed (compiling takes milliseconds).
+    compiled: OnceLock<Option<Query>>,
+}
+
+impl Grammar {
+    fn compiled_query(&self) -> Option<&Query> {
+        self.compiled
+            .get_or_init(|| Query::new(&self.language, &self.query).ok())
+            .as_ref()
+    }
 }
 
 fn grammars() -> &'static [Grammar] {
@@ -53,31 +64,37 @@ fn grammars() -> &'static [Grammar] {
                 extensions: &["rs"],
                 language: tree_sitter_rust::LANGUAGE.into(),
                 query: tree_sitter_rust::HIGHLIGHTS_QUERY.to_string(),
+                compiled: OnceLock::new(),
             },
             Grammar {
                 extensions: &["js", "mjs", "cjs", "jsx"],
                 language: tree_sitter_javascript::LANGUAGE.into(),
                 query: format!("{js}\n{jsx}"),
+                compiled: OnceLock::new(),
             },
             Grammar {
                 extensions: &["ts", "mts", "cts"],
                 language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 query: format!("{js}\n{ts}"),
+                compiled: OnceLock::new(),
             },
             Grammar {
                 extensions: &["go"],
                 language: tree_sitter_go::LANGUAGE.into(),
                 query: generic_first(tree_sitter_go::HIGHLIGHTS_QUERY, "(identifier) @variable"),
+                compiled: OnceLock::new(),
             },
             Grammar {
                 extensions: &["py", "pyi"],
                 language: tree_sitter_python::LANGUAGE.into(),
                 query: tree_sitter_python::HIGHLIGHTS_QUERY.to_string(),
+                compiled: OnceLock::new(),
             },
             Grammar {
                 extensions: &["tsx"],
                 language: tree_sitter_typescript::LANGUAGE_TSX.into(),
                 query: format!("{js}\n{ts}\n{jsx}"),
+                compiled: OnceLock::new(),
             },
         ]
     })
@@ -107,17 +124,72 @@ pub fn language_for_path(path: &str) -> Option<LanguageId> {
         .map(LanguageId)
 }
 
+/// A file's syntax tree, kept between edits: [`Syntax::update`] reparses only what changed
+/// (milliseconds in a huge file, where parsing it again takes hundreds), and everything the
+/// editor derives from the syntax reads this one tree.
+pub struct Syntax {
+    language: LanguageId,
+    parser: Parser,
+    tree: Tree,
+}
+
+impl Syntax {
+    /// Parses `source`. `None` when the grammar does not load.
+    pub fn new(language: LanguageId, source: &str) -> Option<Self> {
+        let mut parser = Parser::new();
+        parser.set_language(&grammars()[language.0].language).ok()?;
+        let tree = parser.parse(source, None)?;
+        Some(Self {
+            language,
+            parser,
+            tree,
+        })
+    }
+
+    /// Brings the tree to `source`, which is the text it was built from with `edits` applied,
+    /// in order.
+    pub fn update(&mut self, source: &str, edits: &[ByteEdit]) {
+        if edits.is_empty() {
+            return;
+        }
+        for edit in edits {
+            let point = |(row, column)| Point::new(row, column);
+            self.tree.edit(&InputEdit {
+                start_byte: edit.start_byte,
+                old_end_byte: edit.old_end_byte,
+                new_end_byte: edit.new_end_byte,
+                start_position: point(edit.start),
+                old_end_position: point(edit.old_end),
+                new_end_position: point(edit.new_end),
+            });
+        }
+        if let Some(tree) = self.parser.parse(source, Some(&self.tree)) {
+            self.tree = tree;
+        }
+    }
+
+    pub fn tree(&self) -> &Tree {
+        &self.tree
+    }
+
+    /// Highlight spans for `source`, the text of the tree. Empty when the query does not load.
+    pub fn highlight(&self, source: &str) -> Vec<Span> {
+        highlight_tree(&grammars()[self.language.0], &self.tree, source)
+    }
+
+    /// The foldable regions of `source`, the text of the tree.
+    pub fn fold_regions(&self, source: &str) -> Vec<FoldRegion> {
+        fold::regions(&grammars()[self.language.0], &self.tree, source)
+    }
+}
+
 /// Highlight spans for `source`. Empty when the grammar or its query does not load.
 pub fn highlight(language: LanguageId, source: &str) -> Vec<Span> {
-    let grammar = &grammars()[language.0];
-    let Ok(query) = Query::new(&grammar.language, &grammar.query) else {
-        return Vec::new();
-    };
-    let mut parser = Parser::new();
-    if parser.set_language(&grammar.language).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(source, None) else {
+    Syntax::new(language, source).map_or_else(Vec::new, |syntax| syntax.highlight(source))
+}
+
+fn highlight_tree(grammar: &Grammar, tree: &Tree, source: &str) -> Vec<Span> {
+    let Some(query) = grammar.compiled_query() else {
         return Vec::new();
     };
 
@@ -131,7 +203,7 @@ pub fn highlight(language: LanguageId, source: &str) -> Vec<Span> {
     let mut painted: Vec<(usize, u8)> = vec![(0, 0); source.len()];
     let mut ids: Vec<Class> = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
     while let Some(m) = matches.next() {
         for capture in m.captures {
             let Some(class) = classes[capture.index as usize] else {
@@ -269,5 +341,76 @@ mod tests {
     #[test]
     fn unknown_extensions_have_no_language() {
         assert!(language_for_path("notes.txt").is_none());
+    }
+
+    /// Edits `source` through a buffer, updating the tree after each one, and checks that the
+    /// tree always gives what parsing the text from scratch gives.
+    fn assert_incremental_matches_full(path: &str, source: &str, edits: &[(usize, usize, &str)]) {
+        let language = language_for_path(path).unwrap();
+        let mut buffer = zide_text::Buffer::new(source);
+        let mut syntax = Syntax::new(language, source).unwrap();
+        let check = |buffer: &mut zide_text::Buffer, syntax: &mut Syntax, step: &str| {
+            let text = buffer.text();
+            syntax.update(&text, &buffer.take_edits());
+            assert_eq!(
+                syntax.highlight(&text),
+                highlight(language, &text),
+                "{step}"
+            );
+            assert_eq!(
+                syntax.fold_regions(&text),
+                fold_regions(language, &text),
+                "{step}"
+            );
+        };
+        for (i, (start, end, text)) in edits.iter().enumerate() {
+            buffer.edit(*start..*end, text);
+            check(&mut buffer, &mut syntax, &format!("edit {i}"));
+        }
+        // several edits between two updates, and undo
+        buffer.edit(0..0, "// head\n");
+        buffer.edit(3..4, "");
+        check(&mut buffer, &mut syntax, "two edits at once");
+        buffer.undo();
+        check(&mut buffer, &mut syntax, "undo");
+    }
+
+    #[test]
+    fn an_incremental_update_gives_what_a_full_parse_gives() {
+        let source = "use std::fmt;\n\nfn a() {\n    let s = \"h\u{e9}llo\";\n    if s.len() > 1 {\n        run(s);\n    }\n}\n\nstruct P { x: u8 }\n";
+        assert_incremental_matches_full(
+            "a.rs",
+            source,
+            &[
+                (30, 30, "x"),                      // type inside a line
+                (14, 14, "\nfn b() {\n    1\n}\n"), // new lines, a new block
+                (40, 70, ""),                       // delete across lines
+                (0, 3, "pub"),                      // replace
+                (20, 21, "{"),                      // unbalance the braces
+                (22, 23, "\u{f1}\n\u{f1}"),         // multibyte and a newline
+            ],
+        );
+    }
+
+    #[test]
+    fn an_incremental_update_gives_what_a_full_parse_gives_in_tsx() {
+        let source =
+            "import a from 'a';\nconst C = () => {\n  return <div className=\"x\">{a}</div>;\n};\n";
+        assert_incremental_matches_full(
+            "a.tsx",
+            source,
+            &[(60, 60, " id=\"y\""), (19, 19, "\n// c\n"), (30, 45, "")],
+        );
+    }
+
+    #[test]
+    fn updating_without_edits_keeps_the_tree() {
+        let language = language_for_path("a.rs").unwrap();
+        let mut syntax = Syntax::new(language, "fn a() {}").unwrap();
+        syntax.update("fn a() {}", &[]);
+        assert_eq!(
+            syntax.fold_regions("fn a() {}"),
+            fold_regions(language, "fn a() {}")
+        );
     }
 }

@@ -15,6 +15,18 @@ pub struct Edit {
     pub text: String,
 }
 
+/// An edit in the terms incremental parsers take: byte offsets and `(row, byte column)` points,
+/// the points as they were before the edit (`start`, `old_end`) and after it (`new_end`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteEdit {
+    pub start_byte: usize,
+    pub old_end_byte: usize,
+    pub new_end_byte: usize,
+    pub start: (usize, usize),
+    pub old_end: (usize, usize),
+    pub new_end: (usize, usize),
+}
+
 /// Zero-based line and column, the column counted in `char`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Position {
@@ -42,6 +54,8 @@ pub struct Buffer {
     rope: Rope,
     revision: Revision,
     history: History,
+    /// Every mutation since the last [`Buffer::take_edits`], in order.
+    edits: Vec<ByteEdit>,
 }
 
 impl Buffer {
@@ -209,10 +223,42 @@ impl Buffer {
         }
     }
 
+    /// The mutations since the last call, oldest first: what a parser needs to update its tree
+    /// of the text instead of parsing it again.
+    pub fn take_edits(&mut self) -> Vec<ByteEdit> {
+        std::mem::take(&mut self.edits)
+    }
+
+    /// `(row, byte column)` of the char offset `offset`.
+    fn point_of(&self, offset: usize) -> (usize, usize) {
+        let row = self.rope.char_to_line(offset);
+        let column = self.rope.char_to_byte(offset) - self.rope.line_to_byte(row);
+        (row, column)
+    }
+
     fn apply(&mut self, edit: &Edit) {
+        let start_byte = self.rope.char_to_byte(edit.range.start);
+        let old_end_byte = self.rope.char_to_byte(edit.range.end);
+        let start = self.point_of(edit.range.start);
+        let old_end = self.point_of(edit.range.end);
         self.rope.remove(edit.range.clone());
         self.rope.insert(edit.range.start, &edit.text);
         self.revision.0 += 1;
+        let new_end = match edit.text.rfind('\n') {
+            Some(last) => (
+                start.0 + edit.text.matches('\n').count(),
+                edit.text.len() - last - 1,
+            ),
+            None => (start.0, start.1 + edit.text.len()),
+        };
+        self.edits.push(ByteEdit {
+            start_byte,
+            old_end_byte,
+            new_end_byte: start_byte + edit.text.len(),
+            start,
+            old_end,
+            new_end,
+        });
     }
 }
 
@@ -302,5 +348,63 @@ mod tests {
         let right = b.rebase(right, &edit);
         assert_eq!(right.offset, 6);
         assert_eq!(b.resolve(right), Some(6));
+    }
+
+    /// `(row, byte column)` of the byte offset `byte` of `text`, counting `\n` only.
+    fn point_in(text: &str, byte: usize) -> (usize, usize) {
+        let before = &text[..byte];
+        let row = before.matches('\n').count();
+        (row, byte - before.rfind('\n').map_or(0, |i| i + 1))
+    }
+
+    /// Runs `edit` on `buffer` and on a plain string, and checks the one recorded edit against
+    /// the string: its bytes and its points before and after.
+    fn check(buffer: &mut Buffer, mirror: &mut String, range: Range<usize>, text: &str) {
+        let byte =
+            |s: &str, offset: usize| s.char_indices().nth(offset).map_or(s.len(), |(b, _)| b);
+        let (start_byte, old_end_byte) = (byte(mirror, range.start), byte(mirror, range.end));
+        let (start, old_end) = (point_in(mirror, start_byte), point_in(mirror, old_end_byte));
+        mirror.replace_range(start_byte..old_end_byte, text);
+        buffer.edit(range, text);
+        assert_eq!(buffer.text(), *mirror);
+        let edits = buffer.take_edits();
+        assert_eq!(
+            edits,
+            [ByteEdit {
+                start_byte,
+                old_end_byte,
+                new_end_byte: start_byte + text.len(),
+                start,
+                old_end,
+                new_end: point_in(mirror, start_byte + text.len()),
+            }]
+        );
+    }
+
+    #[test]
+    fn edits_are_recorded_in_bytes_and_points_for_a_parser() {
+        let mut buffer = Buffer::new("h\u{e9}llo\nw\u{f6}rld\nend");
+        let mut mirror = buffer.text();
+        check(&mut buffer, &mut mirror, 2..2, "x\ny\nz"); // three lines inside a line
+        check(&mut buffer, &mut mirror, 9..16, ""); // across line breaks, over multibyte chars
+        check(&mut buffer, &mut mirror, 0..1, "\u{f1}\n"); // replace by multibyte plus newline
+        let end = buffer.len();
+        check(&mut buffer, &mut mirror, end..end, "\ntail"); // append
+        check(&mut buffer, &mut mirror, 0..0, "");
+    }
+
+    #[test]
+    fn undo_and_redo_are_recorded_too_and_the_log_is_taken_once() {
+        let mut buffer = Buffer::new("one\ntwo");
+        buffer.insert(3, "\nmid");
+        buffer.commit();
+        buffer.take_edits();
+        buffer.undo();
+        buffer.redo();
+        let edits = buffer.take_edits();
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].old_end_byte - edits[0].start_byte, 4); // the undo removes 4 bytes
+        assert_eq!(edits[1].new_end_byte - edits[1].start_byte, 4); // the redo puts them back
+        assert!(buffer.take_edits().is_empty());
     }
 }

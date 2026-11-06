@@ -15,6 +15,6 @@ mod rust;
 mod store;
 
 pub use cache::StubCache;
-pub use extract::{RULES_VERSION, extract_nodes, language_for_path};
+pub use extract::{RULES_VERSION, extract_nodes, extract_nodes_in, language_for_path};
 pub use model::{FileStubs, ImportTarget, Modifiers, Stamp, StubKind, StubNode};
 pub use store::{StubStore, Symbol, SymbolHit, SymbolRef, search_symbols};

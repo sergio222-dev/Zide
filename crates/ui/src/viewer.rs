@@ -17,10 +17,10 @@ use zide_git::{BlameLine, LineChange};
 use zide_lsp::{
     Diagnostic, DiagnosticSeverity, NumberOrString, ParameterHint, char_column, uri_to_path,
 };
-use zide_stubs::{StubKind, StubNode, extract_nodes, language_for_path as stub_language};
-use zide_syntax::{
-    Class, FoldRegion, LanguageId, Span, fold_regions, highlight, language_for_path,
+use zide_stubs::{
+    StubKind, StubNode, extract_nodes, extract_nodes_in, language_for_path as stub_language,
 };
+use zide_syntax::{Class, FoldRegion, LanguageId, Span, Syntax, language_for_path};
 use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
@@ -236,6 +236,8 @@ pub struct Viewer {
     buffer: Buffer,
     vim: Vim,
     language: Option<LanguageId>,
+    /// The syntax tree of `buffer` as of `built_at`, updated by each rebuild.
+    syntax: Option<Syntax>,
     trail: Option<SelectionTrail>,
     /// Usages of the word at `key` that a language server found.
     semantic: Option<(HighlightKey, Arc<Vec<Range<usize>>>)>,
@@ -315,6 +317,7 @@ impl Viewer {
             notice: None,
             vim: Vim::default(),
             language,
+            syntax: None,
             trail: None,
             semantic: None,
             lines: Arc::default(),
@@ -1526,14 +1529,23 @@ impl Viewer {
 
     /// Re-highlights the whole text. Fine for ordinary files; large ones will need a debounce.
     fn rebuild(&mut self) {
+        // one tree for the highlight, the folds and the outline, reparsed only where edited
+        let edits = self.buffer.take_edits();
+        let text = self.buffer.text();
+        match (&mut self.syntax, self.language) {
+            (Some(syntax), _) => syntax.update(&text, &edits),
+            (None, Some(language)) => self.syntax = Syntax::new(language, &text),
+            (None, None) => {}
+        }
         let spans = self
-            .language
-            .map(|language| highlight(language, &self.buffer.text()))
+            .syntax
+            .as_ref()
+            .map(|syntax| syntax.highlight(&text))
             .unwrap_or_default();
         let hints = self.hints_by_line();
         self.lines = Arc::new(build_lines(&self.buffer, &spans, &hints));
-        self.folds = match self.language {
-            Some(language) if self.editable => fold_regions(language, &self.buffer.text()),
+        self.folds = match &self.syntax {
+            Some(syntax) if self.editable => syntax.fold_regions(&text),
             _ => Vec::new(),
         };
         let starts: BTreeSet<usize> = self.folds.iter().map(|r| r.start_line).collect();
@@ -1542,8 +1554,11 @@ impl Viewer {
         self.refresh_changes();
         self.refresh_blame_map();
         self.refresh_squiggles();
-        self.outline = match stub_language(&self.path) {
-            Some(language) if self.editable => extract_nodes(language, &self.buffer.text()),
+        self.outline = match (stub_language(&self.path), &self.syntax) {
+            (Some(language), Some(syntax)) if self.editable => {
+                extract_nodes_in(language, syntax.tree(), &text)
+            }
+            (Some(language), None) if self.editable => extract_nodes(language, &text),
             _ => Vec::new(),
         };
         let line_of = |byte: u32| {
@@ -3215,6 +3230,40 @@ mod tests {
         assert_eq!(shown(&viewer).len(), 8);
         viewer.toggle_fold(1); // no region starts on this line
         assert_eq!(shown(&viewer).len(), 8);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn folds_and_outline_follow_edits_as_a_fresh_parse_would() {
+        let source = "use a::b;\n\nfn one() {\n    let x = 1;\n}\n\nstruct S {\n    f: u8,\n}\n\nfn two() {\n    if true {\n        run();\n    }\n}\n";
+        let (dir, file) = temp_file_as("incremental", "a.rs", source);
+        let mut viewer = Viewer::open(&dir, &file);
+        let fresh = |viewer: &Viewer| {
+            let text = viewer.buffer.text();
+            let language = viewer.language.unwrap();
+            (
+                zide_syntax::fold_regions(language, &text),
+                extract_nodes(stub_language("a.rs").unwrap(), &text),
+            )
+        };
+        let steps = [
+            "3jo// new\n", // a line inside a block
+            "ggdd",        // delete the first line
+            "5Gx",         // delete one char
+            "Gddkdd",      // delete lines at the end
+            "ggOfn zero() {}\n",
+        ];
+        for keys in steps {
+            type_keys(&mut viewer, keys);
+            viewer.handle_key(Key::Esc);
+            let (folds, outline) = fresh(&viewer);
+            assert_eq!(viewer.folds, folds, "folds after {keys:?}");
+            assert_eq!(viewer.outline, outline, "outline after {keys:?}");
+        }
+        type_keys(&mut viewer, "u");
+        let (folds, outline) = fresh(&viewer);
+        assert_eq!(viewer.folds, folds, "folds after undo");
+        assert_eq!(viewer.outline, outline, "outline after undo");
         fs::remove_dir_all(dir).unwrap();
     }
 }
