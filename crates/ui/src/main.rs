@@ -15,6 +15,7 @@ use std::{
 };
 
 mod indent;
+mod meter;
 mod rows;
 mod session;
 mod theme;
@@ -312,6 +313,8 @@ struct Workspace {
     font_size: f32,
     /// When the last Space was pressed in Normal mode: two in a row open the popup.
     last_space: Option<Instant>,
+    /// The frame-rate overlay, when started with `ZIDE_FPS=1`.
+    meter: Option<meter::FrameMeter>,
     /// The project tree on the left.
     tree: Tree,
     tree_visible: bool,
@@ -380,6 +383,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             font_size: viewer::DEFAULT_FONT_SIZE,
             last_space: None,
+            meter: meter::FrameMeter::from_env(),
             tree: Tree::new(),
             tree_visible: false,
             tree_focused: false,
@@ -1782,6 +1786,29 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let started = Instant::now();
+        let root = self.view(window, cx);
+        let Some(meter) = &mut self.meter else {
+            return root;
+        };
+        meter.frame(started, started.elapsed());
+        root.child(
+            div()
+                .absolute()
+                .top_1()
+                .right_3()
+                .px_2()
+                .rounded_sm()
+                .bg(rgba(0x000000b0))
+                .text_xs()
+                .text_color(rgb(theme::STRONG))
+                .child(meter.label()),
+        )
+    }
+}
+
+impl Workspace {
+    fn view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         if let Some(viewer) = &mut self.viewer {
             viewer.tick(window);
         }

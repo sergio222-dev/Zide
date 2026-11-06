@@ -111,6 +111,12 @@ line says a new release is available.
 Vim fold keys (`za`, `zo`, `zc`, `zM`, `zR`) and scroll keys (`zt`, `zz`, `zb`, `Ctrl+D`,
 `Ctrl+U`) work in normal mode.
 
+### Frame rate (debug)
+
+`ZIDE_FPS=1 zide` shows an overlay with the frames drawn in the last second, the longest
+wait between two of them and the time spent building the view. The window only redraws when
+something changes, so read it while scrolling or holding a movement key.
+
 ### Language servers
 
 Zide does not ship language servers; it uses the ones you have for Rust, TypeScript/JavaScript,
