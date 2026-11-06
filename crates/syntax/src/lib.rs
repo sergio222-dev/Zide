@@ -1,6 +1,7 @@
 //! Layer 1: local syntactic analysis for the editor (highlighting for now). Tree-sitter stays
 //! behind this crate's API; it never resolves types or references.
 
+mod fold;
 mod select;
 
 use std::{ops::Range, path::Path, sync::OnceLock};
@@ -81,6 +82,7 @@ fn grammars() -> &'static [Grammar] {
     })
 }
 
+pub use fold::{FoldKind, FoldRegion, fold_regions};
 pub use select::extend_selection;
 
 /// Moves the catch-all pattern `generic` to the front. Here the last pattern wins, as in

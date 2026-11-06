@@ -27,3 +27,8 @@ pub const CONTROL_BORDER: u32 = 0x3a3c42;
 pub const ACTIVE_BG: u32 = 0x2f4a73;
 pub const ACTIVE_BORDER: u32 = 0x61afef;
 pub const ERROR: u32 = 0xe06c75;
+
+/// Rainbow indent: one translucent band per indent level, cycling through these (RGBA).
+pub const INDENT_BANDS: [u32; 4] = [0xe5c07b1c, 0x98c3791c, 0x61afef1c, 0xc678dd1c];
+/// The dots that mark whitespace (RGBA).
+pub const WHITESPACE: u32 = 0x5c6370b0;

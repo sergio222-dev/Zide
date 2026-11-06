@@ -1,9 +1,11 @@
 //! File editor view: line numbers, syntax colors, a block cursor and Vim keys.
 
 use std::{
+    collections::BTreeSet,
     fs,
     ops::Range,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
     time::SystemTime,
     time::{Duration, Instant},
@@ -11,16 +13,22 @@ use std::{
 
 use gpui_kit::*;
 use zide_stubs::{StubKind, StubNode, extract_nodes, language_for_path as stub_language};
-use zide_syntax::{Class, LanguageId, Span, highlight, language_for_path};
+use zide_syntax::{
+    Class, FoldRegion, LanguageId, Span, fold_regions, highlight, language_for_path,
+};
 use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
-use crate::theme;
+use crate::{indent, rows::Rows, theme};
 
 /// Files larger than this are not opened.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 const TAB_WIDTH: usize = 4;
-const ROW_HEIGHT: f32 = 20.;
+/// Row height as a multiple of the font size (20px at the default 16px).
+const ROW_RATIO: f32 = 1.25;
+pub const DEFAULT_FONT_SIZE: f32 = 16.;
+pub const MIN_FONT_SIZE: f32 = 8.;
+pub const MAX_FONT_SIZE: f32 = 48.;
 /// Monospace families, in order of preference. GPUI does not resolve the generic `monospace`.
 const EDITOR_FONTS: &[&str] = &[
     "JetBrains Mono",
@@ -34,6 +42,9 @@ const EDITOR_FONTS: &[&str] = &[
     "Consolas",
 ];
 
+/// Called with the start line of the region whose chevron was clicked.
+pub type FoldClick = Rc<dyn Fn(usize, &mut App)>;
+
 struct Line {
     /// Char offset of the line in the buffer, and its length in chars.
     start: usize,
@@ -43,6 +54,9 @@ struct Line {
     /// Display byte of each `char` of the line (and of its end), when that is not the identity
     /// (tabs, multi-byte characters).
     cols: Option<Vec<usize>>,
+    /// How many indent bands the line has, each `step` columns wide.
+    level: usize,
+    step: usize,
 }
 
 impl Line {
@@ -177,6 +191,12 @@ pub struct Viewer {
     semantic: Option<(HighlightKey, Arc<Vec<Range<usize>>>)>,
     /// Display lines of `buffer` as of `built_at`.
     lines: Arc<Vec<Line>>,
+    /// Which of those lines the list shows, one per row.
+    rows: Arc<Rows>,
+    /// Regions of the text that can fold, by start line, as of `built_at`.
+    folds: Vec<FoldRegion>,
+    /// Start lines of the regions folded away; the region must still exist to count.
+    collapsed: BTreeSet<usize>,
     built_at: Revision,
     scroll: UniformListScrollHandle,
     /// A `z` was typed and its second key (`t`, `z`, `b`...) is awaited.
@@ -184,6 +204,9 @@ pub struct Viewer {
     anim: Option<ScrollAnim>,
     /// Advance of one monospace cell in pixels, measured on the first frame.
     cell_width: Option<f32>,
+    font_size: f32,
+    /// Scroll position (px) as of the last frame, before any wheel event of the next one.
+    settled_top: f32,
     font_family: SharedString,
     /// Declarations of the file as of `built_at`, for the breadcrumb.
     outline: Vec<StubNode>,
@@ -218,12 +241,17 @@ impl Viewer {
             trail: None,
             semantic: None,
             lines: Arc::default(),
+            rows: Arc::default(),
+            folds: Vec::new(),
+            collapsed: BTreeSet::new(),
             built_at: buffer.revision(),
             buffer,
             scroll: UniformListScrollHandle::new(),
             z_pending: false,
             anim: None,
             cell_width: None,
+            font_size: DEFAULT_FONT_SIZE,
+            settled_top: 0.,
             font_family: EDITOR_FONTS[0].into(),
             outline: Vec::new(),
             root_name: root
@@ -241,7 +269,9 @@ impl Viewer {
         let offset = self.buffer.line_start(row);
         self.vim.set_cursor(&self.buffer, offset);
         self.vim.handle(&mut self.buffer, Key::Char('^')); // first non-blank of the line
-        self.scroll.scroll_to_item(row, ScrollStrategy::Top);
+        self.unfold_hiding(row);
+        self.scroll
+            .scroll_to_item(self.rows.row_of(row), ScrollStrategy::Top);
     }
 
     /// Shows `notice` in the status line (`None` clears it).
@@ -286,8 +316,8 @@ impl Viewer {
     fn view_metrics(&self) -> Option<(usize, usize)> {
         let state = self.scroll.0.borrow();
         let viewport = f32::from(state.last_item_size?.item.height);
-        let top = (-f32::from(state.base_handle.offset().y) / ROW_HEIGHT).max(0.) as usize;
-        let rows = (viewport / ROW_HEIGHT) as usize;
+        let top = (-f32::from(state.base_handle.offset().y) / self.row_height()).max(0.) as usize;
+        let rows = (viewport / self.row_height()) as usize;
         Some((top, rows.max(1)))
     }
 
@@ -308,8 +338,8 @@ impl Viewer {
         }
         let word = self.buffer.slice(range);
         let (top, rows) = self.view_metrics().unwrap_or((0, 60));
-        let first = top.saturating_sub(rows);
-        let last = (top + 2 * rows).min(self.buffer.line_count());
+        let first = self.rows.line(top.saturating_sub(rows));
+        let last = (self.rows.line(top + 2 * rows) + 1).min(self.buffer.line_count());
         let is_word = |c: char| c.is_alphanumeric() || c == '_';
         let mut found = Vec::new();
         for row in first..last {
@@ -335,13 +365,33 @@ impl Viewer {
         Some((viewport, -f32::from(state.base_handle.offset().y)))
     }
 
+    fn row_height(&self) -> f32 {
+        self.font_size * ROW_RATIO
+    }
+
+    /// Changes the editor font size (clamped), keeping the first visible row where it was
+    /// at the last frame. A Ctrl+wheel zoom also reaches the list, which scrolls by it;
+    /// anchoring on the last frame takes that back, even when the size no longer changes.
+    pub fn set_font_size(&mut self, size: f32) {
+        let top_row = self.settled_top / self.row_height();
+        self.font_size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        let state = self.scroll.0.borrow();
+        let x = state.base_handle.offset().x;
+        state
+            .base_handle
+            .set_offset(point(x, px(-top_row * self.row_height())));
+        drop(state);
+        self.anim = None;
+        self.cell_width = None; // measured again with the new size on the next tick
+    }
+
     /// Glides the view so `top` (in pixels, clamped to the document) is its first row.
     /// Without a layout there is nothing to glide on: `fallback` scrolls instead.
     fn glide_to(&mut self, top: impl FnOnce(f32) -> f32, fallback: impl FnOnce(&Self)) {
         let Some((viewport, current)) = self.view_pixels() else {
             return fallback(self);
         };
-        let max = (self.buffer.line_count() as f32 * ROW_HEIGHT - viewport).max(0.);
+        let max = (self.rows.len() as f32 * self.row_height() - viewport).max(0.);
         self.anim = Some(ScrollAnim {
             from: current,
             to: top(viewport).clamp(0., max),
@@ -351,9 +401,10 @@ impl Viewer {
 
     /// Advances the glide one frame; asks for another while it lasts.
     pub fn tick(&mut self, window: &mut Window) {
+        self.settled_top = -f32::from(self.scroll.0.borrow().base_handle.offset().y);
         if self.cell_width.is_none() {
             let text_system = window.text_system();
-            let size = window.text_style().font_size.to_pixels(window.rem_size());
+            let size = px(self.font_size);
             let installed = text_system.all_font_names();
             if let Some(family) = EDITOR_FONTS
                 .iter()
@@ -384,12 +435,15 @@ impl Viewer {
 
     /// `zt`, `zz`, `zb`: puts the cursor line at the top, middle or bottom of the view.
     fn place_cursor_line(&mut self, strategy: ScrollStrategy) {
-        let line = self.buffer.position_of(self.vim.cursor()).line;
-        let y = line as f32 * ROW_HEIGHT;
+        let line = self
+            .rows
+            .row_of(self.buffer.position_of(self.vim.cursor()).line);
+        let row = self.row_height();
+        let y = line as f32 * row;
         self.glide_to(
             |viewport| match strategy {
-                ScrollStrategy::Center => y - (viewport - ROW_HEIGHT) / 2.,
-                ScrollStrategy::Bottom => y + ROW_HEIGHT - viewport,
+                ScrollStrategy::Center => y - (viewport - row) / 2.,
+                ScrollStrategy::Bottom => y + row - viewport,
                 _ => y,
             },
             |this| this.scroll.scroll_to_item_strict(line, strategy),
@@ -400,16 +454,18 @@ impl Viewer {
     fn scroll_half_page(&mut self, down: bool) {
         let (top, rows) = self.view_metrics().unwrap_or((0, 20));
         let half = (rows / 2).max(1);
-        let line = self.buffer.position_of(self.vim.cursor()).line;
-        let last = self.buffer.line_count().saturating_sub(1);
-        let line = if down {
-            (line + half).min(last)
+        let row = self
+            .rows
+            .row_of(self.buffer.position_of(self.vim.cursor()).line);
+        let last = self.rows.len().saturating_sub(1);
+        let row = if down {
+            (row + half).min(last)
         } else {
-            line.saturating_sub(half)
+            row.saturating_sub(half)
         };
-        self.vim.move_to_line(&self.buffer, line);
-        let shift = half as f32 * ROW_HEIGHT;
-        let top = top as f32 * ROW_HEIGHT;
+        self.vim.move_to_line(&self.buffer, self.rows.line(row));
+        let shift = half as f32 * self.row_height();
+        let top = top as f32 * self.row_height();
         self.glide_to(|_| if down { top + shift } else { top - shift }, |_| {});
     }
 
@@ -431,6 +487,10 @@ impl Viewer {
         self.anim = None; // a key press takes over from a glide
         if self.z_pending {
             self.z_pending = false;
+            if let Key::Char(command @ ('a' | 'o' | 'c' | 'M' | 'R')) = key {
+                self.fold_command(command);
+                return Effect::None;
+            }
             let strategy = match key {
                 Key::Char('t') | Key::Enter => Some(ScrollStrategy::Top),
                 Key::Char('z' | '.') => Some(ScrollStrategy::Center),
@@ -488,12 +548,13 @@ impl Viewer {
         {
             return Effect::None; // an error message is not a document
         }
+        let before = self.cursor_line();
         self.vim.handle(&mut self.buffer, key);
         if self.buffer.revision() != self.built_at {
             self.rebuild();
         }
-        let line = self.buffer.position_of(self.vim.cursor()).line;
-        self.scroll.scroll_to_item(line, ScrollStrategy::Nearest);
+        self.snap_cursor(before);
+        self.reveal_cursor();
         Effect::None
     }
 
@@ -815,8 +876,7 @@ impl Viewer {
         };
         let start = matches[index].start;
         self.vim.set_cursor(&self.buffer, start);
-        let line = self.buffer.position_of(start).line;
-        self.scroll.scroll_to_item(line, ScrollStrategy::Nearest);
+        self.reveal_cursor();
     }
 
     fn match_at_cursor(&self) -> Option<usize> {
@@ -907,6 +967,117 @@ impl Viewer {
         edits.len()
     }
 
+    /// Alt+Down / Alt+Up: moves the cursor to the name of the next (or previous) function,
+    /// method, class or interface, wherever the cursor is. With none left it goes to the end
+    /// (or the start) of the file.
+    pub fn next_method(&mut self, forward: bool) {
+        let from = self.buffer.byte_of(self.vim.cursor());
+        let offset = match declaration_beyond(&self.outline, from, forward) {
+            Some(byte) => self.buffer.offset_of_byte(byte),
+            None if forward => self.buffer.len(),
+            None => 0,
+        };
+        self.vim.set_cursor(&self.buffer, offset);
+        self.reveal_cursor();
+    }
+
+    /// Scrolls the least that brings the cursor's row into view.
+    fn reveal_cursor(&mut self) {
+        self.unfold_hiding(self.cursor_line());
+        let row = self.rows.row_of(self.cursor_line());
+        self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+    }
+
+    fn cursor_line(&self) -> usize {
+        self.buffer.position_of(self.vim.cursor()).line
+    }
+
+    /// The cursor never rests on a hidden line: one that a movement left on one goes to the
+    /// line after the fold when it moved down (`from` is where it was) and to the fold's
+    /// first line when it moved up.
+    fn snap_cursor(&mut self, from: usize) {
+        let line = self.cursor_line();
+        if self.rows.shows(line) {
+            return;
+        }
+        let header = self.rows.row_of(line);
+        let row = if line > from {
+            (header + 1).min(self.rows.len() - 1)
+        } else {
+            header
+        };
+        self.vim.move_to_line(&self.buffer, self.rows.line(row));
+    }
+
+    /// Rebuilds the rows from the regions that are folded.
+    fn rebuild_rows(&mut self) {
+        let mut hidden: Vec<Range<usize>> = Vec::new();
+        for region in self
+            .folds
+            .iter()
+            .filter(|r| self.collapsed.contains(&r.start_line))
+        {
+            let range = region.start_line + 1..region.end_line + 1;
+            match hidden.last_mut() {
+                Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+                _ => hidden.push(range),
+            }
+        }
+        self.rows = Arc::new(Rows::hiding(self.lines.len(), &hidden));
+    }
+
+    /// Opens every folded region that hides `line`.
+    fn unfold_hiding(&mut self, line: usize) {
+        let before = self.collapsed.len();
+        for region in &self.folds {
+            if region.start_line < line && line <= region.end_line {
+                self.collapsed.remove(&region.start_line);
+            }
+        }
+        if self.collapsed.len() != before {
+            self.rebuild_rows();
+        }
+    }
+
+    /// Folds the region that starts on `line`, or opens it when it is folded (a click on its
+    /// chevron). The cursor goes to the fold's first line if it was inside.
+    pub fn toggle_fold(&mut self, line: usize) {
+        if !self.collapsed.remove(&line) && self.folds.iter().any(|r| r.start_line == line) {
+            self.collapsed.insert(line);
+        }
+        self.rebuild_rows();
+        self.snap_cursor(usize::MAX);
+    }
+
+    /// `za`, `zo`, `zc`, `zM`, `zR`.
+    pub fn fold_command(&mut self, command: char) {
+        let line = self.cursor_line();
+        let folded = self.collapsed.contains(&line);
+        match command {
+            'o' | 'a' if folded => {
+                self.collapsed.remove(&line);
+            }
+            'c' | 'a' => {
+                // the innermost region around the cursor that is still open
+                let region = self
+                    .folds
+                    .iter()
+                    .filter(|r| r.start_line <= line && line <= r.end_line)
+                    .filter(|r| !self.collapsed.contains(&r.start_line))
+                    .max_by_key(|r| r.start_line);
+                if let Some(region) = region {
+                    self.collapsed.insert(region.start_line);
+                }
+            }
+            'M' => self.collapsed = self.folds.iter().map(|r| r.start_line).collect(),
+            'R' => self.collapsed.clear(),
+            _ => {}
+        }
+        self.rebuild_rows();
+        self.snap_cursor(usize::MAX); // inside a new fold: on its first line
+        self.reveal_cursor();
+    }
+
     /// Re-highlights the whole text. Fine for ordinary files; large ones will need a debounce.
     fn rebuild(&mut self) {
         let spans = self
@@ -914,6 +1085,13 @@ impl Viewer {
             .map(|language| highlight(language, &self.buffer.text()))
             .unwrap_or_default();
         self.lines = Arc::new(build_lines(&self.buffer, &spans));
+        self.folds = match self.language {
+            Some(language) if self.editable => fold_regions(language, &self.buffer.text()),
+            _ => Vec::new(),
+        };
+        let starts: BTreeSet<usize> = self.folds.iter().map(|r| r.start_line).collect();
+        self.collapsed.retain(|line| starts.contains(line));
+        self.rebuild_rows();
         self.outline = match stub_language(&self.path) {
             Some(language) if self.editable => extract_nodes(language, &self.buffer.text()),
             _ => Vec::new(),
@@ -988,8 +1166,17 @@ impl Viewer {
             .child(symbols)
     }
 
-    pub fn render(&self) -> Div {
+    /// `on_fold` is called with the start line of the region whose chevron was clicked.
+    pub fn render(&self, on_fold: FoldClick) -> Div {
         let lines = self.lines.clone();
+        let rows = self.rows.clone();
+        let folded: BTreeSet<usize> = self
+            .collapsed
+            .iter()
+            .copied()
+            .filter(|line| rows.shows(*line))
+            .collect();
+        let starts: BTreeSet<usize> = self.folds.iter().map(|r| r.start_line).collect();
         let digits = lines.len().to_string().len();
         let (cursor_line, cursor_cell) = self.cursor_cell();
         let insert = self.vim.mode() == Mode::Insert;
@@ -1011,9 +1198,12 @@ impl Viewer {
             .and_then(|i| matches.as_ref().map(|m| m[i].start));
         let word_matches = self.word_highlights();
         let cell_width = self.cell_width.unwrap_or(8.);
-        let list = uniform_list("viewer", lines.len(), move |range, _, _| {
+        let row_height = self.row_height();
+        let scale = self.font_size / DEFAULT_FONT_SIZE;
+        let list = uniform_list("viewer", rows.len(), move |range, _, _| {
             range
                 .map(|row| {
+                    let row = rows.line(row);
                     let line = &lines[row];
                     let text = line.text.clone();
                     let mut colors = line.colors.clone();
@@ -1049,31 +1239,79 @@ impl Viewer {
                     }
                     // The caret is drawn on the cell grid, so it is as wide on a space or
                     // a thin letter as on any other character.
+                    let gutter = (12. * digits as f32 + 28.) * scale;
                     let caret = (row == cursor_line).then(|| {
                         let column = text[..cursor_cell.start.min(text.len())].chars().count();
-                        let gutter = 12. * digits as f32 + 16.;
                         let left = px(gutter + column as f32 * cell_width);
-                        let caret = div().absolute().top_0().left(left).h(px(ROW_HEIGHT));
+                        let caret = div().absolute().top_0().left(left).h(px(row_height));
                         if insert {
                             caret.w(px(2.)).bg(rgb(theme::CARET_BAR)) // a bar, like a terminal's
                         } else {
                             caret.w(px(cell_width)).bg(rgba(0xff7a0099)) // a block you can see
                         }
                     });
+                    let bands = (0..line.level).map(|i| {
+                        let left = gutter + (i * line.step) as f32 * cell_width;
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px(left))
+                            .w(px(line.step as f32 * cell_width))
+                            .h(px(row_height))
+                            .bg(rgba(theme::INDENT_BANDS[i % theme::INDENT_BANDS.len()]))
+                    });
+                    let dots = indent::dots(&line.text).into_iter().map(|column| {
+                        let left = gutter + (column as f32 + 0.5) * cell_width - 1.;
+                        div()
+                            .absolute()
+                            .top(px(row_height / 2. - 1.))
+                            .left(px(left))
+                            .w(px(2.))
+                            .h(px(2.))
+                            .rounded_full()
+                            .bg(rgba(theme::WHITESPACE))
+                    });
                     div()
                         .relative()
                         .flex()
-                        .h(px(ROW_HEIGHT))
+                        .h(px(row_height))
+                        .children(bands)
                         .child(
                             div()
+                                .relative()
                                 .flex_shrink_0()
-                                .w(px(12. * digits as f32 + 16.))
+                                .w(px(gutter))
                                 .pr_3()
                                 .text_right()
                                 .text_color(rgb(theme::DIM))
-                                .child((row + 1).to_string()),
+                                .child((row + 1).to_string())
+                                .children(starts.contains(&row).then(|| {
+                                    let on_fold = on_fold.clone();
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .left(px(2. * scale))
+                                        .w(px(14. * scale))
+                                        .h(px(row_height))
+                                        .text_center()
+                                        .cursor_pointer()
+                                        .child(if folded.contains(&row) { "▸" } else { "▾" })
+                                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                            on_fold(row, cx)
+                                        })
+                                })),
                         )
                         .child(StyledText::new(text).with_highlights(colors))
+                        .children(folded.contains(&row).then(|| {
+                            div()
+                                .px_1()
+                                .mx_1()
+                                .rounded_sm()
+                                .bg(rgb(theme::BORDER))
+                                .text_color(rgb(theme::DIM))
+                                .child("...")
+                        }))
+                        .children(dots)
                         .children(caret)
                 })
                 .collect()
@@ -1093,6 +1331,7 @@ impl Viewer {
                 div()
                     .flex_1()
                     .font_family(self.font_family.clone())
+                    .text_size(px(self.font_size))
                     .whitespace_nowrap()
                     .child(list),
             )
@@ -1181,7 +1420,7 @@ fn style(class: Class) -> HighlightStyle {
 /// Splits the text into display lines (tabs expanded) with their colors, in line coordinates.
 fn build_lines(buffer: &Buffer, spans: &[Span]) -> Vec<Line> {
     let mut next_span = 0;
-    (0..buffer.line_count())
+    let mut lines: Vec<Line> = (0..buffer.line_count())
         .map(|index| {
             let raw = buffer.line(index);
             let start = buffer.byte_of(buffer.line_start(index));
@@ -1212,9 +1451,47 @@ fn build_lines(buffer: &Buffer, spans: &[Span]) -> Vec<Line> {
                 text,
                 colors,
                 cols,
+                level: 0,
+                step: 1,
             }
         })
-        .collect()
+        .collect();
+    let (step, levels) = {
+        let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
+        indent::levels(&texts)
+    };
+    for (line, level) in lines.iter_mut().zip(levels) {
+        line.level = level;
+        line.step = step;
+    }
+    lines
+}
+
+/// The byte where the nearest function, method, class or interface name starts, strictly
+/// after (`forward`) or before `from`. Structs and traits count as classes and interfaces.
+fn declaration_beyond(outline: &[StubNode], from: usize, forward: bool) -> Option<usize> {
+    let stops = outline
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.kind,
+                StubKind::Function
+                    | StubKind::Method
+                    | StubKind::Class
+                    | StubKind::Interface
+                    | StubKind::Struct
+                    | StubKind::Trait
+            )
+        })
+        .map(|node| match node.name_range.is_empty() {
+            true => node.range.start as usize,
+            false => node.name_range.start as usize,
+        });
+    if forward {
+        stops.filter(|&byte| byte > from).min()
+    } else {
+        stops.filter(|&byte| byte < from).max()
+    }
 }
 
 /// The declarations of `outline` (in source order) that contain `byte`, outermost first.
@@ -1603,7 +1880,58 @@ mod tests {
             text,
             colors: Vec::new(),
             cols: None,
+            level: 0,
+            step: 1,
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_font_size_is_clamped_and_the_rows_follow_it() {
+        let (dir, name) = temp_file("zoom.txt", "a\nb\n");
+        let mut viewer = Viewer::open(&dir, &name);
+        assert_eq!(viewer.row_height(), 20.);
+        viewer.set_font_size(1000.);
+        assert_eq!(viewer.row_height(), MAX_FONT_SIZE * ROW_RATIO);
+        viewer.set_font_size(0.);
+        assert_eq!(viewer.row_height(), MIN_FONT_SIZE * ROW_RATIO);
+    }
+
+    #[::core::prelude::v1::test]
+    fn next_and_previous_method_walk_the_declarations() {
+        let source = "struct P;\nconst X: u8 = 1;\nimpl P {\n    fn one(&self) {}\n    fn two(&self) {}\n}\nfn free() {}\ntrait T {}\n";
+        let (dir, file) = temp_file_as("methods", "a.rs", source);
+        let mut viewer = Viewer::open(&dir, &file);
+        let word = |v: &Viewer| v.word_at_cursor();
+        let mut forward = Vec::new();
+        for _ in 0..5 {
+            viewer.next_method(true);
+            forward.push(word(&viewer));
+        }
+        // consts and impl blocks are not stops
+        assert_eq!(
+            forward,
+            ["P", "one", "two", "free", "T"].map(|n| Some(n.to_string()))
+        );
+        // with nothing left the cursor goes to the end of the file, and stays there
+        let mut end = Viewer::open(&dir, &file);
+        end.vim.set_cursor(&end.buffer, end.buffer.len());
+        viewer.next_method(true);
+        assert_eq!(viewer.vim.cursor(), end.vim.cursor());
+        viewer.next_method(true);
+        assert_eq!(viewer.vim.cursor(), end.vim.cursor());
+        let mut backward = Vec::new();
+        for _ in 0..5 {
+            viewer.next_method(false);
+            backward.push(word(&viewer));
+        }
+        assert_eq!(
+            backward,
+            ["T", "free", "two", "one", "P"].map(|n| Some(n.to_string()))
+        );
+        // and with nothing before, to the start
+        viewer.next_method(false);
+        assert_eq!(viewer.vim.cursor(), 0);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[::core::prelude::v1::test]
@@ -1735,6 +2063,99 @@ mod tests {
         // with unsaved edits the file is kept, so nothing of ours is lost
         type_keys(&mut viewer, "x");
         assert!(!viewer.is_stale());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    const FOLDABLE: &str = "fn a() {\n    one();\n    two();\n}\nfn b() {\n    three();\n}\n";
+
+    fn shown(viewer: &Viewer) -> Vec<usize> {
+        (0..viewer.rows.len())
+            .map(|r| viewer.rows.line(r))
+            .collect()
+    }
+
+    fn cursor_line(viewer: &Viewer) -> usize {
+        viewer.buffer.position_of(viewer.vim.cursor()).line
+    }
+
+    #[::core::prelude::v1::test]
+    fn zc_folds_the_block_around_the_cursor_and_za_toggles_it() {
+        let (dir, file) = temp_file_as("fold-zc", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        assert_eq!(shown(&viewer).len(), 8);
+        type_keys(&mut viewer, "jzc");
+        assert_eq!(shown(&viewer), [0, 4, 5, 6, 7]);
+        assert_eq!(cursor_line(&viewer), 0); // the cursor was inside: it goes to the header
+        type_keys(&mut viewer, "zo");
+        assert_eq!(shown(&viewer).len(), 8);
+        type_keys(&mut viewer, "za");
+        assert_eq!(shown(&viewer), [0, 4, 5, 6, 7]);
+        type_keys(&mut viewer, "za");
+        assert_eq!(shown(&viewer).len(), 8);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn zm_folds_everything_and_zr_opens_everything() {
+        let (dir, file) = temp_file_as("fold-zm", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "zM");
+        assert_eq!(shown(&viewer), [0, 4, 7]);
+        type_keys(&mut viewer, "zR");
+        assert_eq!(shown(&viewer).len(), 8);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn j_and_k_step_over_a_folded_block() {
+        let (dir, file) = temp_file_as("fold-jk", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "zcj");
+        assert_eq!(cursor_line(&viewer), 4);
+        type_keys(&mut viewer, "k");
+        assert_eq!(cursor_line(&viewer), 0);
+        type_keys(&mut viewer, "G");
+        assert!(viewer.rows.shows(cursor_line(&viewer)));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_jump_into_a_folded_block_opens_it() {
+        let (dir, file) = temp_file_as("fold-jump", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "zM");
+        viewer.go_to_line(3); // `two();`
+        assert_eq!(shown(&viewer), [0, 1, 2, 3, 4, 7]);
+        assert_eq!(cursor_line(&viewer), 2);
+        type_keys(&mut viewer, "zM");
+        viewer.next_method(false); // back to `a`, then forward again into `b`
+        viewer.next_method(true);
+        assert_eq!(cursor_line(&viewer), 4);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_fold_survives_an_edit_elsewhere() {
+        let (dir, file) = temp_file_as("fold-edit", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "zcjjjjx"); // fold `a`, delete a char in `b`
+        assert_eq!(shown(&viewer), [0, 4, 5, 6, 7]);
+        assert!(viewer.is_dirty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn clicking_a_chevron_toggles_the_region_that_starts_on_its_line() {
+        let (dir, file) = temp_file_as("fold-click", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "j");
+        viewer.toggle_fold(0);
+        assert_eq!(shown(&viewer), [0, 4, 5, 6, 7]);
+        assert_eq!(cursor_line(&viewer), 0); // it was inside the fold
+        viewer.toggle_fold(0);
+        assert_eq!(shown(&viewer).len(), 8);
+        viewer.toggle_fold(1); // no region starts on this line
+        assert_eq!(shown(&viewer).len(), 8);
         fs::remove_dir_all(dir).unwrap();
     }
 }
