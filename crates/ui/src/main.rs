@@ -2667,7 +2667,8 @@ fn main() {
     // without a folder, the welcome screen lists the projects opened before
     let root = first.map(PathBuf::from);
 
-    gpui_kit::application().run(move |cx| {
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    app.run(move |cx| {
         gpui_kit::init(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         // Root binds Tab to focus-next; a deeper context wins over it.
