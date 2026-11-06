@@ -4,7 +4,7 @@
 
 use std::{ops::Range, sync::OnceLock};
 
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 use crate::{ImportTarget, Modifiers, StubKind, StubNode, go, js, python, rust};
 
@@ -92,15 +92,23 @@ pub fn language_for_path(path: &str) -> Option<usize> {
 
 /// Stubs of `source` in source order. `language` comes from [`language_for_path`].
 pub fn extract_nodes(language: usize, source: &str) -> Vec<StubNode> {
-    let language = &languages()[language];
     let mut parser = Parser::new();
-    if parser.set_language(&language.grammar).is_err() {
+    if parser.set_language(&languages()[language].grammar).is_err() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(source, None) else {
-        return Vec::new();
-    };
+    match parser.parse(source, None) {
+        Some(tree) => extract_nodes_in(language, &tree, source),
+        None => Vec::new(),
+    }
+}
 
+/// Stubs of `source` in source order, read from `tree`, its syntax tree. A tree of another
+/// grammar (the editor's tree of a file this crate reads differently) is parsed again.
+pub fn extract_nodes_in(language: usize, tree: &Tree, source: &str) -> Vec<StubNode> {
+    if *tree.language() != languages()[language].grammar {
+        return extract_nodes(language, source);
+    }
+    let language = &languages()[language];
     let mut nodes: Vec<StubNode> = Vec::new();
     // (syntax node, index of the stub it hangs from); popped in source order
     let mut pending = vec![(tree.root_node(), None::<u32>)];
@@ -468,5 +476,34 @@ mod tests {
     fn broken_source_still_yields_what_parses() {
         let found = outline("fn ok() {}\nfn broken( {");
         assert!(found.iter().any(|(_, n, _)| n == "ok"));
+    }
+
+    #[test]
+    fn nodes_read_from_a_given_tree_are_those_of_parsing_the_source() {
+        let source = "struct A;\nimpl A {\n    fn go(&self) {}\n}\n";
+        let language = language_for_path("a.rs").unwrap();
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let nodes = extract_nodes_in(language, &tree, source);
+        assert!(!nodes.is_empty());
+        assert_eq!(nodes, extract_nodes(language, source));
+    }
+
+    #[test]
+    fn a_tree_of_another_grammar_is_ignored_and_the_source_parsed_again() {
+        let source = "fn go() {}\n";
+        let language = language_for_path("a.rs").unwrap();
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .unwrap();
+        let python_tree = parser.parse(source, None).unwrap();
+        assert_eq!(
+            extract_nodes_in(language, &python_tree, source),
+            extract_nodes(language, source)
+        );
     }
 }

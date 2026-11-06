@@ -1,8 +1,8 @@
 //! Where the editor can fold: blocks, runs of imports and comments that span several lines.
 
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
-use crate::{LanguageId, grammars};
+use crate::{Grammar, LanguageId, grammars};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoldKind {
@@ -96,17 +96,21 @@ fn rules_for(extension: &str) -> Option<Rules> {
 /// the same line). Empty for a language without folding rules.
 pub fn fold_regions(language: LanguageId, source: &str) -> Vec<FoldRegion> {
     let grammar = &grammars()[language.0];
-    let Some(rules) = grammar.extensions.first().and_then(|e| rules_for(e)) else {
-        return Vec::new();
-    };
     let mut parser = Parser::new();
     if parser.set_language(&grammar.language).is_err() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(source, None) else {
+    match parser.parse(source, None) {
+        Some(tree) => regions(grammar, &tree, source),
+        None => Vec::new(),
+    }
+}
+
+/// The foldable regions of `source`, already parsed into `tree`.
+pub(crate) fn regions(grammar: &Grammar, tree: &Tree, source: &str) -> Vec<FoldRegion> {
+    let Some(rules) = grammar.extensions.first().and_then(|e| rules_for(e)) else {
         return Vec::new();
     };
-
     let mut regions = Vec::new();
     let mut cursor = tree.walk();
     loop {

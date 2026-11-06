@@ -7,5 +7,5 @@ mod buffer;
 mod find;
 mod history;
 
-pub use buffer::{Anchor, Buffer, Edit, Position, Revision};
+pub use buffer::{Anchor, Buffer, ByteEdit, Edit, Position, Revision};
 pub use find::{FindQuery, Finder};
