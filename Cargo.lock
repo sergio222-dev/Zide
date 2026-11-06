@@ -8696,6 +8696,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zide-claude"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "zide-core"
 version = "0.1.6"
 dependencies = [
