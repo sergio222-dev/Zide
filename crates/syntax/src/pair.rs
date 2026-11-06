@@ -3,9 +3,9 @@
 
 use std::ops::Range;
 
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Tree};
 
-use crate::{LanguageId, grammars};
+use crate::{LanguageId, Syntax, grammars};
 
 /// Whether a caret on `c` can be at one end of a pair, so that the text need not be parsed for
 /// the many positions where it cannot. Identifier characters only count in languages with JSX.
@@ -24,13 +24,23 @@ fn has_jsx(language: LanguageId) -> bool {
 /// The two ends of the pair the caret at byte `at` of `source` belongs to, as byte ranges
 /// (the one under the caret first). `None` when it is on no pair, or its other end is missing.
 pub fn matching_pair(language: LanguageId, source: &str, at: usize) -> Option<[Range<usize>; 2]> {
+    if !is_pair_candidate(language, source.get(at..)?.chars().next()?) {
+        return None; // not worth a parse
+    }
+    matching_pair_in(language, Syntax::new(language, source)?.tree(), source, at)
+}
+
+/// [`matching_pair`] on the syntax tree of `source`, already parsed.
+pub(crate) fn matching_pair_in(
+    language: LanguageId,
+    tree: &Tree,
+    source: &str,
+    at: usize,
+) -> Option<[Range<usize>; 2]> {
     let c = source.get(at..)?.chars().next()?;
     if !is_pair_candidate(language, c) {
         return None;
     }
-    let mut parser = Parser::new();
-    parser.set_language(&grammars()[language.0].language).ok()?;
-    let tree = parser.parse(source, None)?;
     let leaf = tree
         .root_node()
         .descendant_for_byte_range(at, at + c.len_utf8())?;
