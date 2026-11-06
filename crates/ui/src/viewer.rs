@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::*;
 use zide_git::{BlameLine, LineChange};
 use zide_lsp::{
@@ -1888,6 +1889,7 @@ impl Viewer {
                         .size_full(),
                     )
                     .child(list)
+                    .vertical_scrollbar(&self.scroll)
                     .children(sticky)
                     .children(popup),
             )
