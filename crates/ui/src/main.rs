@@ -1040,7 +1040,7 @@ impl Workspace {
     fn notify(&self, notification: Notification, cx: &mut Context<Self>) {
         self.window
             .update(cx, |_, window, cx| {
-                window.push_notification(notification, cx)
+                window.push_notification(notification.placement(Anchor::BottomRight), cx)
             })
             .ok();
     }
