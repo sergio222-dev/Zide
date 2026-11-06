@@ -17,7 +17,7 @@ fn main() {
     let path = root.join(file);
     let text = fs::read_to_string(&path).unwrap();
     let started = Instant::now();
-    let client = Client::start(spec, &root).unwrap();
+    let client = Client::start(spec, &root, || {}).unwrap();
     println!("{} started in {:?}", spec.command, started.elapsed());
     client.sync(&path, language, &text).unwrap();
     let source_line = text.lines().nth(line - 1).unwrap();

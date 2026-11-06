@@ -37,7 +37,7 @@ use zide_search::{
     search_files, search_files_with_recent, search_text,
 };
 use zide_stubs::{StubCache, StubKind, StubStore, SymbolHit, search_symbols};
-use zide_text::FindQuery;
+use zide_text::{FindQuery, Revision};
 use zide_tree::{Outcome as TreeOutcome, Tree};
 
 actions!(
@@ -348,6 +348,10 @@ struct Workspace {
     /// Bumped on every scan; the result of an older scan is dropped.
     scan_generation: u64,
     changes_tx: async_channel::Sender<Change>,
+    /// A language server published diagnostics (one pending wake-up is enough).
+    diagnostics_tx: async_channel::Sender<()>,
+    /// The file and text revision the language server was last sent, to diagnose.
+    diagnosed: Option<(String, Revision)>,
     /// Bumped on every symbol indexing; the result of an older one is dropped.
     symbols_generation: u64,
     _watcher: Option<ProjectWatcher>,
@@ -381,6 +385,19 @@ impl Workspace {
         })
         .detach();
 
+        let (diagnostics_tx, diagnostics_rx) = async_channel::bounded::<()>(1);
+        cx.spawn(async move |this, cx| {
+            while diagnostics_rx.recv().await.is_ok() {
+                if this
+                    .update(cx, |this, cx| this.apply_diagnostics(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         let registry = action_registry();
         let mut workspace = Self {
             focus: cx.focus_handle(),
@@ -405,6 +422,8 @@ impl Workspace {
             recent: Vec::new(),
             scan_generation: 0,
             changes_tx,
+            diagnostics_tx,
+            diagnosed: None,
             symbols_generation: 0,
             _watcher: None,
             symbols: None,
@@ -794,6 +813,81 @@ impl Workspace {
         self.semantic_usages(word, cx);
     }
 
+    /// The running language server of the open file, with the file's path and language.
+    fn open_file_server(
+        &self,
+    ) -> Option<(
+        &'static zide_lsp::ServerSpec,
+        &'static str,
+        PathBuf,
+        Arc<Client>,
+    )> {
+        let relative = self.viewer.as_ref()?.path();
+        let (spec, language) = server_for(relative)?;
+        let Some(LspState::Ready(client)) = self.lsp.get(spec.name) else {
+            return None;
+        };
+        Some((spec, language, self.root.join(relative), client.clone()))
+    }
+
+    /// Shows what the language server last published about the open file.
+    fn apply_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let Some((_, _, path, client)) = self.open_file_server() else {
+            return;
+        };
+        if let Some(viewer) = &mut self.viewer
+            && viewer.set_diagnostics(client.diagnostics(&path))
+        {
+            cx.notify();
+        }
+    }
+
+    /// Sends the open file's text to its language server, a moment after the last edit, so the
+    /// server diagnoses it; the answer arrives as a publish (`apply_diagnostics`).
+    fn request_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let Some((spec, language, path, client)) = self.open_file_server() else {
+            return; // not started yet: tried again at the next frame
+        };
+        let Some(viewer) = &self.viewer else {
+            return;
+        };
+        let current = (viewer.path().to_string(), viewer.revision());
+        if self.diagnosed.as_ref() == Some(&current) {
+            return;
+        }
+        let opened = self.diagnosed.as_ref().map(|(file, _)| file) != Some(&current.0);
+        self.diagnosed = Some(current.clone());
+        let text = viewer.text();
+        if opened {
+            self.apply_diagnostics(cx); // what the server already said about this file
+        }
+        cx.spawn(async move |this, cx| {
+            if !opened {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+            }
+            let wanted = this
+                .update(cx, |this, _| this.diagnosed.as_ref() == Some(&current))
+                .unwrap_or(false);
+            if !wanted {
+                return; // edited again while waiting: the newer text is sent instead
+            }
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { client.sync(&path, language, &text) })
+                .await;
+            this.update(cx, |this, _| {
+                if matches!(outcome, Err(LspError::Closed | LspError::Io(_))) {
+                    this.lsp.remove(spec.name);
+                    this.diagnosed = None; // a new server has not been sent the file
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Asks the language server where the word under the caret is used, once the caret rests on
     /// it for a moment; until the answer arrives the viewer highlights by text.
     fn request_highlights(&mut self, cx: &mut Context<Self>) {
@@ -1049,10 +1143,16 @@ impl Workspace {
         }
         self.lsp.insert(spec.name, LspState::Starting);
         let root = self.root.clone();
+        let published = self.diagnostics_tx.clone();
         cx.spawn(async move |this, cx| {
             let started = cx
                 .background_executor()
-                .spawn(async move { Client::start(spec, &root).map(Arc::new) })
+                .spawn(async move {
+                    Client::start(spec, &root, move || {
+                        let _ = published.try_send(());
+                    })
+                    .map(Arc::new)
+                })
                 .await;
             this.update(cx, |this, cx| {
                 match started {
@@ -1822,6 +1922,7 @@ impl Workspace {
             viewer.tick(window);
         }
         self.request_highlights(cx);
+        self.request_diagnostics(cx);
 
         let mut root = div()
             .id("workspace")
@@ -1923,17 +2024,31 @@ impl Workspace {
                             .h_full()
                             .text_color(rgb(theme::TEXT))
                             .children(self.find_panel(cx))
-                            .child(viewer.render(std::rc::Rc::new({
-                                let workspace = cx.entity();
-                                move |line, cx| {
-                                    workspace.update(cx, |this, cx| {
-                                        if let Some(viewer) = &mut this.viewer {
-                                            viewer.toggle_fold(line);
-                                            cx.notify();
-                                        }
-                                    });
-                                }
-                            })))
+                            .child(viewer.render(
+                                std::rc::Rc::new({
+                                    let workspace = cx.entity();
+                                    move |line, cx| {
+                                        workspace.update(cx, |this, cx| {
+                                            if let Some(viewer) = &mut this.viewer {
+                                                viewer.toggle_fold(line);
+                                                cx.notify();
+                                            }
+                                        });
+                                    }
+                                }),
+                                std::rc::Rc::new({
+                                    let workspace = cx.entity();
+                                    move |over, cx| {
+                                        workspace.update(cx, |this, cx| {
+                                            if let Some(viewer) = &mut this.viewer
+                                                && viewer.set_hover(over)
+                                            {
+                                                cx.notify();
+                                            }
+                                        });
+                                    }
+                                }),
+                            ))
                             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                                 if event.modifiers.control {
                                     this.zoom(event, window, cx);

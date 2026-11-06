@@ -8,13 +8,30 @@ use std::{
     time::{Duration, Instant},
 };
 
-use lsp_types::{DocumentHighlight, Location, Range, TextEdit};
+use lsp_types::{Diagnostic, DocumentHighlight, Location, Range, TextEdit};
 use serde_json::{Value, json};
 
 use crate::{
     connection::{Connection, Error},
-    text::path_to_uri,
+    text::{path_to_uri, uri_to_path},
 };
+
+/// What the server last published about each file.
+type Published = Arc<Mutex<HashMap<PathBuf, Vec<Diagnostic>>>>;
+
+/// Stores a `textDocument/publishDiagnostics` notification; true when it was one.
+fn store_diagnostics(published: &Published, method: &str, params: &Value) -> bool {
+    if method != "textDocument/publishDiagnostics" {
+        return false;
+    }
+    let Some(path) = params["uri"].as_str().and_then(uri_to_path) else {
+        return false;
+    };
+    let diagnostics: Vec<Diagnostic> =
+        serde_json::from_value(params["diagnostics"].clone()).unwrap_or_default();
+    published.lock().unwrap().insert(path, diagnostics);
+    true
+}
 
 /// How to run the server of some languages.
 #[derive(Debug)]
@@ -151,11 +168,18 @@ pub struct Client {
     label: String,
     /// Version of each open document, by URI.
     versions: Mutex<HashMap<String, (i32, u64)>>,
+    published: Published,
 }
 
 impl Client {
     /// Runs the server of `spec` with `root` as its workspace and waits for its handshake.
-    pub fn start(spec: &ServerSpec, root: &Path) -> Result<Self, Error> {
+    /// `on_diagnostics` is called, from the server's reader thread, whenever the server
+    /// publishes the diagnostics of a file.
+    pub fn start(
+        spec: &ServerSpec,
+        root: &Path,
+        on_diagnostics: impl Fn() + Send + 'static,
+    ) -> Result<Self, Error> {
         let launch = crate::servers::launch(spec);
         let mut child = Command::new(&launch.program)
             .args(launch.args)
@@ -172,11 +196,18 @@ impl Client {
             return Err(Error::Closed);
         };
         let busy = Arc::new(Busy::default());
+        let published = Published::default();
         let connection = Connection::new(stdout, stdin, {
             let busy = busy.clone();
-            move |method, params| busy.notification(method, &params)
+            let published = published.clone();
+            move |method, params| {
+                busy.notification(method, &params);
+                if store_diagnostics(&published, method, &params) {
+                    on_diagnostics();
+                }
+            }
         });
-        match Self::handshake(connection, busy, root) {
+        match Self::handshake(connection, busy, published, root) {
             Ok(mut client) => {
                 client.child = Some(Mutex::new(child));
                 client.label = if launch.native {
@@ -207,10 +238,15 @@ impl Client {
     /// The handshake over an existing connection.
     #[cfg(test)]
     pub(crate) fn with_connection(connection: Connection, root: &Path) -> Result<Self, Error> {
-        Self::handshake(connection, Arc::default(), root)
+        Self::handshake(connection, Arc::default(), Published::default(), root)
     }
 
-    fn handshake(connection: Connection, busy: Arc<Busy>, root: &Path) -> Result<Self, Error> {
+    fn handshake(
+        connection: Connection,
+        busy: Arc<Busy>,
+        published: Published,
+        root: &Path,
+    ) -> Result<Self, Error> {
         let uri = path_to_uri(root);
         let name = root
             .file_name()
@@ -226,6 +262,7 @@ impl Client {
                     "textDocument": {
                         "synchronization": {"didSave": false},
                         "references": {},
+                        "publishDiagnostics": {"relatedInformation": true},
                     },
                     "workspace": {"workspaceFolders": true, "configuration": true},
                     "window": {"workDoneProgress": true},
@@ -244,7 +281,14 @@ impl Client {
             child: None,
             label: String::new(),
             versions: Mutex::default(),
+            published,
         })
+    }
+
+    /// What the server last published about `path`: empty until it says something.
+    pub fn diagnostics(&self, path: &Path) -> Vec<Diagnostic> {
+        let published = self.published.lock().unwrap();
+        published.get(path).cloned().unwrap_or_default()
     }
 
     pub fn label(&self) -> &str {
@@ -389,6 +433,30 @@ mod tests {
 
     use super::*;
     use crate::connection::testing::*;
+
+    #[test]
+    fn published_diagnostics_are_kept_per_file_and_replaced_by_the_next_publish() {
+        let published = Published::default();
+        let publish = |count: usize| {
+            let diagnostic = json!({
+                "range": {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 5}},
+                "severity": 1,
+                "message": "Expected 8 arguments, but got 7",
+            });
+            let params = json!({
+                "uri": "file:///tmp/a%20b.ts",
+                "diagnostics": vec![diagnostic; count],
+            });
+            store_diagnostics(&published, "textDocument/publishDiagnostics", &params)
+        };
+        assert!(publish(2));
+        let stored = || published.lock().unwrap()[Path::new("/tmp/a b.ts")].clone();
+        assert_eq!(stored().len(), 2);
+        assert_eq!(stored()[0].message, "Expected 8 arguments, but got 7");
+        assert!(publish(0)); // the file is clean again
+        assert!(stored().is_empty());
+        assert!(!store_diagnostics(&published, "$/progress", &json!({})));
+    }
 
     #[test]
     fn files_pick_their_server_and_language() {
@@ -611,7 +679,9 @@ mod tests {
             install: "",
             native: None,
         };
-        let error = Client::start(&spec, Path::new("/tmp")).err().unwrap();
+        let error = Client::start(&spec, Path::new("/tmp"), || {})
+            .err()
+            .unwrap();
         assert!(matches!(
             error,
             Error::NotInstalled("zide-no-such-language-server")

@@ -1,7 +1,7 @@
 //! File editor view: line numbers, syntax colors, a block cursor and Vim keys.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeSet, HashMap},
     fs,
     ops::Range,
@@ -14,6 +14,7 @@ use std::{
 
 use gpui_kit::*;
 use zide_git::{BlameLine, LineChange};
+use zide_lsp::{Diagnostic, DiagnosticSeverity, NumberOrString, char_column, uri_to_path};
 use zide_stubs::{StubKind, StubNode, extract_nodes, language_for_path as stub_language};
 use zide_syntax::{
     Class, FoldRegion, LanguageId, Span, fold_regions, highlight, language_for_path,
@@ -51,6 +52,20 @@ const EDITOR_FONTS: &[&str] = &[
 
 /// Called with the start line of the region whose chevron was clicked.
 pub type FoldClick = Rc<dyn Fn(usize, &mut App)>;
+
+/// Called with the line and window position the mouse is over, or `None` when it left the
+/// editor.
+pub type HoverMove = Rc<dyn Fn(Option<(usize, Point<Pixels>)>, &mut App)>;
+
+/// Per line, the diagnostics to underline and their display bytes.
+type Squiggles = HashMap<usize, Vec<(usize, Range<usize>)>>;
+
+/// The error popup: which diagnostics are under the mouse and where to show them, relative to
+/// the editor.
+struct Hover {
+    diagnostics: Vec<usize>,
+    at: Point<Pixels>,
+}
 
 struct Line {
     /// Char offset of the line in the buffer, and its length in chars.
@@ -227,6 +242,13 @@ pub struct Viewer {
     head: Option<Arc<String>>,
     /// The lines that differ from `head`, as of the current text.
     changes: Arc<HashMap<usize, LineChange>>,
+    /// What the language server reported about the file.
+    diagnostics: Arc<Vec<Diagnostic>>,
+    /// The errors of `diagnostics` to underline, by line: the diagnostic and its display bytes.
+    squiggles: Arc<Squiggles>,
+    hover: Option<Hover>,
+    /// Where the editor was drawn last, to turn a mouse position into a line and column.
+    editor_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The two ends of the pair under the caret (char ranges), for the revision and caret
     /// they were found at.
     pair: RefCell<Option<(PairKey, Pair)>>,
@@ -283,6 +305,10 @@ impl Viewer {
                 .unwrap_or_default(),
             blame: None,
             head: None,
+            diagnostics: Arc::default(),
+            squiggles: Arc::default(),
+            hover: None,
+            editor_bounds: Rc::default(),
             changes: Arc::default(),
             pair: RefCell::new(None),
         };
@@ -293,6 +319,144 @@ impl Viewer {
     /// Records who last changed each line of the file on disk (`None`: git has no answer).
     pub fn set_blame(&mut self, blame: Option<Vec<BlameLine>>) {
         self.blame = blame.map(Arc::new);
+    }
+
+    /// Records what the language server reports about the file. True when it is not what was
+    /// known before.
+    pub fn set_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) -> bool {
+        if *self.diagnostics == diagnostics {
+            return false;
+        }
+        self.diagnostics = Arc::new(diagnostics);
+        self.hover = None;
+        self.refresh_squiggles();
+        true
+    }
+
+    pub fn revision(&self) -> Revision {
+        self.buffer.revision()
+    }
+
+    /// Finds the display bytes of every error on each of its lines. Positions are the ones the
+    /// server saw, so after an edit they can be off until it answers again, but never out of
+    /// the file.
+    fn refresh_squiggles(&mut self) {
+        let mut squiggles = Squiggles::new();
+        for (index, diagnostic) in self.diagnostics.iter().enumerate() {
+            if diagnostic
+                .severity
+                .is_some_and(|severity| severity != DiagnosticSeverity::ERROR)
+            {
+                continue;
+            }
+            let (start, end) = (diagnostic.range.start, diagnostic.range.end);
+            for row in start.line as usize..=end.line as usize {
+                let Some(line) = self.lines.get(row).filter(|line| line.chars > 0) else {
+                    continue;
+                };
+                let raw = self.buffer.line(row);
+                let from = match row == start.line as usize {
+                    true => char_column(&raw, start.character),
+                    false => 0,
+                }
+                .min(line.chars - 1);
+                let to = match row == end.line as usize {
+                    true => char_column(&raw, end.character),
+                    false => line.chars,
+                }
+                .min(line.chars)
+                .max(from + 1); // an empty range still gets a character to underline
+                squiggles
+                    .entry(row)
+                    .or_default()
+                    .push((index, line.display_byte(from)..line.display_byte(to)));
+            }
+        }
+        self.squiggles = Arc::new(squiggles);
+    }
+
+    /// Width of the line numbers column.
+    fn gutter_width(&self) -> f32 {
+        let digits = self.lines.len().to_string().len();
+        (12. * digits as f32 + 28.) * self.font_size / DEFAULT_FONT_SIZE
+    }
+
+    /// The mouse is at `at` (window coordinates) over `row`, or left the editor. True when the
+    /// popup must change.
+    pub fn set_hover(&mut self, over: Option<(usize, Point<Pixels>)>) -> bool {
+        let found = over.and_then(|(row, at)| {
+            let bounds = self.editor_bounds.get();
+            let x = f32::from(at.x - bounds.origin.x) - self.gutter_width();
+            if x < 0. {
+                return None;
+            }
+            let line = self.lines.get(row)?;
+            let column = (x / self.cell_width.unwrap_or(8.)) as usize;
+            let byte = line.text.char_indices().nth(column)?.0;
+            let under: Vec<usize> = self
+                .squiggles
+                .get(&row)?
+                .iter()
+                .filter(|(_, range)| range.contains(&byte))
+                .map(|(index, _)| *index)
+                .collect();
+            (!under.is_empty()).then(|| {
+                let shown = point(at.x - bounds.origin.x, at.y - bounds.origin.y + px(12.));
+                (under, shown)
+            })
+        });
+        match (found, &self.hover) {
+            (None, None) => false,
+            (Some((under, _)), Some(hover)) if under == hover.diagnostics => false,
+            (found, _) => {
+                self.hover = found.map(|(diagnostics, at)| Hover { diagnostics, at });
+                true
+            }
+        }
+    }
+
+    /// The popup with the errors under the mouse.
+    fn hover_popup(&self) -> Option<Div> {
+        let hover = self.hover.as_ref()?;
+        let room = f32::from(self.editor_bounds.get().size.width);
+        let left = f32::from(hover.at.x).min((room - 540.).max(0.));
+        Some(
+            div()
+                .absolute()
+                .left(px(left))
+                .top(hover.at.y)
+                .max_w(px(520.))
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(theme::CONTROL_BORDER))
+                .bg(rgb(theme::POPUP))
+                .text_sm()
+                .whitespace_normal()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .children(
+                    hover
+                        .diagnostics
+                        .iter()
+                        .filter_map(|&index| self.diagnostics.get(index))
+                        .map(|diagnostic| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_color(rgb(theme::STRONG))
+                                        .child(headline(diagnostic)),
+                                )
+                                .children(related_lines(diagnostic).into_iter().map(|line| {
+                                    div().text_color(rgb(theme::CARET_BAR)).child(line)
+                                }))
+                        }),
+                ),
+        )
     }
 
     /// Records the file as of the last commit (`None`: nothing to compare with) and marks the
@@ -1210,6 +1374,7 @@ impl Viewer {
         self.collapsed.retain(|line| starts.contains(line));
         self.rebuild_rows();
         self.refresh_changes();
+        self.refresh_squiggles();
         self.outline = match stub_language(&self.path) {
             Some(language) if self.editable => extract_nodes(language, &self.buffer.text()),
             _ => Vec::new(),
@@ -1309,7 +1474,7 @@ impl Viewer {
     }
 
     /// `on_fold` is called with the start line of the region whose chevron was clicked.
-    pub fn render(&self, on_fold: FoldClick) -> Div {
+    pub fn render(&self, on_fold: FoldClick, on_hover: HoverMove) -> Div {
         let lines = self.lines.clone();
         let rows = self.rows.clone();
         let folded: BTreeSet<usize> = self
@@ -1323,6 +1488,10 @@ impl Viewer {
         let (cursor_line, cursor_cell) = self.cursor_cell();
         let blame = self.blame_label();
         let changes = self.changes.clone();
+        let squiggles = self.squiggles.clone();
+        let editor_bounds = self.editor_bounds.clone();
+        let leave = on_hover.clone();
+        let popup = self.hover_popup();
         let insert = self.vim.mode() == Mode::Insert;
         let selection = self
             .vim
@@ -1396,6 +1565,16 @@ impl Viewer {
                         let range = line.display_byte(from)..line.display_byte(to);
                         colors = paint(&colors, range, rgb(theme::WORD).into());
                     }
+                    for (_, range) in squiggles.get(&row).into_iter().flatten() {
+                        colors = restyle(&colors, range.clone(), |style| HighlightStyle {
+                            underline: Some(UnderlineStyle {
+                                color: Some(rgb(theme::ERROR).into()),
+                                thickness: px(1.),
+                                wavy: true,
+                            }),
+                            ..style
+                        });
+                    }
                     for end in pair.iter() {
                         if end.start >= line.start && end.start < line.start + line.chars {
                             let from = end.start - line.start;
@@ -1458,10 +1637,12 @@ impl Viewer {
                             .rounded_full()
                             .bg(rgba(theme::WHITESPACE))
                     });
+                    let hover = on_hover.clone();
                     div()
                         .relative()
                         .flex()
                         .h(px(row_height))
+                        .on_mouse_move(move |event, _, cx| hover(Some((row, event.position)), cx))
                         .children(bands)
                         .child(
                             div()
@@ -1530,13 +1711,28 @@ impl Viewer {
             .child(self.breadcrumb())
             .child(
                 div()
+                    .id("editor")
                     .flex_1()
                     .relative()
                     .font_family(self.font_family.clone())
                     .text_size(px(self.font_size))
                     .whitespace_nowrap()
+                    .on_hover(move |hovered, _, cx| {
+                        if !*hovered {
+                            leave(None, cx)
+                        }
+                    })
+                    .child(
+                        canvas(
+                            move |bounds, _, _| editor_bounds.set(bounds),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
                     .child(list)
-                    .children(sticky),
+                    .children(sticky)
+                    .children(popup),
             )
             .child(
                 div()
@@ -1568,13 +1764,23 @@ fn paint(
     range: Range<usize>,
     bg: Hsla,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
+    restyle(colors, range, |style| HighlightStyle {
+        background_color: Some(bg),
+        ..style
+    })
+}
+
+/// `colors` with `with` applied to the style of every part of `range`, gaps included; the rest
+/// is unchanged.
+fn restyle(
+    colors: &[(Range<usize>, HighlightStyle)],
+    range: Range<usize>,
+    with: impl Fn(HighlightStyle) -> HighlightStyle,
+) -> Vec<(Range<usize>, HighlightStyle)> {
     if range.is_empty() {
         return colors.to_vec();
     }
-    let with_bg = |style: HighlightStyle| HighlightStyle {
-        background_color: Some(bg),
-        ..style
-    };
+    let with_bg = with;
     let mut out = Vec::with_capacity(colors.len() + 3);
     let mut painted_to = range.start;
     for (span, style) in colors {
@@ -1600,6 +1806,42 @@ fn paint(
     }
     out.sort_by_key(|(span, _)| span.start);
     out
+}
+
+/// What the popup says first: `TS2554: Expected 8 arguments, but got 7`.
+fn headline(diagnostic: &Diagnostic) -> String {
+    let code = match (&diagnostic.code, diagnostic.source.as_deref()) {
+        (Some(NumberOrString::Number(n)), Some("ts")) => Some(format!("TS{n}")),
+        (Some(NumberOrString::Number(n)), _) => Some(n.to_string()),
+        (Some(NumberOrString::String(code)), _) => Some(code.clone()),
+        (None, _) => None,
+    };
+    match code {
+        Some(code) => format!("{code}: {}", diagnostic.message),
+        None => diagnostic.message.clone(),
+    }
+}
+
+/// The places a diagnostic points at besides its own: `card.ts(38, 5): An argument for
+/// maxCopies was not provided.`
+fn related_lines(diagnostic: &Diagnostic) -> Vec<String> {
+    diagnostic
+        .related_information
+        .iter()
+        .flatten()
+        .map(|related| {
+            let file = uri_to_path(related.location.uri.as_str())
+                .and_then(|path| Some(path.file_name()?.to_string_lossy().into_owned()))
+                .unwrap_or_default();
+            let at = related.location.range.start;
+            format!(
+                "{file}({}, {}): {}",
+                at.line + 1,
+                at.character + 1,
+                related.message
+            )
+        })
+        .collect()
 }
 
 fn style(class: Class) -> HighlightStyle {
@@ -2082,6 +2324,81 @@ mod tests {
         viewer.set_head(None); // untracked: nothing to compare with
         assert!(viewer.changes.is_empty());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn diagnostic(range: ((u32, u32), (u32, u32)), message: &str) -> Diagnostic {
+        Diagnostic {
+            range: zide_lsp::Range::new(
+                zide_lsp::Position::new(range.0.0, range.0.1),
+                zide_lsp::Position::new(range.1.0, range.1.1),
+            ),
+            severity: Some(DiagnosticSeverity::ERROR),
+            message: message.into(),
+            ..Default::default()
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn errors_are_underlined_where_the_server_put_them() {
+        let (dir, file) = temp_file("squiggles", "let a = 1;\n\tlet b = c;\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let mut warning = diagnostic(((0, 0), (0, 3)), "unused");
+        warning.severity = Some(DiagnosticSeverity::WARNING);
+        let diagnostics = vec![
+            diagnostic(((1, 9), (1, 10)), "cannot find `c`"),
+            diagnostic(((0, 4), (0, 4)), "empty range"),
+            diagnostic(((0, 9), (1, 1)), "spans lines"),
+            warning,
+        ];
+        assert!(viewer.set_diagnostics(diagnostics.clone()));
+        assert!(!viewer.set_diagnostics(diagnostics)); // nothing new
+        let on = |row: usize| -> Vec<(usize, Range<usize>)> { viewer.squiggles[&row].clone() };
+        // the tab is shown as spaces, so the display bytes are not the characters
+        let tab = viewer.lines[1].display_byte(1);
+        assert!(tab > 1);
+        assert_eq!(
+            on(1)[0],
+            (
+                0,
+                viewer.lines[1].display_byte(9)..viewer.lines[1].display_byte(10)
+            )
+        );
+        assert_eq!(on(0)[0], (1, 4..5)); // an empty range still gets one character
+        assert_eq!(on(0)[1], (2, 9..10)); // multi-line: to the end of the first line
+        assert_eq!(on(1)[1], (2, 0..tab)); // and from the start of the next
+        assert!(
+            !viewer
+                .squiggles
+                .values()
+                .flatten()
+                .any(|(index, _)| *index == 3)
+        ); // not a warning
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_popup_names_the_error_with_its_code_and_related_places() {
+        let mut d = diagnostic(((0, 0), (0, 1)), "Expected 8 arguments, but got 7");
+        assert_eq!(headline(&d), "Expected 8 arguments, but got 7");
+        d.code = Some(NumberOrString::Number(2554));
+        d.source = Some("ts".into());
+        assert_eq!(headline(&d), "TS2554: Expected 8 arguments, but got 7");
+        d.source = Some("rustc".into());
+        assert_eq!(headline(&d), "2554: Expected 8 arguments, but got 7");
+        d.related_information = Some(vec![zide_lsp::DiagnosticRelatedInformation {
+            location: zide_lsp::Location::new(
+                "file:///app/card.ts".parse().unwrap(),
+                zide_lsp::Range::new(
+                    zide_lsp::Position::new(37, 4),
+                    zide_lsp::Position::new(37, 9),
+                ),
+            ),
+            message: "An argument for maxCopies was not provided.".into(),
+        }]);
+        assert_eq!(
+            related_lines(&d),
+            ["card.ts(38, 5): An argument for maxCopies was not provided."]
+        );
     }
 
     #[::core::prelude::v1::test]
