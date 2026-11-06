@@ -2240,20 +2240,34 @@ fn related_lines(diagnostic: &Diagnostic) -> Vec<String> {
 
 fn style(class: Class) -> HighlightStyle {
     let color = match class {
-        Class::Keyword => 0xc678dd,
+        Class::Keyword | Class::Marker => 0xc678dd,
         Class::String => 0x98c379,
-        Class::Number | Class::Constant => 0xd19a66,
+        Class::Number | Class::Constant | Class::Strong => 0xd19a66,
         Class::Comment => 0x7f848e,
         Class::Function => 0x61afef,
         Class::Type | Class::Tag => 0xe5c07b,
         Class::Property | Class::Attribute => 0xd19a66,
-        Class::Variable => 0xe06c75,
+        Class::Variable | Class::Heading => 0xe06c75,
         Class::Operator | Class::Punctuation => 0xabb2bf,
+        Class::Emphasis => 0xc678dd,
+        Class::Link => 0x56b6c2,
     };
-    HighlightStyle {
+    let mut style = HighlightStyle {
         color: Some(rgb(color).into()),
         ..Default::default()
+    };
+    match class {
+        Class::Heading | Class::Strong => style.font_weight = Some(FontWeight::BOLD),
+        Class::Emphasis => style.font_style = Some(FontStyle::Italic),
+        Class::Link => {
+            style.underline = Some(UnderlineStyle {
+                thickness: px(1.),
+                ..Default::default()
+            })
+        }
+        _ => {}
     }
+    style
 }
 
 /// Splits the text into display lines (tabs expanded) with their colors, in line coordinates.

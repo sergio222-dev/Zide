@@ -35,7 +35,7 @@ Only Linux x86_64 is published for now.
 - **Sticky scroll**: the class and function declarations that scrolled out of view stay pinned at the top of the editor (up to five, outermost first).
 - **Project tree** panel, with IntelliJ ordering and reveal of the open file.
 - **Markdown preview** (`Ctrl+Shift+M`): the rendered file beside the editor for `.md` files, updated as you type.
-- **Syntax highlighting** with tree-sitter (Rust, JavaScript, TypeScript, TSX, Go, Python).
+- **Syntax highlighting** with tree-sitter (Rust, JavaScript, TypeScript, TSX, Go, Python, Markdown).
 - **Breadcrumb** with the enclosing symbols at the cursor.
 - **Whitespace dots and rainbow indent guides**, per-project font size (Ctrl+wheel to zoom).
 - **Navigation**: next/previous method (`Alt+Down` / `Alt+Up`), extend/shrink selection.
