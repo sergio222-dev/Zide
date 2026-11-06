@@ -124,6 +124,12 @@ something changes, so read it while scrolling or holding a movement key.
 `ZIDE_FAKE_VERSION=0.0.1 zide` makes the update check believe it runs that version, so the
 "Update available" notification shows up. The Update button installs the real latest release.
 
+### Project folder
+
+Zide keeps what it remembers about a project (last open file, where each file was left, font
+size) in the project's own `.zide/` folder, which ignores itself through a `.gitignore` inside.
+Delete the folder to forget it; `--purge` on uninstall does not touch it.
+
 ### Language servers
 
 Zide does not ship language servers; it uses the ones you have for Rust, TypeScript/JavaScript,
