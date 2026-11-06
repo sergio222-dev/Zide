@@ -14,6 +14,8 @@ pub const SYMBOL: u32 = 0xc678dd;
 pub const SELECTION: u32 = 0x3e4451;
 /// Other occurrences of the word under the caret.
 pub const WORD: u32 = 0x33384a;
+/// The bracket under the caret and its partner.
+pub const BRACKET: u32 = 0x3f4b6e;
 pub const FIND_MATCH: u32 = 0x5a4a22;
 pub const FIND_CURRENT: u32 = 0x8a6d1d;
 pub const CARET_BAR: u32 = 0x61afef;

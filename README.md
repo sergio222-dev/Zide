@@ -26,6 +26,7 @@ Only Linux x86_64 is published for now.
 - **Find Usages** (`Alt+F7`): semantic through a language server, text search as a fallback.
 - **Code folding** for blocks, declarations, imports and long comments, with gutter chevrons.
 - **Git blame** in gray after the cursor line: author's last name, date, time and commit summary.
+- **Matching pairs**: the caret on a bracket highlights its partner; on a JSX tag name, the other tag; on the `:` of a Python block, the block's last line.
 - **Project tree** panel, with IntelliJ ordering and reveal of the open file.
 - **Syntax highlighting** with tree-sitter (Rust, JavaScript, TypeScript, TSX, Go, Python).
 - **Breadcrumb** with the enclosing symbols at the cursor.

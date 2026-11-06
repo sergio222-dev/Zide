@@ -1,6 +1,7 @@
 //! File editor view: line numbers, syntax colors, a block cursor and Vim keys.
 
 use std::{
+    cell::RefCell,
     collections::BTreeSet,
     fs,
     ops::Range,
@@ -215,7 +216,14 @@ pub struct Viewer {
     root_name: String,
     /// Who last changed each line of the file on disk, when git knows it.
     blame: Option<Arc<Vec<BlameLine>>>,
+    /// The two ends of the pair under the caret (char ranges), for the revision and caret
+    /// they were found at.
+    pair: RefCell<Option<(PairKey, Pair)>>,
 }
+
+/// Revision, caret and whether it is inserting: what `pair` depends on.
+type PairKey = (Revision, usize, bool);
+type Pair = Arc<Vec<Range<usize>>>;
 
 impl Viewer {
     /// Opens `root/relative`. Errors are shown as the file's content, not propagated.
@@ -262,6 +270,7 @@ impl Viewer {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             blame: None,
+            pair: RefCell::new(None),
         };
         viewer.rebuild();
         viewer
@@ -279,6 +288,45 @@ impl Viewer {
             return None;
         }
         Some(self.blame.as_ref()?.get(self.cursor_line())?.label())
+    }
+
+    /// Both ends of the bracket, JSX tag or Python block under the caret (the character before
+    /// it also counts while inserting), so you can see where it closes. Cached per caret.
+    fn pair_highlights(&self) -> Pair {
+        let caret = self.vim.cursor();
+        let inserting = self.vim.mode() == Mode::Insert;
+        let key = (self.buffer.revision(), caret, inserting);
+        if let Some((cached, found)) = &*self.pair.borrow()
+            && *cached == key
+        {
+            return found.clone();
+        }
+        let found = Arc::new(self.find_pair(caret, inserting).unwrap_or_default());
+        *self.pair.borrow_mut() = Some((key, found.clone()));
+        found
+    }
+
+    fn find_pair(&self, caret: usize, inserting: bool) -> Option<Vec<Range<usize>>> {
+        let language = self.language?;
+        let before = if inserting {
+            caret.checked_sub(1)
+        } else {
+            None
+        };
+        let at = before.into_iter().chain([caret]).find(|&at| {
+            self.buffer
+                .slice(at..at + 1)
+                .chars()
+                .next()
+                .is_some_and(|c| zide_syntax::is_pair_candidate(language, c))
+        })?;
+        let text = self.buffer.text();
+        let ends = zide_syntax::matching_pair(language, &text, self.buffer.byte_of(at))?;
+        Some(
+            ends.into_iter()
+                .map(|r| self.buffer.offset_of_byte(r.start)..self.buffer.offset_of_byte(r.end))
+                .collect(),
+        )
     }
 
     /// Puts the cursor on 1-based `line` and brings it into view.
@@ -1222,6 +1270,7 @@ impl Viewer {
             .match_at_cursor()
             .and_then(|i| matches.as_ref().map(|m| m[i].start));
         let word_matches = self.word_highlights();
+        let pair = self.pair_highlights();
         let cell_width = self.cell_width.unwrap_or(8.);
         let row_height = self.row_height();
         let scale = self.font_size / DEFAULT_FONT_SIZE;
@@ -1241,6 +1290,14 @@ impl Viewer {
                         let to = found.end - line.start;
                         let range = line.display_byte(from)..line.display_byte(to);
                         colors = paint(&colors, range, rgb(theme::WORD).into());
+                    }
+                    for end in pair.iter() {
+                        if end.start >= line.start && end.start < line.start + line.chars {
+                            let from = end.start - line.start;
+                            let to = end.end.min(line.start + line.chars) - line.start;
+                            let range = line.display_byte(from)..line.display_byte(to);
+                            colors = paint(&colors, range, rgb(theme::BRACKET).into());
+                        }
                     }
                     if let Some(matches) = &matches {
                         let first = matches.partition_point(|m| m.end <= line.start);
@@ -1903,6 +1960,22 @@ mod tests {
         assert_eq!(viewer.blame_label(), None); // edited: the lines no longer match
         assert!(viewer.save());
         assert_eq!(viewer.blame_label(), None); // saved: waits for the new blame
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_pair_under_the_caret_is_found_and_follows_it() {
+        let (dir, file) = temp_file_as("pair", "a.rs", "fn m() { f(1); }\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        assert!(viewer.pair_highlights().is_empty()); // on `f`, no bracket
+        type_keys(&mut viewer, "lllllll"); // on the `{`
+        assert_eq!(*viewer.pair_highlights(), vec![7..8, 15..16]);
+        type_keys(&mut viewer, "lll"); // on the `(`
+        assert_eq!(*viewer.pair_highlights(), vec![10..11, 12..13]);
+        type_keys(&mut viewer, "l");
+        assert!(viewer.pair_highlights().is_empty());
+        type_keys(&mut viewer, "l"); // on the `)`: its partner is the `(`
+        assert_eq!(*viewer.pair_highlights(), vec![12..13, 10..11]);
         fs::remove_dir_all(dir).unwrap();
     }
 
