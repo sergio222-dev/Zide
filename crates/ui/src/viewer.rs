@@ -1,6 +1,7 @@
 //! File editor view: line numbers, syntax colors, a block cursor and Vim keys.
 
 use std::{
+    cell::RefCell,
     collections::BTreeSet,
     fs,
     ops::Range,
@@ -12,6 +13,7 @@ use std::{
 };
 
 use gpui_kit::*;
+use zide_git::BlameLine;
 use zide_stubs::{StubKind, StubNode, extract_nodes, language_for_path as stub_language};
 use zide_syntax::{
     Class, FoldRegion, LanguageId, Span, fold_regions, highlight, language_for_path,
@@ -19,7 +21,12 @@ use zide_syntax::{
 use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
-use crate::{indent, rows::Rows, theme};
+use crate::{
+    indent,
+    rows::Rows,
+    sticky::{MAX_STICKY, Scope, sticky_headers},
+    theme,
+};
 
 /// Files larger than this are not opened.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -210,9 +217,20 @@ pub struct Viewer {
     font_family: SharedString,
     /// Declarations of the file as of `built_at`, for the breadcrumb.
     outline: Vec<StubNode>,
+    /// The declarations of `outline` that span several lines, for sticky scroll.
+    scopes: Vec<Scope>,
     /// Name of the project folder, first crumb of the breadcrumb.
     root_name: String,
+    /// Who last changed each line of the file on disk, when git knows it.
+    blame: Option<Arc<Vec<BlameLine>>>,
+    /// The two ends of the pair under the caret (char ranges), for the revision and caret
+    /// they were found at.
+    pair: RefCell<Option<(PairKey, Pair)>>,
 }
+
+/// Revision, caret and whether it is inserting: what `pair` depends on.
+type PairKey = (Revision, usize, bool);
+type Pair = Arc<Vec<Range<usize>>>;
 
 impl Viewer {
     /// Opens `root/relative`. Errors are shown as the file's content, not propagated.
@@ -254,13 +272,69 @@ impl Viewer {
             settled_top: 0.,
             font_family: EDITOR_FONTS[0].into(),
             outline: Vec::new(),
+            scopes: Vec::new(),
             root_name: root
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            blame: None,
+            pair: RefCell::new(None),
         };
         viewer.rebuild();
         viewer
+    }
+
+    /// Records who last changed each line of the file on disk (`None`: git has no answer).
+    pub fn set_blame(&mut self, blame: Option<Vec<BlameLine>>) {
+        self.blame = blame.map(Arc::new);
+    }
+
+    /// The blame of the cursor's line, in gray after the code. Only while the buffer is what is
+    /// on disk: after an edit the lines no longer match what git saw.
+    fn blame_label(&self) -> Option<String> {
+        if self.is_dirty() {
+            return None;
+        }
+        Some(self.blame.as_ref()?.get(self.cursor_line())?.label())
+    }
+
+    /// Both ends of the bracket, JSX tag or Python block under the caret (the character before
+    /// it also counts while inserting), so you can see where it closes. Cached per caret.
+    fn pair_highlights(&self) -> Pair {
+        let caret = self.vim.cursor();
+        let inserting = self.vim.mode() == Mode::Insert;
+        let key = (self.buffer.revision(), caret, inserting);
+        if let Some((cached, found)) = &*self.pair.borrow()
+            && *cached == key
+        {
+            return found.clone();
+        }
+        let found = Arc::new(self.find_pair(caret, inserting).unwrap_or_default());
+        *self.pair.borrow_mut() = Some((key, found.clone()));
+        found
+    }
+
+    fn find_pair(&self, caret: usize, inserting: bool) -> Option<Vec<Range<usize>>> {
+        let language = self.language?;
+        let before = if inserting {
+            caret.checked_sub(1)
+        } else {
+            None
+        };
+        let at = before.into_iter().chain([caret]).find(|&at| {
+            self.buffer
+                .slice(at..at + 1)
+                .chars()
+                .next()
+                .is_some_and(|c| zide_syntax::is_pair_candidate(language, c))
+        })?;
+        let text = self.buffer.text();
+        let ends = zide_syntax::matching_pair(language, &text, self.buffer.byte_of(at))?;
+        Some(
+            ends.into_iter()
+                .map(|r| self.buffer.offset_of_byte(r.start)..self.buffer.offset_of_byte(r.end))
+                .collect(),
+        )
     }
 
     /// Puts the cursor on 1-based `line` and brings it into view.
@@ -294,21 +368,27 @@ impl Viewer {
 
     /// Writes the buffer to its file when it has unsaved changes. Refuses to overwrite a file
     /// that changed on disk since it was read: the notice says so and the edits stay in memory.
-    pub fn save(&mut self) {
+    /// True when it wrote the file (its blame is then out of date).
+    pub fn save(&mut self) -> bool {
         if !self.is_dirty() {
-            return;
+            return false;
         }
         if disk_stamp(&self.full_path) != self.disk {
             self.notice = Some("not saved: the file changed on disk".into());
-            return;
+            return false;
         }
         match fs::write(&self.full_path, self.buffer.text()) {
             Ok(()) => {
                 self.saved_at = self.buffer.revision();
                 self.disk = disk_stamp(&self.full_path);
                 self.notice = None;
+                self.blame = None;
+                true
             }
-            Err(e) => self.notice = Some(format!("not saved: {e}")),
+            Err(e) => {
+                self.notice = Some(format!("not saved: {e}"));
+                false
+            }
         }
     }
 
@@ -985,7 +1065,24 @@ impl Viewer {
     fn reveal_cursor(&mut self) {
         self.unfold_hiding(self.cursor_line());
         let row = self.rows.row_of(self.cursor_line());
+        // a cursor under the pinned declarations is out of sight: scroll until it is right
+        // below them
+        if let Some((top, _)) = self.view_metrics()
+            && row < top + self.pinned_at(top).len()
+        {
+            let mut first = row;
+            for _ in 0..MAX_STICKY {
+                first = row.saturating_sub(self.pinned_at(first).len());
+            }
+            self.scroll.scroll_to_item(first, ScrollStrategy::Top);
+            return;
+        }
         self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+    }
+
+    /// The header lines pinned above the code when `top` is the first row on screen.
+    fn pinned_at(&self, top: usize) -> Vec<usize> {
+        sticky_headers(&self.scopes, |row| self.rows.line(row), top)
     }
 
     fn cursor_line(&self) -> usize {
@@ -1096,6 +1193,30 @@ impl Viewer {
             Some(language) if self.editable => extract_nodes(language, &self.buffer.text()),
             _ => Vec::new(),
         };
+        let line_of = |byte: u32| {
+            let offset = self.buffer.offset_of_byte(byte as usize);
+            self.buffer.position_of(offset).line
+        };
+        self.scopes = self
+            .outline
+            .iter()
+            .filter(|n| {
+                !matches!(
+                    n.kind,
+                    StubKind::Import
+                        | StubKind::Field
+                        | StubKind::Variant
+                        | StubKind::Const
+                        | StubKind::TypeAlias
+                        | StubKind::Macro
+                )
+            })
+            .map(|n| Scope {
+                start: line_of(n.range.start),
+                end: line_of(n.range.end.saturating_sub(1)),
+            })
+            .filter(|s| s.end > s.start)
+            .collect();
         self.built_at = self.buffer.revision();
     }
 
@@ -1179,6 +1300,7 @@ impl Viewer {
         let starts: BTreeSet<usize> = self.folds.iter().map(|r| r.start_line).collect();
         let digits = lines.len().to_string().len();
         let (cursor_line, cursor_cell) = self.cursor_cell();
+        let blame = self.blame_label();
         let insert = self.vim.mode() == Mode::Insert;
         let selection = self
             .vim
@@ -1197,9 +1319,44 @@ impl Viewer {
             .match_at_cursor()
             .and_then(|i| matches.as_ref().map(|m| m[i].start));
         let word_matches = self.word_highlights();
+        let pair = self.pair_highlights();
         let cell_width = self.cell_width.unwrap_or(8.);
         let row_height = self.row_height();
         let scale = self.font_size / DEFAULT_FONT_SIZE;
+        let pinned: Vec<_> = self
+            .pinned_at((self.settled_top / row_height) as usize)
+            .into_iter()
+            .filter_map(|line| Some((line, self.lines.get(line)?)))
+            .collect();
+        let sticky = (!pinned.is_empty()).then(|| {
+            let gutter = (12. * digits as f32 + 28.) * scale;
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .bg(rgb(theme::BACKGROUND))
+                .border_b_1()
+                .border_color(rgb(theme::BORDER))
+                .children(pinned.into_iter().map(|(line, shown)| {
+                    div()
+                        .flex()
+                        .h(px(row_height))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .w(px(gutter))
+                                .pr_3()
+                                .text_right()
+                                .text_color(rgb(theme::DIM))
+                                .child((line + 1).to_string()),
+                        )
+                        .child(
+                            StyledText::new(shown.text.clone())
+                                .with_highlights(shown.colors.clone()),
+                        )
+                }))
+        });
         let list = uniform_list("viewer", rows.len(), move |range, _, _| {
             range
                 .map(|row| {
@@ -1216,6 +1373,14 @@ impl Viewer {
                         let to = found.end - line.start;
                         let range = line.display_byte(from)..line.display_byte(to);
                         colors = paint(&colors, range, rgb(theme::WORD).into());
+                    }
+                    for end in pair.iter() {
+                        if end.start >= line.start && end.start < line.start + line.chars {
+                            let from = end.start - line.start;
+                            let to = end.end.min(line.start + line.chars) - line.start;
+                            let range = line.display_byte(from)..line.display_byte(to);
+                            colors = paint(&colors, range, rgb(theme::BRACKET).into());
+                        }
                     }
                     if let Some(matches) = &matches {
                         let first = matches.partition_point(|m| m.end <= line.start);
@@ -1302,6 +1467,15 @@ impl Viewer {
                                 })),
                         )
                         .child(StyledText::new(text).with_highlights(colors))
+                        .children(blame.clone().filter(|_| row == cursor_line).map(|label| {
+                            div()
+                                .flex_shrink_0()
+                                .ml_6()
+                                .whitespace_nowrap()
+                                .italic()
+                                .text_color(rgb(theme::DIM))
+                                .child(label)
+                        }))
                         .children(folded.contains(&row).then(|| {
                             div()
                                 .px_1()
@@ -1330,10 +1504,12 @@ impl Viewer {
             .child(
                 div()
                     .flex_1()
+                    .relative()
                     .font_family(self.font_family.clone())
                     .text_size(px(self.font_size))
                     .whitespace_nowrap()
-                    .child(list),
+                    .child(list)
+                    .children(sticky),
             )
             .child(
                 div()
@@ -1843,6 +2019,60 @@ mod tests {
         viewer.save();
         assert!(!viewer.is_dirty());
         assert_eq!(fs::read_to_string(dir.join(&file)).unwrap(), "two\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn blame_shows_for_the_cursor_line_until_the_buffer_is_edited_or_saved() {
+        let (dir, file) = temp_file("blame", "one\ntwo\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        assert_eq!(viewer.blame_label(), None); // git has not answered yet
+        let entry = |summary: &str| BlameLine {
+            author: "Sergio Molina".into(),
+            time: 0,
+            tz_minutes: 0,
+            summary: summary.into(),
+            committed: true,
+        };
+        viewer.set_blame(Some(vec![entry("first"), entry("second")]));
+        assert_eq!(
+            viewer.blame_label().as_deref(),
+            Some("Molina, 1/1/70, 12:00 AM \u{2022} first")
+        );
+        type_keys(&mut viewer, "j");
+        assert!(viewer.blame_label().unwrap().ends_with("second"));
+        type_keys(&mut viewer, "x");
+        assert_eq!(viewer.blame_label(), None); // edited: the lines no longer match
+        assert!(viewer.save());
+        assert_eq!(viewer.blame_label(), None); // saved: waits for the new blame
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_pair_under_the_caret_is_found_and_follows_it() {
+        let (dir, file) = temp_file_as("pair", "a.rs", "fn m() { f(1); }\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        assert!(viewer.pair_highlights().is_empty()); // on `f`, no bracket
+        type_keys(&mut viewer, "lllllll"); // on the `{`
+        assert_eq!(*viewer.pair_highlights(), vec![7..8, 15..16]);
+        type_keys(&mut viewer, "lll"); // on the `(`
+        assert_eq!(*viewer.pair_highlights(), vec![10..11, 12..13]);
+        type_keys(&mut viewer, "l");
+        assert!(viewer.pair_highlights().is_empty());
+        type_keys(&mut viewer, "l"); // on the `)`: its partner is the `(`
+        assert_eq!(*viewer.pair_highlights(), vec![12..13, 10..11]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn declarations_scrolled_out_of_view_are_pinned_outermost_first() {
+        let text = "struct S;\nimpl S {\n    fn a(&self) {\n        let x = 1;\n        let y = 2;\n    }\n    fn b(&self) {}\n}\n";
+        let (dir, file) = temp_file_as("sticky", "a.rs", text);
+        let viewer = Viewer::open(&dir, &file);
+        assert!(viewer.pinned_at(0).is_empty());
+        assert!(viewer.pinned_at(1).is_empty()); // the impl line is the top row itself
+        assert_eq!(viewer.pinned_at(3), vec![1, 2]); // inside `a`, in the impl
+        assert_eq!(viewer.pinned_at(6), vec![1]); // `b` fits in one line: not a scope
         fs::remove_dir_all(dir).unwrap();
     }
 

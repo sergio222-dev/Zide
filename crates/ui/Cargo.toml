@@ -13,6 +13,7 @@ path = "src/main.rs"
 gpui-kit = "=0.9.0"
 zide-core = { path = "../core" }
 zide-matcher = { path = "../matcher" }
+zide-git = { path = "../git" }
 zide-index = { path = "../index" }
 zide-lsp = { path = "../lsp" }
 zide-search = { path = "../search" }

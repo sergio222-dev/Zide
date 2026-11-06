@@ -2,6 +2,7 @@
 //! behind this crate's API; it never resolves types or references.
 
 mod fold;
+mod pair;
 mod select;
 
 use std::{ops::Range, path::Path, sync::OnceLock};
@@ -83,6 +84,7 @@ fn grammars() -> &'static [Grammar] {
 }
 
 pub use fold::{FoldKind, FoldRegion, fold_regions};
+pub use pair::{is_pair_candidate, matching_pair};
 pub use select::extend_selection;
 
 /// Moves the catch-all pattern `generic` to the front. Here the last pattern wins, as in

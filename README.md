@@ -25,6 +25,9 @@ Only Linux x86_64 is published for now.
 - **Find and replace** in the file (with regex, case and whole-word toggles) and Find in Files.
 - **Find Usages** (`Alt+F7`): semantic through a language server, text search as a fallback.
 - **Code folding** for blocks, declarations, imports and long comments, with gutter chevrons.
+- **Git blame** in gray after the cursor line: author's last name, date, time and commit summary.
+- **Matching pairs**: the caret on a bracket highlights its partner; on a JSX tag name, the other tag; on the `:` of a Python block, the block's last line.
+- **Sticky scroll**: the class and function declarations that scrolled out of view stay pinned at the top of the editor (up to five, outermost first).
 - **Project tree** panel, with IntelliJ ordering and reveal of the open file.
 - **Syntax highlighting** with tree-sitter (Rust, JavaScript, TypeScript, TSX, Go, Python).
 - **Breadcrumb** with the enclosing symbols at the cursor.
@@ -108,6 +111,13 @@ line says a new release is available.
 
 Vim fold keys (`za`, `zo`, `zc`, `zM`, `zR`) and scroll keys (`zt`, `zz`, `zb`, `Ctrl+D`,
 `Ctrl+U`) work in normal mode.
+
+### Frame rate (debug)
+
+`ZIDE_FPS=1 zide` shows an overlay with the rate of the burst of frames in progress (a scroll
+glide, for instance), the frames of the last second, the longest wait between two frames of a
+burst and the time spent building the view. The window only redraws when
+something changes, so read it while scrolling or holding a movement key.
 
 ### Language servers
 

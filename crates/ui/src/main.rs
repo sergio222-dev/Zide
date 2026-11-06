@@ -15,8 +15,10 @@ use std::{
 };
 
 mod indent;
+mod meter;
 mod rows;
 mod session;
+mod sticky;
 mod theme;
 mod usages;
 mod viewer;
@@ -312,6 +314,8 @@ struct Workspace {
     font_size: f32,
     /// When the last Space was pressed in Normal mode: two in a row open the popup.
     last_space: Option<Instant>,
+    /// The frame-rate overlay, when started with `ZIDE_FPS=1`.
+    meter: Option<meter::FrameMeter>,
     /// The project tree on the left.
     tree: Tree,
     tree_visible: bool,
@@ -380,6 +384,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             font_size: viewer::DEFAULT_FONT_SIZE,
             last_space: None,
+            meter: meter::FrameMeter::from_env(),
             tree: Tree::new(),
             tree_visible: false,
             tree_focused: false,
@@ -543,14 +548,38 @@ impl Workspace {
     }
 
     /// Saves the open file; called whenever the user's attention leaves the editor.
-    fn autosave(&mut self) {
-        if let Some(viewer) = &mut self.viewer {
-            viewer.save();
+    fn autosave(&mut self, cx: &mut Context<Self>) {
+        if self.viewer.as_mut().is_some_and(|viewer| viewer.save()) {
+            self.refresh_blame(cx);
         }
     }
 
+    /// Asks git, off the UI thread, who last changed each line of the open file.
+    fn refresh_blame(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path().to_string()) else {
+            return;
+        };
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let asked = path.clone();
+            let blame = cx
+                .background_executor()
+                .spawn(async move { zide_git::blame(&root, &asked) })
+                .await;
+            this.update(cx, |this, cx| {
+                // The viewer may have moved on to another file meanwhile.
+                if let Some(viewer) = this.viewer.as_mut().filter(|v| v.path() == path) {
+                    viewer.set_blame(blame);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn open_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.autosave();
+        self.autosave(cx);
         let input = cx.new(|cx| InputState::new(window, cx));
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -1389,7 +1418,7 @@ impl Workspace {
     /// Shows `path`, parking the open file with its cursor and undo history. A parked file
     /// comes back as it was, unless it changed on disk in the meantime.
     fn open_file(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
-        self.autosave();
+        self.autosave(cx);
         self.warm_server(path, cx);
         // every way of opening a file (popup, tree) counts as a recent one
         if let Some(file) = self
@@ -1418,6 +1447,7 @@ impl Workspace {
         }
         viewer.set_font_size(self.font_size);
         self.viewer = Some(viewer);
+        self.refresh_blame(cx);
         session::remember_file(&self.root, path);
         self.tree.reveal(path);
         self.tree_focused = false; // a file was opened: the keys are the editor's
@@ -1757,6 +1787,29 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let started = Instant::now();
+        let root = self.view(window, cx);
+        let Some(meter) = &mut self.meter else {
+            return root;
+        };
+        meter.frame(started, started.elapsed());
+        root.child(
+            div()
+                .absolute()
+                .top_1()
+                .right_3()
+                .px_2()
+                .rounded_sm()
+                .bg(rgba(0x000000b0))
+                .text_xs()
+                .text_color(rgb(theme::STRONG))
+                .child(meter.label()),
+        )
+    }
+}
+
+impl Workspace {
+    fn view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         if let Some(viewer) = &mut self.viewer {
             viewer.tick(window);
         }
@@ -2390,14 +2443,14 @@ fn main() {
                     this._activation =
                         Some(cx.observe_window_activation(window, |this, window, cx| {
                             if !window.is_window_active() {
-                                this.autosave();
+                                this.autosave(cx);
                                 cx.notify();
                             }
                         }));
                 });
                 let saver = workspace.downgrade();
                 window.on_window_should_close(cx, move |_, cx| {
-                    saver.update(cx, |this, _| this.autosave()).ok();
+                    saver.update(cx, |this, cx| this.autosave(cx)).ok();
                     true
                 });
                 workspace.read(cx).focus.clone().focus(window, cx);
