@@ -1,7 +1,91 @@
-//! Git blame of a file: who last changed each line, when and why.
+//! What git knows of a file: who last changed each line (blame) and what changed since the last
+//! commit.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
+
+use similar::{Algorithm, DiffOp, TextDiff};
+
+/// How a line of the file differs from the last commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineChange {
+    /// A line that is not in the commit.
+    Added,
+    /// A line that replaces other lines of the commit.
+    Modified,
+    /// Lines of the commit were deleted just above this line.
+    Removed,
+    /// Lines of the commit were deleted after the last line of the file.
+    RemovedBelow,
+}
+
+/// The file as of the last commit. `None` when git is missing, `root` is not a repository or the
+/// file is not in the commit (untracked): there is nothing to compare with.
+pub fn head_content(root: &Path, relative: &str) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("show")
+        .arg(format!("HEAD:./{relative}"))
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The lines of `new` that differ from `old`, by 0-based line. A diff that takes too long to
+/// compute reports nothing rather than stalling the editor.
+pub fn line_changes(old: &str, new: &str) -> HashMap<usize, LineChange> {
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Myers)
+        .timeout(Duration::from_millis(100))
+        .diff_lines(old, new);
+    let total = new.lines().count();
+    let mut changes = HashMap::new();
+    let removed = |changes: &mut HashMap<usize, LineChange>, at: usize| {
+        if at < total {
+            changes.entry(at).or_insert(LineChange::Removed);
+        } else if total == 0 {
+            changes.entry(0).or_insert(LineChange::Removed);
+        } else {
+            changes.entry(total - 1).or_insert(LineChange::RemovedBelow);
+        }
+    };
+    for op in diff.ops() {
+        match *op {
+            DiffOp::Equal { .. } => {}
+            DiffOp::Insert {
+                new_index, new_len, ..
+            } => {
+                for line in new_index..new_index + new_len {
+                    changes.insert(line, LineChange::Added);
+                }
+            }
+            DiffOp::Delete { new_index, .. } => removed(&mut changes, new_index),
+            DiffOp::Replace {
+                old_len,
+                new_index,
+                new_len,
+                ..
+            } => {
+                // as many lines changed as there were; the rest are new
+                for line in new_index..new_index + new_len {
+                    let kind = if line - new_index < old_len {
+                        LineChange::Modified
+                    } else {
+                        LineChange::Added
+                    };
+                    changes.insert(line, kind);
+                }
+            }
+        }
+    }
+    changes
+}
 
 /// Who last changed one line, as `git blame` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,5 +290,48 @@ mod tests {
         assert_eq!(lines[2].label(), "Not committed yet");
         assert!(blame(&dir, "missing.txt").is_none());
         fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod change_tests {
+    use super::*;
+
+    fn changes(old: &str, new: &str) -> Vec<(usize, LineChange)> {
+        let mut all: Vec<_> = line_changes(old, new).into_iter().collect();
+        all.sort_by_key(|(line, _)| *line);
+        all
+    }
+
+    #[test]
+    fn identical_text_has_no_changes() {
+        assert!(changes("a\nb\n", "a\nb\n").is_empty());
+    }
+
+    #[test]
+    fn new_lines_are_added() {
+        assert_eq!(
+            changes("a\nd\n", "a\nb\nc\nd\n"),
+            [(1, LineChange::Added), (2, LineChange::Added)]
+        );
+    }
+
+    #[test]
+    fn rewritten_lines_are_modified_and_the_surplus_is_added() {
+        assert_eq!(
+            changes("a\nb\nc\n", "a\nB\nc\n"),
+            [(1, LineChange::Modified)]
+        );
+        assert_eq!(
+            changes("a\nb\n", "a\nB\nC\n"),
+            [(1, LineChange::Modified), (2, LineChange::Added)]
+        );
+    }
+
+    #[test]
+    fn deleted_lines_mark_the_line_below_them() {
+        assert_eq!(changes("a\nb\nc\n", "a\nc\n"), [(1, LineChange::Removed)]);
+        assert_eq!(changes("a\nb\nc\n", "a\n"), [(0, LineChange::RemovedBelow)]);
+        assert_eq!(changes("a\n", ""), [(0, LineChange::Removed)]);
     }
 }

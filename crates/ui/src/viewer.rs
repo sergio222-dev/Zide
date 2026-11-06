@@ -1,8 +1,8 @@
 //! File editor view: line numbers, syntax colors, a block cursor and Vim keys.
 
 use std::{
-    cell::RefCell,
-    collections::BTreeSet,
+    cell::{Cell, RefCell},
+    collections::{BTreeSet, HashMap},
     fs,
     ops::Range,
     path::{Path, PathBuf},
@@ -13,7 +13,10 @@ use std::{
 };
 
 use gpui_kit::*;
-use zide_git::BlameLine;
+use zide_git::{BlameLine, LineChange};
+use zide_lsp::{
+    Diagnostic, DiagnosticSeverity, NumberOrString, ParameterHint, char_column, uri_to_path,
+};
 use zide_stubs::{StubKind, StubNode, extract_nodes, language_for_path as stub_language};
 use zide_syntax::{
     Class, FoldRegion, LanguageId, Span, fold_regions, highlight, language_for_path,
@@ -52,6 +55,34 @@ const EDITOR_FONTS: &[&str] = &[
 /// Called with the start line of the region whose chevron was clicked.
 pub type FoldClick = Rc<dyn Fn(usize, &mut App)>;
 
+/// Called with the line and window position the mouse is over, or `None` when it left the
+/// editor.
+pub type HoverMove = Rc<dyn Fn(Option<(usize, Point<Pixels>)>, &mut App)>;
+
+/// Called with the line and window position of a click on the text.
+pub type TextClick = Rc<dyn Fn(usize, Point<Pixels>, &mut App)>;
+
+/// Per line, the parameter name hints to show: the column they go before and their text.
+type LineHints = HashMap<usize, Vec<(usize, String)>>;
+
+/// Parameter names a language server gave for the text as of `revision`, as char offsets.
+struct HintSet {
+    revision: Revision,
+    /// The text they were given for, to follow the edits made since.
+    text: Arc<String>,
+    hints: Vec<(usize, String)>,
+}
+
+/// Per line, the diagnostics to underline and their display bytes.
+type Squiggles = HashMap<usize, Vec<(usize, Range<usize>)>>;
+
+/// The error popup: which diagnostics are under the mouse and where to show them, relative to
+/// the editor.
+struct Hover {
+    diagnostics: Vec<usize>,
+    at: Point<Pixels>,
+}
+
 struct Line {
     /// Char offset of the line in the buffer, and its length in chars.
     start: usize,
@@ -61,12 +92,24 @@ struct Line {
     /// Display byte of each `char` of the line (and of its end), when that is not the identity
     /// (tabs, multi-byte characters).
     cols: Option<Vec<usize>>,
+    /// Parameter name hints shown in the line: where each was put (a display byte of the line
+    /// without hints) and how many bytes it takes, in order.
+    inserts: Vec<(usize, usize)>,
     /// How many indent bands the line has, each `step` columns wide.
     level: usize,
     step: usize,
 }
 
 impl Line {
+    /// Where the display byte `without_hints` of the line without hints is once they are in.
+    fn with_hints(&self, without_hints: usize) -> usize {
+        let before = self
+            .inserts
+            .iter()
+            .take_while(|(at, _)| *at <= without_hints);
+        without_hints + before.map(|(_, size)| size).sum::<usize>()
+    }
+
     fn display_byte(&self, column: usize) -> usize {
         match &self.cols {
             Some(cols) => cols[column.min(cols.len() - 1)],
@@ -223,6 +266,19 @@ pub struct Viewer {
     root_name: String,
     /// Who last changed each line of the file on disk, when git knows it.
     blame: Option<Arc<Vec<BlameLine>>>,
+    /// The file as of the last commit, to mark what changed since.
+    head: Option<Arc<String>>,
+    /// The lines that differ from `head`, as of the current text.
+    changes: Arc<HashMap<usize, LineChange>>,
+    /// What the language server reported about the file.
+    diagnostics: Arc<Vec<Diagnostic>>,
+    /// The errors of `diagnostics` to underline, by line: the diagnostic and its display bytes.
+    squiggles: Arc<Squiggles>,
+    hover: Option<Hover>,
+    /// The parameter names shown before arguments.
+    hints: Option<HintSet>,
+    /// Where the editor was drawn last, to turn a mouse position into a line and column.
+    editor_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The two ends of the pair under the caret (char ranges), for the revision and caret
     /// they were found at.
     pair: RefCell<Option<(PairKey, Pair)>>,
@@ -278,6 +334,13 @@ impl Viewer {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             blame: None,
+            head: None,
+            diagnostics: Arc::default(),
+            squiggles: Arc::default(),
+            hover: None,
+            hints: None,
+            editor_bounds: Rc::default(),
+            changes: Arc::default(),
             pair: RefCell::new(None),
         };
         viewer.rebuild();
@@ -287,6 +350,245 @@ impl Viewer {
     /// Records who last changed each line of the file on disk (`None`: git has no answer).
     pub fn set_blame(&mut self, blame: Option<Vec<BlameLine>>) {
         self.blame = blame.map(Arc::new);
+    }
+
+    /// Records the parameter names a language server gave for the text as of `revision`.
+    /// Dropped when the text has changed meanwhile (the next answer is for the newer text).
+    /// True when what is shown changed.
+    pub fn set_hints(&mut self, hints: Vec<ParameterHint>, revision: Revision) -> bool {
+        if revision != self.buffer.revision() {
+            return false;
+        }
+        let mut offsets: Vec<(usize, String)> = hints
+            .into_iter()
+            .filter(|hint| (hint.position.line as usize) < self.buffer.line_count())
+            .map(|hint| {
+                let line = hint.position.line as usize;
+                let column = char_column(&self.buffer.line(line), hint.position.character);
+                let at = self.buffer.line_start(line) + column.min(self.buffer.line_len(line));
+                (at, hint.label)
+            })
+            .collect();
+        offsets.sort_by_key(|(at, _)| *at);
+        let before = self.hints_by_line();
+        self.hints = Some(HintSet {
+            revision,
+            text: Arc::new(self.buffer.text()),
+            hints: offsets,
+        });
+        if self.hints_by_line() == before {
+            return false;
+        }
+        self.rebuild();
+        true
+    }
+
+    /// The hints to show, by line. Hints given for older text move with the edits made since
+    /// (as one edit: what was typed between the text they were given for and now).
+    fn hints_by_line(&self) -> LineHints {
+        let mut by_line = LineHints::new();
+        let Some(set) = &self.hints else {
+            return by_line;
+        };
+        let current;
+        let hints = if set.revision == self.buffer.revision() {
+            &set.hints
+        } else {
+            current = follow_edit(&set.text, &self.buffer.text(), &set.hints);
+            &current
+        };
+        for (at, label) in hints {
+            let position = self.buffer.position_of(*at);
+            by_line
+                .entry(position.line)
+                .or_default()
+                .push((position.column, label.clone()));
+        }
+        by_line
+    }
+
+    /// Records what the language server reports about the file. True when it is not what was
+    /// known before.
+    pub fn set_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) -> bool {
+        if *self.diagnostics == diagnostics {
+            return false;
+        }
+        self.diagnostics = Arc::new(diagnostics);
+        self.hover = None;
+        self.refresh_squiggles();
+        true
+    }
+
+    pub fn revision(&self) -> Revision {
+        self.buffer.revision()
+    }
+
+    /// Finds the display bytes of every error on each of its lines. Positions are the ones the
+    /// server saw, so after an edit they can be off until it answers again, but never out of
+    /// the file.
+    fn refresh_squiggles(&mut self) {
+        let mut squiggles = Squiggles::new();
+        for (index, diagnostic) in self.diagnostics.iter().enumerate() {
+            if diagnostic
+                .severity
+                .is_some_and(|severity| severity != DiagnosticSeverity::ERROR)
+            {
+                continue;
+            }
+            let (start, end) = (diagnostic.range.start, diagnostic.range.end);
+            for row in start.line as usize..=end.line as usize {
+                let Some(line) = self.lines.get(row).filter(|line| line.chars > 0) else {
+                    continue;
+                };
+                let raw = self.buffer.line(row);
+                let from = match row == start.line as usize {
+                    true => char_column(&raw, start.character),
+                    false => 0,
+                }
+                .min(line.chars - 1);
+                let to = match row == end.line as usize {
+                    true => char_column(&raw, end.character),
+                    false => line.chars,
+                }
+                .min(line.chars)
+                .max(from + 1); // an empty range still gets a character to underline
+                squiggles
+                    .entry(row)
+                    .or_default()
+                    .push((index, line.display_byte(from)..line.display_byte(to)));
+            }
+        }
+        self.squiggles = Arc::new(squiggles);
+    }
+
+    /// Width of the line numbers column.
+    fn gutter_width(&self) -> f32 {
+        let digits = self.lines.len().to_string().len();
+        (12. * digits as f32 + 28.) * self.font_size / DEFAULT_FONT_SIZE
+    }
+
+    /// The cell of the line text at window position `x`, `None` over the line numbers. With
+    /// `nearest` the edge closest to `x` is meant (where a caret goes), else the cell it is in.
+    fn cell_under(&self, x: Pixels, nearest: bool) -> Option<usize> {
+        let x = f32::from(x - self.editor_bounds.get().origin.x) - self.gutter_width();
+        let cells = x / self.cell_width.unwrap_or(8.);
+        (x >= 0.).then_some((if nearest { cells + 0.5 } else { cells }) as usize)
+    }
+
+    /// A click at window position `at` on `row`: the caret goes to that character. True when it
+    /// was on the text.
+    pub fn click(&mut self, row: usize, at: Point<Pixels>) -> bool {
+        let Some(line) = self.lines.get(row) else {
+            return false;
+        };
+        let inserting = self.vim.mode() == Mode::Insert;
+        let Some(cell) = self.cell_under(at.x, inserting) else {
+            return false;
+        };
+        // the display byte of that cell, then the character it belongs to (a tab spans several)
+        let byte = line
+            .text
+            .char_indices()
+            .nth(cell)
+            .map_or(line.text.len(), |(byte, _)| byte);
+        let column = match &line.cols {
+            Some(cols) => cols.iter().rposition(|&shown| shown <= byte).unwrap_or(0),
+            None => byte,
+        }
+        .min(line.chars);
+        let offset = self.buffer.line_start(row) + column;
+        self.anim = None;
+        self.z_pending = false;
+        self.vim.click(&mut self.buffer, offset);
+        true
+    }
+
+    /// The mouse is at `at` (window coordinates) over `row`, or left the editor. True when the
+    /// popup must change.
+    pub fn set_hover(&mut self, over: Option<(usize, Point<Pixels>)>) -> bool {
+        let found = over.and_then(|(row, at)| {
+            let bounds = self.editor_bounds.get();
+            let line = self.lines.get(row)?;
+            let column = self.cell_under(at.x, false)?;
+            let byte = line.text.char_indices().nth(column)?.0;
+            let under: Vec<usize> = self
+                .squiggles
+                .get(&row)?
+                .iter()
+                .filter(|(_, range)| range.contains(&byte))
+                .map(|(index, _)| *index)
+                .collect();
+            (!under.is_empty()).then(|| {
+                let shown = point(at.x - bounds.origin.x, at.y - bounds.origin.y + px(12.));
+                (under, shown)
+            })
+        });
+        match (found, &self.hover) {
+            (None, None) => false,
+            (Some((under, _)), Some(hover)) if under == hover.diagnostics => false,
+            (found, _) => {
+                self.hover = found.map(|(diagnostics, at)| Hover { diagnostics, at });
+                true
+            }
+        }
+    }
+
+    /// The popup with the errors under the mouse.
+    fn hover_popup(&self) -> Option<Div> {
+        let hover = self.hover.as_ref()?;
+        let room = f32::from(self.editor_bounds.get().size.width);
+        let left = f32::from(hover.at.x).min((room - 540.).max(0.));
+        Some(
+            div()
+                .absolute()
+                .left(px(left))
+                .top(hover.at.y)
+                .max_w(px(520.))
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(theme::CONTROL_BORDER))
+                .bg(rgb(theme::POPUP))
+                .text_sm()
+                .whitespace_normal()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .children(
+                    hover
+                        .diagnostics
+                        .iter()
+                        .filter_map(|&index| self.diagnostics.get(index))
+                        .map(|diagnostic| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_color(rgb(theme::STRONG))
+                                        .child(headline(diagnostic)),
+                                )
+                                .children(related_lines(diagnostic).into_iter().map(|line| {
+                                    div().text_color(rgb(theme::CARET_BAR)).child(line)
+                                }))
+                        }),
+                ),
+        )
+    }
+
+    /// Records the file as of the last commit (`None`: nothing to compare with) and marks the
+    /// lines that differ from it.
+    pub fn set_head(&mut self, head: Option<String>) {
+        self.head = head.map(Arc::new);
+        self.refresh_changes();
+    }
+
+    fn refresh_changes(&mut self) {
+        self.changes = Arc::new(match &self.head {
+            Some(head) if self.editable => zide_git::line_changes(head, &self.buffer.text()),
+            _ => HashMap::new(),
+        });
     }
 
     /// The blame of the cursor's line, in gray after the code. Only while the buffer is what is
@@ -390,6 +692,32 @@ impl Viewer {
                 false
             }
         }
+    }
+
+    /// Where the file is now: the first line on screen and the caret. `None` before the first
+    /// layout, when the scroll is not known.
+    pub fn view(&self) -> Option<crate::session::View> {
+        self.view_metrics()?;
+        let at = self.buffer.position_of(self.vim.cursor());
+        Some(crate::session::View {
+            top: self
+                .rows
+                .line((self.settled_top / self.row_height()) as usize),
+            line: at.line,
+            column: at.column,
+        })
+    }
+
+    /// Goes back to where the file was left (what it has now may be shorter).
+    pub fn restore_view(&mut self, view: crate::session::View) {
+        let line = view.line.min(self.lines.len() - 1);
+        let offset = self.buffer.line_start(line) + view.column;
+        self.vim.set_cursor(&self.buffer, offset);
+        let top = view.top.min(self.lines.len() - 1);
+        // strict: a line that already fits on screen from the top of the file still goes to the
+        // top of the view
+        self.scroll
+            .scroll_to_item_strict(self.rows.row_of(top), ScrollStrategy::Top);
     }
 
     /// `(first visible row, visible rows)` as of the last layout, if there was one.
@@ -1181,7 +1509,8 @@ impl Viewer {
             .language
             .map(|language| highlight(language, &self.buffer.text()))
             .unwrap_or_default();
-        self.lines = Arc::new(build_lines(&self.buffer, &spans));
+        let hints = self.hints_by_line();
+        self.lines = Arc::new(build_lines(&self.buffer, &spans, &hints));
         self.folds = match self.language {
             Some(language) if self.editable => fold_regions(language, &self.buffer.text()),
             _ => Vec::new(),
@@ -1189,6 +1518,8 @@ impl Viewer {
         let starts: BTreeSet<usize> = self.folds.iter().map(|r| r.start_line).collect();
         self.collapsed.retain(|line| starts.contains(line));
         self.rebuild_rows();
+        self.refresh_changes();
+        self.refresh_squiggles();
         self.outline = match stub_language(&self.path) {
             Some(language) if self.editable => extract_nodes(language, &self.buffer.text()),
             _ => Vec::new(),
@@ -1233,7 +1564,11 @@ impl Viewer {
             .chars()
             .next()
             .map_or(byte, |c| byte + c.len_utf8());
-        (position.line, map[byte]..map[end].max(map[byte] + 1))
+        let start = self
+            .lines
+            .get(position.line)
+            .map_or(map[byte], |line| line.with_hints(map[byte]));
+        (position.line, start..start + (map[end] - map[byte]).max(1))
     }
 
     /// The declarations around the cursor, outermost first.
@@ -1288,7 +1623,7 @@ impl Viewer {
     }
 
     /// `on_fold` is called with the start line of the region whose chevron was clicked.
-    pub fn render(&self, on_fold: FoldClick) -> Div {
+    pub fn render(&self, on_fold: FoldClick, on_hover: HoverMove, on_click: TextClick) -> Div {
         let lines = self.lines.clone();
         let rows = self.rows.clone();
         let folded: BTreeSet<usize> = self
@@ -1301,6 +1636,11 @@ impl Viewer {
         let digits = lines.len().to_string().len();
         let (cursor_line, cursor_cell) = self.cursor_cell();
         let blame = self.blame_label();
+        let changes = self.changes.clone();
+        let squiggles = self.squiggles.clone();
+        let editor_bounds = self.editor_bounds.clone();
+        let leave = on_hover.clone();
+        let popup = self.hover_popup();
         let insert = self.vim.mode() == Mode::Insert;
         let selection = self
             .vim
@@ -1374,6 +1714,16 @@ impl Viewer {
                         let range = line.display_byte(from)..line.display_byte(to);
                         colors = paint(&colors, range, rgb(theme::WORD).into());
                     }
+                    for (_, range) in squiggles.get(&row).into_iter().flatten() {
+                        colors = restyle(&colors, range.clone(), |style| HighlightStyle {
+                            underline: Some(UnderlineStyle {
+                                color: Some(rgb(theme::ERROR).into()),
+                                thickness: px(1.),
+                                wavy: true,
+                            }),
+                            ..style
+                        });
+                    }
                     for end in pair.iter() {
                         if end.start >= line.start && end.start < line.start + line.chars {
                             let from = end.start - line.start;
@@ -1436,20 +1786,33 @@ impl Viewer {
                             .rounded_full()
                             .bg(rgba(theme::WHITESPACE))
                     });
+                    let hover = on_hover.clone();
+                    let click = on_click.clone();
                     div()
                         .relative()
                         .flex()
                         .h(px(row_height))
+                        .cursor_text()
+                        .on_mouse_move(move |event, _, cx| hover(Some((row, event.position)), cx))
+                        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                            click(row, event.position, cx)
+                        })
                         .children(bands)
                         .child(
                             div()
                                 .relative()
+                                .cursor_default()
                                 .flex_shrink_0()
                                 .w(px(gutter))
                                 .pr_3()
                                 .text_right()
                                 .text_color(rgb(theme::DIM))
                                 .child((row + 1).to_string())
+                                .children(
+                                    changes.get(&row).map(|change| {
+                                        change_mark(*change, gutter, scale, row_height)
+                                    }),
+                                )
                                 .children(starts.contains(&row).then(|| {
                                     let on_fold = on_fold.clone();
                                     div()
@@ -1462,6 +1825,7 @@ impl Viewer {
                                         .cursor_pointer()
                                         .child(if folded.contains(&row) { "▸" } else { "▾" })
                                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                            cx.stop_propagation(); // not a click on the text
                                             on_fold(row, cx)
                                         })
                                 })),
@@ -1503,13 +1867,29 @@ impl Viewer {
             .child(self.breadcrumb())
             .child(
                 div()
+                    .id("editor")
+                    .cursor_text()
                     .flex_1()
                     .relative()
                     .font_family(self.font_family.clone())
                     .text_size(px(self.font_size))
                     .whitespace_nowrap()
+                    .on_hover(move |hovered, _, cx| {
+                        if !*hovered {
+                            leave(None, cx)
+                        }
+                    })
+                    .child(
+                        canvas(
+                            move |bounds, _, _| editor_bounds.set(bounds),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
                     .child(list)
-                    .children(sticky),
+                    .children(sticky)
+                    .children(popup),
             )
             .child(
                 div()
@@ -1541,13 +1921,23 @@ fn paint(
     range: Range<usize>,
     bg: Hsla,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
+    restyle(colors, range, |style| HighlightStyle {
+        background_color: Some(bg),
+        ..style
+    })
+}
+
+/// `colors` with `with` applied to the style of every part of `range`, gaps included; the rest
+/// is unchanged.
+fn restyle(
+    colors: &[(Range<usize>, HighlightStyle)],
+    range: Range<usize>,
+    with: impl Fn(HighlightStyle) -> HighlightStyle,
+) -> Vec<(Range<usize>, HighlightStyle)> {
     if range.is_empty() {
         return colors.to_vec();
     }
-    let with_bg = |style: HighlightStyle| HighlightStyle {
-        background_color: Some(bg),
-        ..style
-    };
+    let with_bg = with;
     let mut out = Vec::with_capacity(colors.len() + 3);
     let mut painted_to = range.start;
     for (span, style) in colors {
@@ -1575,6 +1965,164 @@ fn paint(
     out
 }
 
+/// A line with hints in it: its text, colors, byte of each character and where hints are.
+struct Injected {
+    text: String,
+    colors: Vec<(Range<usize>, HighlightStyle)>,
+    cols: Vec<usize>,
+    inserts: Vec<(usize, usize)>,
+}
+
+/// The line `text` with each hint put before the character at its column, with the same
+/// treatment of everything that is measured in display bytes: the `colors` are split around the
+/// hints and moved, and the byte of every character (`cols`) is where it ends up. Returns
+/// those and where hints were put.
+fn inject_hints(
+    raw: &str,
+    map: &[usize],
+    text: String,
+    colors: Vec<(Range<usize>, HighlightStyle)>,
+    hints: &[(usize, String)],
+) -> Injected {
+    // the name, then a space that is not part of the chip
+    let inserts: Vec<(usize, String)> = hints
+        .iter()
+        .map(|(column, label)| {
+            let byte = raw
+                .char_indices()
+                .nth(*column)
+                .map_or(raw.len(), |(b, _)| b);
+            (map[byte], format!("{label} "))
+        })
+        .collect();
+    let total = |below: &dyn Fn(usize) -> bool| -> usize {
+        inserts
+            .iter()
+            .filter(|(at, _)| below(*at))
+            .map(|(_, shown)| shown.len())
+            .sum()
+    };
+    // a character at a hint is after it, an end at a hint is before it
+    let start_of = |at: usize| at + total(&|hint| hint <= at);
+    let end_of = |at: usize| at + total(&|hint| hint < at);
+
+    let mut shown = String::with_capacity(text.len() + total(&|_| true));
+    let mut copied = 0;
+    for (at, hint) in &inserts {
+        shown.push_str(&text[copied..*at]);
+        shown.push_str(hint);
+        copied = *at;
+    }
+    shown.push_str(&text[copied..]);
+
+    let mut moved = Vec::with_capacity(colors.len() + inserts.len());
+    for (span, style) in colors {
+        let mut from = span.start;
+        let inside: BTreeSet<usize> = inserts
+            .iter()
+            .map(|(at, _)| *at)
+            .filter(|at| *at > span.start && *at < span.end)
+            .collect();
+        for at in inside {
+            moved.push((start_of(from)..end_of(at), style));
+            from = at;
+        }
+        if from < span.end {
+            moved.push((start_of(from)..end_of(span.end), style));
+        }
+    }
+    let chip = HighlightStyle {
+        color: Some(rgb(theme::HINT_TEXT).into()),
+        background_color: Some(rgb(theme::HINT_BG).into()),
+        ..Default::default()
+    };
+    let mut put = 0;
+    for (at, hint) in &inserts {
+        let start = at + put;
+        moved.push((start..start + hint.len() - 1, chip)); // not the space after it
+        put += hint.len();
+    }
+    moved.sort_by_key(|(span, _)| span.start);
+
+    let cols = raw
+        .char_indices()
+        .map(|(byte, _)| start_of(map[byte]))
+        .chain(std::iter::once(start_of(map[raw.len()])))
+        .collect();
+    let sizes = inserts.iter().map(|(at, hint)| (*at, hint.len())).collect();
+    Injected {
+        text: shown,
+        colors: moved,
+        cols,
+        inserts: sizes,
+    }
+}
+
+/// Where char offsets of `old` are in `new`, taking the difference as one edit: what lies
+/// between their common start and common end. Offsets inside that are dropped.
+fn follow_edit(old: &str, new: &str, hints: &[(usize, String)]) -> Vec<(usize, String)> {
+    let (old, new): (Vec<char>, Vec<char>) = (old.chars().collect(), new.chars().collect());
+    let start = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let room = old.len().min(new.len()) - start;
+    let end = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(room)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let old_end = old.len() - end;
+    hints
+        .iter()
+        .filter_map(|(at, label)| {
+            let moved = if *at <= start {
+                *at
+            } else if *at >= old_end {
+                *at + new.len() - old.len()
+            } else {
+                return None;
+            };
+            Some((moved, label.clone()))
+        })
+        .collect()
+}
+
+/// What the popup says first: `TS2554: Expected 8 arguments, but got 7`.
+fn headline(diagnostic: &Diagnostic) -> String {
+    let code = match (&diagnostic.code, diagnostic.source.as_deref()) {
+        (Some(NumberOrString::Number(n)), Some("ts")) => Some(format!("TS{n}")),
+        (Some(NumberOrString::Number(n)), _) => Some(n.to_string()),
+        (Some(NumberOrString::String(code)), _) => Some(code.clone()),
+        (None, _) => None,
+    };
+    match code {
+        Some(code) => format!("{code}: {}", diagnostic.message),
+        None => diagnostic.message.clone(),
+    }
+}
+
+/// The places a diagnostic points at besides its own: `card.ts(38, 5): An argument for
+/// maxCopies was not provided.`
+fn related_lines(diagnostic: &Diagnostic) -> Vec<String> {
+    diagnostic
+        .related_information
+        .iter()
+        .flatten()
+        .map(|related| {
+            let file = uri_to_path(related.location.uri.as_str())
+                .and_then(|path| Some(path.file_name()?.to_string_lossy().into_owned()))
+                .unwrap_or_default();
+            let at = related.location.range.start;
+            format!(
+                "{file}({}, {}): {}",
+                at.line + 1,
+                at.character + 1,
+                related.message
+            )
+        })
+        .collect()
+}
+
 fn style(class: Class) -> HighlightStyle {
     let color = match class {
         Class::Keyword => 0xc678dd,
@@ -1594,7 +2142,7 @@ fn style(class: Class) -> HighlightStyle {
 }
 
 /// Splits the text into display lines (tabs expanded) with their colors, in line coordinates.
-fn build_lines(buffer: &Buffer, spans: &[Span]) -> Vec<Line> {
+fn build_lines(buffer: &Buffer, spans: &[Span], hints: &LineHints) -> Vec<Line> {
     let mut next_span = 0;
     let mut lines: Vec<Line> = (0..buffer.line_count())
         .map(|index| {
@@ -1621,12 +2169,20 @@ fn build_lines(buffer: &Buffer, spans: &[Span]) -> Vec<Line> {
                         .chain(std::iter::once(map[raw.len()]))
                         .collect()
                 });
+            let (text, colors, cols, inserts) = match hints.get(&index) {
+                Some(hints) => {
+                    let line = inject_hints(&raw, &map, text, colors, hints);
+                    (line.text, line.colors, Some(line.cols), line.inserts)
+                }
+                None => (text, colors, cols, Vec::new()),
+            };
             Line {
                 start: buffer.line_start(index),
                 chars: buffer.line_len(index),
                 text,
                 colors,
                 cols,
+                inserts,
                 level: 0,
                 step: 1,
             }
@@ -1730,6 +2286,24 @@ fn expand_tabs(line: &str) -> (String, Vec<usize>) {
 }
 
 // gpui's glob import shadows `test`, hence the explicit attribute path below.
+/// The bar in the gutter, between the line number and the code, that says how the line differs
+/// from the last commit; deletions are a short notch on the line edge where the lines were.
+fn change_mark(change: LineChange, gutter: f32, scale: f32, row_height: f32) -> Div {
+    let (color, top, height) = match change {
+        LineChange::Added => (theme::CHANGE_ADDED, 0., row_height),
+        LineChange::Modified => (theme::CHANGE_MODIFIED, 0., row_height),
+        LineChange::Removed => (theme::CHANGE_REMOVED, 0., 4. * scale),
+        LineChange::RemovedBelow => (theme::CHANGE_REMOVED, row_height - 4. * scale, 4. * scale),
+    };
+    div()
+        .absolute()
+        .top(px(top))
+        .left(px(gutter - 6. * scale))
+        .w(px(3. * scale))
+        .h(px(height))
+        .bg(rgb(color))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1749,7 +2323,7 @@ mod tests {
             range: 0..10,
             class: Class::Comment,
         }];
-        let lines = build_lines(&buffer, &spans);
+        let lines = build_lines(&buffer, &spans, &LineHints::new());
         assert_eq!(lines[0].colors[0].0, 0..4);
         assert_eq!(lines[1].colors[0].0, 0..5);
         assert!(lines[1].colors.len() == 1);
@@ -2023,6 +2597,205 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
+    fn lines_that_differ_from_the_last_commit_are_marked_and_follow_the_edits() {
+        let (dir, file) = temp_file("changes", "one\ntwo\nthree\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        assert!(viewer.changes.is_empty()); // git has not answered yet
+        viewer.set_head(Some("one\ntwo\nthree\n".into()));
+        assert!(viewer.changes.is_empty()); // same as the commit
+        type_keys(&mut viewer, "jdd");
+        assert_eq!(viewer.changes.get(&1), Some(&LineChange::Removed));
+        type_keys(&mut viewer, "Onew");
+        viewer.handle_key(Key::Esc);
+        assert_eq!(viewer.changes.get(&1), Some(&LineChange::Modified));
+        viewer.set_head(None); // untracked: nothing to compare with
+        assert!(viewer.changes.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn diagnostic(range: ((u32, u32), (u32, u32)), message: &str) -> Diagnostic {
+        Diagnostic {
+            range: zide_lsp::Range::new(
+                zide_lsp::Position::new(range.0.0, range.0.1),
+                zide_lsp::Position::new(range.1.0, range.1.1),
+            ),
+            severity: Some(DiagnosticSeverity::ERROR),
+            message: message.into(),
+            ..Default::default()
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_click_puts_the_caret_on_the_character_under_the_mouse() {
+        let (dir, file) = temp_file("click", "hello\n\tab\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let gutter = viewer.gutter_width();
+        // without a layout the cells are 8 px wide and the editor starts at the window's corner
+        let at = |cell: f32| point(px(gutter + cell * 8. + 1.), px(0.));
+        let cursor = |v: &Viewer| v.buffer.position_of(v.vim.cursor());
+        assert!(viewer.click(0, at(2.)));
+        assert_eq!((cursor(&viewer).line, cursor(&viewer).column), (0, 2));
+        assert!(viewer.click(0, at(30.))); // past the end: the last character
+        assert_eq!(cursor(&viewer).column, 4);
+        assert!(viewer.click(1, at(4.))); // the tab fills 4 cells: `a` is the next one
+        assert_eq!((cursor(&viewer).line, cursor(&viewer).column), (1, 1));
+        assert!(viewer.click(1, at(2.))); // inside the tab
+        assert_eq!(cursor(&viewer).column, 0);
+        assert!(!viewer.click(0, point(px(3.), px(0.)))); // on the line numbers
+        assert_eq!(cursor(&viewer).column, 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn hint(line: u32, character: u32, label: &str) -> ParameterHint {
+        ParameterHint {
+            position: zide_lsp::Position::new(line, character),
+            label: label.into(),
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn parameter_names_are_part_of_the_line_shown_and_everything_measured_in_it_follows() {
+        let (dir, file) = temp_file("hints", "f(a, bb);\n\tg(c);\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let revision = viewer.revision();
+        assert!(viewer.set_hints(
+            vec![hint(0, 2, "x:"), hint(0, 5, "yy:"), hint(1, 3, "z:")],
+            revision
+        ));
+        assert!(!viewer.set_hints(
+            vec![hint(0, 2, "x:"), hint(0, 5, "yy:"), hint(1, 3, "z:")],
+            revision
+        )); // the same
+        assert_eq!(viewer.lines[0].text, "f(x: a, yy: bb);");
+        assert_eq!(viewer.lines[1].text, "    g(z: c);"); // the tab is 4 cells
+        let chips: Vec<_> = viewer.lines[0]
+            .colors
+            .iter()
+            .map(|(r, _)| r.clone())
+            .collect();
+        assert_eq!(chips, [2..4, 8..11]); // the names, not the space after them
+        // the characters are where they end up: `a`, the second `b`, `)` and the end of the line
+        assert_eq!(viewer.lines[0].display_byte(2), 5);
+        assert_eq!(viewer.lines[0].display_byte(5), 12);
+        assert_eq!(viewer.lines[0].display_byte(8), 15);
+        assert_eq!(viewer.lines[0].display_byte(9), 16);
+        // the caret is on the character, not on the hint before it
+        viewer.vim.set_cursor(&viewer.buffer, 5); // `b`
+        let (_, cell) = viewer.cursor_cell();
+        assert_eq!(cell, 12..13);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn hints_for_older_text_are_dropped_and_hints_follow_the_edits_since() {
+        let (dir, file) = temp_file("hints-edit", "f(a);\ng(b);\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let revision = viewer.revision();
+        viewer.set_hints(vec![hint(0, 2, "x:"), hint(1, 2, "y:")], revision);
+        type_keys(&mut viewer, "Onew");
+        viewer.handle_key(Key::Esc); // a line above: both hints go one line down
+        assert_eq!(viewer.lines[1].text, "f(x: a);");
+        assert_eq!(viewer.lines[2].text, "g(y: b);");
+        assert!(!viewer.set_hints(vec![hint(0, 2, "stale:")], revision)); // for the old text
+        assert_eq!(viewer.lines[1].text, "f(x: a);");
+        assert_eq!(
+            follow_edit("f(a, b)", "f(a, b, c)", &[(2, "x".into()), (5, "y".into())]),
+            [(2, "x".to_string()), (5, "y".to_string())]
+        );
+        // an edit that rewrites the place of a hint removes it; the start of the edit keeps it
+        assert_eq!(
+            follow_edit(
+                "f(abc, b)",
+                "f(zz, b)",
+                &[(2, "x".into()), (3, "w".into()), (7, "y".into())]
+            ),
+            [(2, "x".to_string()), (6, "y".to_string())]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_place_a_file_was_left_at_comes_back_within_what_the_file_still_has() {
+        let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let (dir, file) = temp_file("restore", &text);
+        let mut viewer = Viewer::open(&dir, &file);
+        assert_eq!(viewer.view(), None); // nothing drawn yet: the scroll is not known
+        let place = |top, line, column| crate::session::View { top, line, column };
+        let cursor = |v: &Viewer| {
+            let at = v.buffer.position_of(v.vim.cursor());
+            (at.line, at.column)
+        };
+        viewer.restore_view(place(40, 45, 3));
+        assert_eq!(cursor(&viewer), (45, 3));
+        viewer.restore_view(place(900, 900, 900)); // the file shrank: the end of it
+        assert_eq!(cursor(&viewer).0, 100);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn errors_are_underlined_where_the_server_put_them() {
+        let (dir, file) = temp_file("squiggles", "let a = 1;\n\tlet b = c;\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let mut warning = diagnostic(((0, 0), (0, 3)), "unused");
+        warning.severity = Some(DiagnosticSeverity::WARNING);
+        let diagnostics = vec![
+            diagnostic(((1, 9), (1, 10)), "cannot find `c`"),
+            diagnostic(((0, 4), (0, 4)), "empty range"),
+            diagnostic(((0, 9), (1, 1)), "spans lines"),
+            warning,
+        ];
+        assert!(viewer.set_diagnostics(diagnostics.clone()));
+        assert!(!viewer.set_diagnostics(diagnostics)); // nothing new
+        let on = |row: usize| -> Vec<(usize, Range<usize>)> { viewer.squiggles[&row].clone() };
+        // the tab is shown as spaces, so the display bytes are not the characters
+        let tab = viewer.lines[1].display_byte(1);
+        assert!(tab > 1);
+        assert_eq!(
+            on(1)[0],
+            (
+                0,
+                viewer.lines[1].display_byte(9)..viewer.lines[1].display_byte(10)
+            )
+        );
+        assert_eq!(on(0)[0], (1, 4..5)); // an empty range still gets one character
+        assert_eq!(on(0)[1], (2, 9..10)); // multi-line: to the end of the first line
+        assert_eq!(on(1)[1], (2, 0..tab)); // and from the start of the next
+        assert!(
+            !viewer
+                .squiggles
+                .values()
+                .flatten()
+                .any(|(index, _)| *index == 3)
+        ); // not a warning
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_popup_names_the_error_with_its_code_and_related_places() {
+        let mut d = diagnostic(((0, 0), (0, 1)), "Expected 8 arguments, but got 7");
+        assert_eq!(headline(&d), "Expected 8 arguments, but got 7");
+        d.code = Some(NumberOrString::Number(2554));
+        d.source = Some("ts".into());
+        assert_eq!(headline(&d), "TS2554: Expected 8 arguments, but got 7");
+        d.source = Some("rustc".into());
+        assert_eq!(headline(&d), "2554: Expected 8 arguments, but got 7");
+        d.related_information = Some(vec![zide_lsp::DiagnosticRelatedInformation {
+            location: zide_lsp::Location::new(
+                "file:///app/card.ts".parse().unwrap(),
+                zide_lsp::Range::new(
+                    zide_lsp::Position::new(37, 4),
+                    zide_lsp::Position::new(37, 9),
+                ),
+            ),
+            message: "An argument for maxCopies was not provided.".into(),
+        }]);
+        assert_eq!(
+            related_lines(&d),
+            ["card.ts(38, 5): An argument for maxCopies was not provided."]
+        );
+    }
+
+    #[::core::prelude::v1::test]
     fn blame_shows_for_the_cursor_line_until_the_buffer_is_edited_or_saved() {
         let (dir, file) = temp_file("blame", "one\ntwo\n");
         let mut viewer = Viewer::open(&dir, &file);
@@ -2110,6 +2883,7 @@ mod tests {
             text,
             colors: Vec::new(),
             cols: None,
+            inserts: Vec::new(),
             level: 0,
             step: 1,
         }

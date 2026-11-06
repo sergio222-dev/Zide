@@ -34,3 +34,12 @@ pub const ERROR: u32 = 0xe06c75;
 pub const INDENT_BANDS: [u32; 4] = [0xe5c07b1c, 0x98c3791c, 0x61afef1c, 0xc678dd1c];
 /// The dots that mark whitespace (RGBA).
 pub const WHITESPACE: u32 = 0x5c6370b0;
+
+/// Gutter bars: lines new, changed or removed since the last commit.
+pub const CHANGE_ADDED: u32 = 0x4f9a56;
+pub const CHANGE_MODIFIED: u32 = 0x9a7040;
+pub const CHANGE_REMOVED: u32 = 0x7d848f;
+
+/// The chip with a parameter's name before an argument.
+pub const HINT_BG: u32 = 0x2f3239;
+pub const HINT_TEXT: u32 = 0x8c93a1;

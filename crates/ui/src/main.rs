@@ -16,16 +16,19 @@ use std::{
 
 mod indent;
 mod meter;
+mod projects;
 mod rows;
 mod session;
 mod sticky;
 mod theme;
 mod usages;
 mod viewer;
+mod welcome;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
 use viewer::{Effect, FindStatus, FormatRequest, HighlightKey, Viewer};
+use welcome::{OpenProject, Welcome};
 use zide_core::{Change, DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
 use zide_index::FileIndex;
 use zide_lsp::{Client, Error as LspError, server_for};
@@ -34,7 +37,7 @@ use zide_search::{
     search_files, search_files_with_recent, search_text,
 };
 use zide_stubs::{StubCache, StubKind, StubStore, SymbolHit, search_symbols};
-use zide_text::FindQuery;
+use zide_text::{FindQuery, Revision};
 use zide_tree::{Outcome as TreeOutcome, Tree};
 
 actions!(
@@ -345,10 +348,13 @@ struct Workspace {
     /// Bumped on every scan; the result of an older scan is dropped.
     scan_generation: u64,
     changes_tx: async_channel::Sender<Change>,
+    /// A language server published diagnostics (one pending wake-up is enough).
+    diagnostics_tx: async_channel::Sender<()>,
+    /// The file and text revision the language server was last sent, to diagnose.
+    diagnosed: Option<(String, Revision)>,
     /// Bumped on every symbol indexing; the result of an older one is dropped.
     symbols_generation: u64,
     _watcher: Option<ProjectWatcher>,
-    _activation: Option<Subscription>,
     /// `None` until the symbols of the current index are parsed.
     symbols: Option<Arc<StubStore>>,
     registry: std::rc::Rc<Vec<ActionDef>>,
@@ -379,6 +385,19 @@ impl Workspace {
         })
         .detach();
 
+        let (diagnostics_tx, diagnostics_rx) = async_channel::bounded::<()>(1);
+        cx.spawn(async move |this, cx| {
+            while diagnostics_rx.recv().await.is_ok() {
+                if this
+                    .update(cx, |this, cx| this.apply_diagnostics(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         let registry = action_registry();
         let mut workspace = Self {
             focus: cx.focus_handle(),
@@ -403,9 +422,10 @@ impl Workspace {
             recent: Vec::new(),
             scan_generation: 0,
             changes_tx,
+            diagnostics_tx,
+            diagnosed: None,
             symbols_generation: 0,
             _watcher: None,
-            _activation: None,
             symbols: None,
             action_texts: registry
                 .iter()
@@ -549,27 +569,44 @@ impl Workspace {
 
     /// Saves the open file; called whenever the user's attention leaves the editor.
     fn autosave(&mut self, cx: &mut Context<Self>) {
+        self.remember_view(); // it runs whenever the user leaves: another window, a popup, closing
         if self.viewer.as_mut().is_some_and(|viewer| viewer.save()) {
-            self.refresh_blame(cx);
+            self.refresh_git(cx);
         }
     }
 
-    /// Asks git, off the UI thread, who last changed each line of the open file.
-    fn refresh_blame(&mut self, cx: &mut Context<Self>) {
+    /// Keeps where the open file is scrolled to and its caret, for the next time it is opened.
+    fn remember_view(&self) {
+        if let Some(viewer) = &self.viewer
+            && let Some(view) = viewer.view()
+        {
+            session::remember_view(&self.root, viewer.path(), view);
+        }
+    }
+
+    /// Asks git, off the UI thread, who last changed each line of the open file and what the last
+    /// commit had, to mark the lines that differ.
+    fn refresh_git(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path().to_string()) else {
             return;
         };
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let asked = path.clone();
-            let blame = cx
+            let (blame, head) = cx
                 .background_executor()
-                .spawn(async move { zide_git::blame(&root, &asked) })
+                .spawn(async move {
+                    (
+                        zide_git::blame(&root, &asked),
+                        zide_git::head_content(&root, &asked),
+                    )
+                })
                 .await;
             this.update(cx, |this, cx| {
                 // The viewer may have moved on to another file meanwhile.
                 if let Some(viewer) = this.viewer.as_mut().filter(|v| v.path() == path) {
                     viewer.set_blame(blame);
+                    viewer.set_head(head);
                     cx.notify();
                 }
             })
@@ -784,6 +821,100 @@ impl Workspace {
         self.show_tab(Tab::Text, cx);
         // the text matches above are shown at once; a language server refines them
         self.semantic_usages(word, cx);
+    }
+
+    /// The running language server of the open file, with the file's path and language.
+    fn open_file_server(
+        &self,
+    ) -> Option<(
+        &'static zide_lsp::ServerSpec,
+        &'static str,
+        PathBuf,
+        Arc<Client>,
+    )> {
+        let relative = self.viewer.as_ref()?.path();
+        let (spec, language) = server_for(relative)?;
+        let Some(LspState::Ready(client)) = self.lsp.get(spec.name) else {
+            return None;
+        };
+        Some((spec, language, self.root.join(relative), client.clone()))
+    }
+
+    /// Shows what the language server last published about the open file.
+    fn apply_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let Some((_, _, path, client)) = self.open_file_server() else {
+            return;
+        };
+        if let Some(viewer) = &mut self.viewer
+            && viewer.set_diagnostics(client.diagnostics(&path))
+        {
+            cx.notify();
+        }
+    }
+
+    /// Sends the open file's text to its language server, a moment after the last edit, so the
+    /// server diagnoses it; the answer arrives as a publish (`apply_diagnostics`).
+    fn request_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let Some((spec, language, path, client)) = self.open_file_server() else {
+            return; // not started yet: tried again at the next frame
+        };
+        let Some(viewer) = &self.viewer else {
+            return;
+        };
+        let current = (viewer.path().to_string(), viewer.revision());
+        if self.diagnosed.as_ref() == Some(&current) {
+            return;
+        }
+        let opened = self.diagnosed.as_ref().map(|(file, _)| file) != Some(&current.0);
+        self.diagnosed = Some(current.clone());
+        let text = viewer.text();
+        let lines = text.lines().count() as u32 + 1;
+        if opened {
+            self.apply_diagnostics(cx); // what the server already said about this file
+        }
+        cx.spawn(async move |this, cx| {
+            if !opened {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+            }
+            let wanted = this
+                .update(cx, |this, _| this.diagnosed.as_ref() == Some(&current))
+                .unwrap_or(false);
+            if !wanted {
+                return; // edited again while waiting: the newer text is sent instead
+            }
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    client.sync(&path, language, &text)?;
+                    client.pull_diagnostics(&path)?;
+                    // a hint that fails to come is not worth losing the server for
+                    let hints = client.parameter_hints(&path, lines).unwrap_or_default();
+                    Ok::<_, LspError>(hints)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match outcome {
+                    Err(LspError::Closed | LspError::Io(_)) => {
+                        this.lsp.remove(spec.name);
+                        this.diagnosed = None; // a new server has not been sent the file
+                    }
+                    Err(_) => {}
+                    Ok(hints) => {
+                        // what a server that does not publish answered
+                        this.apply_diagnostics(cx);
+                        if let Some(viewer) = this.viewer.as_mut().filter(|v| v.path() == current.0)
+                            && viewer.set_hints(hints, current.1)
+                        {
+                            cx.notify();
+                        }
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Asks the language server where the word under the caret is used, once the caret rests on
@@ -1041,10 +1172,16 @@ impl Workspace {
         }
         self.lsp.insert(spec.name, LspState::Starting);
         let root = self.root.clone();
+        let published = self.diagnostics_tx.clone();
         cx.spawn(async move |this, cx| {
             let started = cx
                 .background_executor()
-                .spawn(async move { Client::start(spec, &root).map(Arc::new) })
+                .spawn(async move {
+                    Client::start(spec, &root, move || {
+                        let _ = published.try_send(());
+                    })
+                    .map(Arc::new)
+                })
                 .await;
             this.update(cx, |this, cx| {
                 match started {
@@ -1430,6 +1567,7 @@ impl Workspace {
             self.recent.insert(0, file);
             self.recent.truncate(MAX_RECENT);
         }
+        self.remember_view();
         if let Some(old) = self.viewer.take() {
             self.parked.insert(old.path().to_string(), old);
             if self.parked.len() > MAX_RECENT
@@ -1438,16 +1576,23 @@ impl Workspace {
                 self.parked.remove(&oldest);
             }
         }
-        let mut viewer = match self.parked.remove(path) {
-            Some(parked) if !parked.is_stale() => parked,
-            _ => Viewer::open(&self.root, path),
+        let (mut viewer, reopened) = match self.parked.remove(path) {
+            Some(parked) if !parked.is_stale() => (parked, false),
+            _ => (Viewer::open(&self.root, path), true),
         };
         if let Some(line) = line {
             viewer.go_to_line(line);
         }
         viewer.set_font_size(self.font_size);
+        // a file read again starts where it was left, unless it was opened at a line
+        if line.is_none()
+            && reopened
+            && let Some(view) = session::view(&self.root, path)
+        {
+            viewer.restore_view(view);
+        }
         self.viewer = Some(viewer);
-        self.refresh_blame(cx);
+        self.refresh_git(cx);
         session::remember_file(&self.root, path);
         self.tree.reveal(path);
         self.tree_focused = false; // a file was opened: the keys are the editor's
@@ -1814,6 +1959,7 @@ impl Workspace {
             viewer.tick(window);
         }
         self.request_highlights(cx);
+        self.request_diagnostics(cx);
 
         let mut root = div()
             .id("workspace")
@@ -1915,17 +2061,44 @@ impl Workspace {
                             .h_full()
                             .text_color(rgb(theme::TEXT))
                             .children(self.find_panel(cx))
-                            .child(viewer.render(std::rc::Rc::new({
-                                let workspace = cx.entity();
-                                move |line, cx| {
-                                    workspace.update(cx, |this, cx| {
-                                        if let Some(viewer) = &mut this.viewer {
-                                            viewer.toggle_fold(line);
-                                            cx.notify();
-                                        }
-                                    });
-                                }
-                            })))
+                            .child(viewer.render(
+                                std::rc::Rc::new({
+                                    let workspace = cx.entity();
+                                    move |line, cx| {
+                                        workspace.update(cx, |this, cx| {
+                                            if let Some(viewer) = &mut this.viewer {
+                                                viewer.toggle_fold(line);
+                                                cx.notify();
+                                            }
+                                        });
+                                    }
+                                }),
+                                std::rc::Rc::new({
+                                    let workspace = cx.entity();
+                                    move |over, cx| {
+                                        workspace.update(cx, |this, cx| {
+                                            if let Some(viewer) = &mut this.viewer
+                                                && viewer.set_hover(over)
+                                            {
+                                                cx.notify();
+                                            }
+                                        });
+                                    }
+                                }),
+                                std::rc::Rc::new({
+                                    let workspace = cx.entity();
+                                    move |row, at, cx| {
+                                        workspace.update(cx, |this, cx| {
+                                            if let Some(viewer) = &mut this.viewer
+                                                && viewer.click(row, at)
+                                            {
+                                                this.tree_focused = false; // keys are the editor's
+                                                cx.notify();
+                                            }
+                                        });
+                                    }
+                                }),
+                            ))
                             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                                 if event.modifiers.control {
                                     this.zoom(event, window, cx);
@@ -2382,6 +2555,72 @@ fn popup_frame(
         .child(div().text_xs().text_color(rgb(theme::MUTED)).child(status))
 }
 
+/// The window's content: the welcome screen until a project is opened, then its workspace.
+struct Shell {
+    content: Content,
+    _opened: Subscription,
+    _activation: Option<Subscription>,
+}
+
+enum Content {
+    Welcome(Entity<Welcome>),
+    Workspace(Entity<Workspace>),
+}
+
+impl Shell {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let welcome = cx.new(|_| Welcome::new());
+        let opened = cx.subscribe_in(
+            &welcome,
+            window,
+            |this, _, event: &OpenProject, window, cx| {
+                this.show_workspace(event.0.clone(), window, cx)
+            },
+        );
+        Self {
+            content: Content::Welcome(welcome),
+            _opened: opened,
+            _activation: None,
+        }
+    }
+
+    /// Opens `root` in this window and remembers it for the welcome screen.
+    fn show_workspace(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let root = root.canonicalize().unwrap_or(root);
+        projects::record(&root);
+        let workspace = cx.new(|cx| Workspace::new(root, cx));
+        let saver = workspace.downgrade();
+        self._activation = Some(cx.observe_window_activation(window, move |_, window, cx| {
+            if !window.is_window_active() {
+                saver
+                    .update(cx, |this, cx| {
+                        this.autosave(cx);
+                        cx.notify();
+                    })
+                    .ok();
+            }
+        }));
+        workspace.read(cx).focus.clone().focus(window, cx);
+        self.content = Content::Workspace(workspace);
+        cx.notify();
+    }
+
+    fn autosave(&self, cx: &mut Context<Self>) {
+        if let Content::Workspace(workspace) = &self.content {
+            workspace.update(cx, |this, cx| this.autosave(cx));
+        }
+    }
+}
+
+impl Render for Shell {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(match &self.content {
+            Content::Welcome(welcome) => welcome.clone().into_any_element(),
+            Content::Workspace(workspace) => workspace.clone().into_any_element(),
+        })
+    }
+}
+
 fn main() {
     let first = std::env::args_os().nth(1);
     if matches!(
@@ -2391,10 +2630,8 @@ fn main() {
         println!("zide {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    let root = first
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().expect("no current directory"));
-    let root = root.canonicalize().unwrap_or(root);
+    // without a folder, the welcome screen lists the projects opened before
+    let root = first.map(PathBuf::from);
 
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
@@ -2438,23 +2675,16 @@ fn main() {
             },
             cx,
             move |window, cx| {
-                let workspace = cx.new(|cx| Workspace::new(root, cx));
-                workspace.update(cx, |this, cx| {
-                    this._activation =
-                        Some(cx.observe_window_activation(window, |this, window, cx| {
-                            if !window.is_window_active() {
-                                this.autosave(cx);
-                                cx.notify();
-                            }
-                        }));
-                });
-                let saver = workspace.downgrade();
+                let shell = cx.new(|cx| Shell::new(window, cx));
+                if let Some(root) = root {
+                    shell.update(cx, |this, cx| this.show_workspace(root, window, cx));
+                }
+                let saver = shell.downgrade();
                 window.on_window_should_close(cx, move |_, cx| {
                     saver.update(cx, |this, cx| this.autosave(cx)).ok();
                     true
                 });
-                workspace.read(cx).focus.clone().focus(window, cx);
-                workspace
+                shell
             },
         )
         .expect("failed to open window");

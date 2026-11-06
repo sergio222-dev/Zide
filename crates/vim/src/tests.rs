@@ -305,3 +305,31 @@ fn select_puts_the_range_in_visual_mode() {
     vim.handle(&mut buffer, Key::Esc);
     assert_eq!(vim.mode(), Mode::Normal);
 }
+
+#[test]
+fn a_click_ends_visual_mode_and_pending_commands_and_lands_on_a_character() {
+    let mut buffer = Buffer::new("one two\nthree\n");
+    let mut vim = Vim::default();
+    vim.handle(&mut buffer, Key::Char('v'));
+    vim.handle(&mut buffer, Key::Char('l'));
+    vim.handle(&mut buffer, Key::Char('2'));
+    vim.click(&mut buffer, 9);
+    assert_eq!(vim.mode(), Mode::Normal);
+    assert_eq!(vim.cursor(), 9);
+    assert!(vim.pending().is_empty());
+    vim.click(&mut buffer, 7); // the end of the line is not a character in Normal mode
+    assert_eq!(vim.cursor(), 6);
+}
+
+#[test]
+fn a_click_in_insert_mode_keeps_inserting_and_may_sit_at_the_end_of_the_line() {
+    let mut buffer = Buffer::new("one\ntwo\n");
+    let mut vim = Vim::default();
+    vim.handle(&mut buffer, Key::Char('i'));
+    vim.handle(&mut buffer, Key::Char('X'));
+    vim.click(&mut buffer, 4);
+    assert_eq!(vim.mode(), Mode::Insert);
+    assert_eq!(vim.cursor(), 4);
+    vim.handle(&mut buffer, Key::Char('!'));
+    assert_eq!(buffer.text(), "Xone!\ntwo\n");
+}

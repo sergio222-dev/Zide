@@ -98,6 +98,24 @@ impl Vim {
         self.want_column = buffer.position_of(self.cursor).column;
     }
 
+    /// Puts the cursor where the mouse clicked, `offset` being a char offset on a line (its end
+    /// included). A command in progress and Visual mode end; Insert mode stays and its cursor
+    /// may sit at the end of the line, as when typing.
+    pub fn click(&mut self, buffer: &mut Buffer, offset: usize) {
+        if self.mode == Mode::Insert {
+            buffer.commit(); // the typing before the click is one change, what follows another
+            self.cursor = offset.min(buffer.len());
+            self.want_column = buffer.position_of(self.cursor).column;
+            return;
+        }
+        self.mode = Mode::Normal;
+        self.count = 0;
+        self.operator = None;
+        self.g_prefix = false;
+        self.object = None;
+        self.set_cursor(buffer, offset);
+    }
+
     /// Moves the cursor to `line` (clamped), on the column it wants: what scrolling by pages does.
     pub fn move_to_line(&mut self, buffer: &Buffer, line: usize) {
         let line = line.min(motion::last_line(buffer));

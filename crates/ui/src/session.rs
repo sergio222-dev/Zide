@@ -1,4 +1,5 @@
-//! What Zide remembers about a project between runs: the file that was open and the font size.
+//! What Zide remembers about a project between runs: the file that was open, where each file was
+//! scrolled to and left its caret, and the font size.
 
 use std::{
     fs,
@@ -44,6 +45,57 @@ pub fn remember_font_size(root: &Path, size: f32) {
     write(root, "font-size", &size.to_string());
 }
 
+/// Where a file was left: the first line on screen and the caret (0-based lines and chars).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct View {
+    pub top: usize,
+    pub line: usize,
+    pub column: usize,
+}
+
+/// How many files keep their place per project; the least recently left are forgotten.
+const MAX_VIEWS: usize = 100;
+
+/// Where `relative` was left, if it was.
+pub fn view(root: &Path, relative: &str) -> Option<View> {
+    let text = fs::read_to_string(file_for(root, "views")?).ok()?;
+    text.lines().find_map(|entry| parse_view(entry, relative))
+}
+
+/// Remembers where `relative` was left. Best effort, like `remember_file`.
+pub fn remember_view(root: &Path, relative: &str, view: View) {
+    if relative.contains(['\t', '\n']) {
+        return;
+    }
+    let Some(file) = file_for(root, "views") else {
+        return;
+    };
+    let old = fs::read_to_string(&file).unwrap_or_default();
+    let mut entries = vec![format!(
+        "{}\t{}\t{}\t{relative}",
+        view.top, view.line, view.column
+    )];
+    entries.extend(
+        old.lines()
+            .filter(|entry| parse_view(entry, relative).is_none())
+            .take(MAX_VIEWS - 1)
+            .map(str::to_string),
+    );
+    write(root, "views", &entries.join("\n"));
+}
+
+/// An entry is `top<TAB>line<TAB>column<TAB>path`.
+fn parse_view(entry: &str, relative: &str) -> Option<View> {
+    let mut parts = entry.splitn(4, '\t');
+    let (top, line, column) = (parts.next()?, parts.next()?, parts.next()?);
+    (parts.next()? == relative).then_some(())?;
+    Some(View {
+        top: top.parse().ok()?,
+        line: line.parse().ok()?,
+        column: column.parse().ok()?,
+    })
+}
+
 fn write(root: &Path, kind: &str, content: &str) {
     let Some(file) = file_for(root, kind) else {
         return;
@@ -71,6 +123,31 @@ mod tests {
         assert_eq!(last_file(&root), None);
         fs::remove_file(file_for(&root, "last-file").unwrap()).unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_file_keeps_where_it_was_left_and_the_oldest_are_forgotten() {
+        let root = std::env::temp_dir().join(format!("zide-views-{}", std::process::id()));
+        let place = |top| View {
+            top,
+            line: top + 2,
+            column: 3,
+        };
+        assert_eq!(view(&root, "a.rs"), None);
+        remember_view(&root, "a.rs", place(10));
+        remember_view(&root, "b.rs", place(20));
+        remember_view(&root, "a.rs", place(30)); // leaving it again replaces the old place
+        assert_eq!(view(&root, "a.rs"), Some(place(30)));
+        assert_eq!(view(&root, "b.rs"), Some(place(20)));
+        assert_eq!(view(&root, "c.rs"), None);
+        for i in 0..MAX_VIEWS {
+            remember_view(&root, &format!("f{i}.rs"), place(i));
+        }
+        assert_eq!(view(&root, "a.rs"), None); // pushed out
+        assert_eq!(view(&root, "f99.rs"), Some(place(99)));
+        remember_view(&root, "tab\there", place(1)); // not storable: ignored
+        assert_eq!(view(&root, "tab\there"), None);
+        fs::remove_file(file_for(&root, "views").unwrap()).unwrap();
     }
 
     #[test]
