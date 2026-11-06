@@ -273,6 +273,13 @@ fn action_registry() -> Vec<ActionDef> {
             run: |_, _, cx| cx.emit(UpdateRequested),
         },
         ActionDef {
+            name: "Open",
+            synonyms: &["open project", "open folder", "switch project"],
+            action: None,
+            closes_popup: true,
+            run: |_, _, cx| cx.emit(OpenRequested),
+        },
+        ActionDef {
             name: "Quit",
             synonyms: &["exit", "close ide"],
             action: None,
@@ -361,6 +368,11 @@ struct MdPreview {
 struct UpdateRequested;
 
 impl EventEmitter<UpdateRequested> for Workspace {}
+
+/// The user asked for "Open": the [`Shell`] asks for a folder and swaps the project in.
+struct OpenRequested;
+
+impl EventEmitter<OpenRequested> for Workspace {}
 
 struct Workspace {
     focus: FocusHandle,
@@ -1603,14 +1615,10 @@ impl Workspace {
             }
             return; // the input handles its own keys
         }
-        if self.tree_focused && self.tree_visible {
-            self.tree_key(event, cx);
-            cx.stop_propagation();
-            return;
-        }
         let m = event.keystroke.modifiers;
         let plain = !(m.control || m.alt || m.platform || m.shift);
-        let idle = self.viewer.as_ref().is_none_or(Viewer::awaits_command);
+        let in_tree = self.tree_focused && self.tree_visible;
+        let idle = in_tree || self.viewer.as_ref().is_none_or(Viewer::awaits_command);
         if event.keystroke.key == "space" && plain && idle {
             let now = Instant::now();
             let double = self
@@ -1626,6 +1634,11 @@ impl Workspace {
             return;
         }
         self.last_space = None;
+        if in_tree {
+            self.tree_key(event, cx);
+            cx.stop_propagation();
+            return;
+        }
         let (Some(viewer), Some(key)) = (&mut self.viewer, vim_key(event)) else {
             return;
         };
@@ -2886,7 +2899,7 @@ struct Shell {
     content: Content,
     _opened: Subscription,
     _activation: Option<Subscription>,
-    _update_requests: Option<Subscription>,
+    _workspace_requests: Vec<Subscription>,
     /// Where notifications are shown.
     window: AnyWindowHandle,
     /// A newer release found by a check and announced, waiting to be installed.
@@ -2928,7 +2941,7 @@ impl Shell {
             content: Content::Welcome(welcome),
             _opened: opened,
             _activation: None,
-            _update_requests: None,
+            _workspace_requests: Vec::new(),
             window: window.window_handle(),
             update: None,
             updating: false,
@@ -3122,14 +3135,34 @@ impl Shell {
                     .ok();
             }
         }));
-        self._update_requests = Some(
+        self._workspace_requests = vec![
             cx.subscribe(&workspace, |this, _, _: &UpdateRequested, cx| {
                 this.update_zide(cx)
             }),
-        );
+            cx.subscribe_in(
+                &workspace,
+                window,
+                |this, _, _: &OpenRequested, window, cx| this.open_folder(window, cx),
+            ),
+        ];
         workspace.read(cx).focus.clone().focus(window, cx);
         self.content = Content::Workspace(workspace);
         cx.notify();
+    }
+
+    /// Asks for a folder with the system's picker and opens it in this window.
+    fn open_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = welcome::choose_folder(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if let Some(folder) = picked.await {
+                this.update_in(cx, |this, window, cx| {
+                    this.autosave(cx);
+                    this.show_workspace(folder, window, cx)
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn autosave(&self, cx: &mut Context<Self>) {
@@ -3210,6 +3243,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-n", GoToFile, Some("Workspace")),
             KeyBinding::new("ctrl-alt-shift-n", GoToSymbol, Some("Workspace")),
             KeyBinding::new("ctrl-shift-a", FindAction, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-a", FindAction, Some("Welcome")),
             KeyBinding::new("alt-x", ToggleRegex, Some("Workspace")),
             KeyBinding::new("alt-r", ToggleRegex, Some("Workspace")),
             KeyBinding::new("alt-c", ToggleCase, Some("Workspace")),
