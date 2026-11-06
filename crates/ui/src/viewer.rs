@@ -91,7 +91,7 @@ struct Line {
     start: usize,
     chars: usize,
     text: String,
-    colors: Vec<(Range<usize>, HighlightStyle)>,
+    colors: Vec<(Range<usize>, Tint)>,
     /// Display byte of each `char` of the line (and of its end), when that is not the identity
     /// (tabs, multi-byte characters).
     cols: Option<Vec<usize>>,
@@ -103,7 +103,37 @@ struct Line {
     step: usize,
 }
 
+/// What a stretch of a line is painted as. Lines keep this instead of a `HighlightStyle`, which
+/// is several times bigger and would be stored once per stretch of every line of the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tint {
+    Syntax(Class),
+    /// The chip of a parameter name hint.
+    Hint,
+}
+
+impl Tint {
+    fn style(self) -> HighlightStyle {
+        match self {
+            Tint::Syntax(class) => style(class),
+            Tint::Hint => HighlightStyle {
+                color: Some(rgb(theme::HINT_TEXT).into()),
+                background_color: Some(rgb(theme::HINT_BG).into()),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 impl Line {
+    /// The colors of the line, as the text element takes them.
+    fn styles(&self) -> Vec<(Range<usize>, HighlightStyle)> {
+        self.colors
+            .iter()
+            .map(|(range, tint)| (range.clone(), tint.style()))
+            .collect()
+    }
+
     /// Where the display byte `without_hints` of the line without hints is once they are in.
     fn with_hints(&self, without_hints: usize) -> usize {
         let before = self
@@ -1760,7 +1790,7 @@ impl Viewer {
                         )
                         .child(
                             StyledText::new(shown.text.clone())
-                                .with_highlights(shown.colors.clone()),
+                                .with_highlights(shown.styles()),
                         )
                 }))
         });
@@ -1770,7 +1800,7 @@ impl Viewer {
                     let row = rows.line(row);
                     let line = &lines[row];
                     let text = line.text.clone();
-                    let mut colors = line.colors.clone();
+                    let mut colors = line.styles();
                     let first = word_matches.partition_point(|m| m.end <= line.start);
                     for found in &word_matches[first..] {
                         if found.start >= line.start + line.chars {
@@ -2036,7 +2066,7 @@ fn restyle(
 /// A line with hints in it: its text, colors, byte of each character and where hints are.
 struct Injected {
     text: String,
-    colors: Vec<(Range<usize>, HighlightStyle)>,
+    colors: Vec<(Range<usize>, Tint)>,
     cols: Vec<usize>,
     inserts: Vec<(usize, usize)>,
 }
@@ -2049,7 +2079,7 @@ fn inject_hints(
     raw: &str,
     map: &[usize],
     text: String,
-    colors: Vec<(Range<usize>, HighlightStyle)>,
+    colors: Vec<(Range<usize>, Tint)>,
     hints: &[(usize, String)],
 ) -> Injected {
     // the name, then a space that is not part of the chip
@@ -2099,15 +2129,10 @@ fn inject_hints(
             moved.push((start_of(from)..end_of(span.end), style));
         }
     }
-    let chip = HighlightStyle {
-        color: Some(rgb(theme::HINT_TEXT).into()),
-        background_color: Some(rgb(theme::HINT_BG).into()),
-        ..Default::default()
-    };
     let mut put = 0;
     for (at, hint) in &inserts {
         let start = at + put;
-        moved.push((start..start + hint.len() - 1, chip)); // not the space after it
+        moved.push((start..start + hint.len() - 1, Tint::Hint)); // not the space after it
         put += hint.len();
     }
     moved.sort_by_key(|(span, _)| span.start);
@@ -2228,7 +2253,7 @@ fn build_lines(buffer: &Buffer, spans: &[Span], hints: &LineHints) -> Vec<Line> 
                 }
                 let from = span.range.start.max(start) - start;
                 let to = span.range.end.min(end) - start;
-                colors.push((map[from]..map[to], style(span.class)));
+                colors.push((map[from]..map[to], Tint::Syntax(span.class)));
             }
             let cols =
                 (text.len() != raw.len() || !raw.is_ascii() || raw.contains('\t')).then(|| {
@@ -3321,5 +3346,16 @@ mod tests {
         assert!(viewer.text().starts_with("xfn f()"));
         assert!(viewer.folds.is_empty() && viewer.outline.is_empty());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_stretch_of_color_in_a_line_stays_small() {
+        // one is kept for every stretch of every line of the file
+        assert!(size_of::<(Range<usize>, Tint)>() <= 24);
+        assert_eq!(
+            Tint::Syntax(Class::Keyword).style().color,
+            style(Class::Keyword).color
+        );
+        assert!(Tint::Hint.style().background_color.is_some());
     }
 }
