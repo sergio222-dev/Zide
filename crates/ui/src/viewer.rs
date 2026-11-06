@@ -1812,6 +1812,7 @@ impl Viewer {
                     div()
                         .relative()
                         .flex()
+                        .w_full() // the whole row takes the click, not just the text
                         .h(px(row_height))
                         .cursor_text()
                         .on_mouse_move(move |event, _, cx| hover(Some((row, event.position)), cx))
