@@ -637,6 +637,14 @@ impl Viewer {
         }
     }
 
+    /// The syntax tree, when it is that of the buffer as it is now (an edit not yet rebuilt
+    /// leaves it behind, and its byte offsets would not match the text).
+    fn current_syntax(&self) -> Option<&Syntax> {
+        self.syntax
+            .as_ref()
+            .filter(|_| self.built_at == self.buffer.revision())
+    }
+
     /// Both ends of the bracket, JSX tag or Python block under the caret (the character before
     /// it also counts while inserting), so you can see where it closes. Cached per caret.
     fn pair_highlights(&self) -> Pair {
@@ -668,7 +676,11 @@ impl Viewer {
                 .is_some_and(|c| zide_syntax::is_pair_candidate(language, c))
         })?;
         let text = self.buffer.text();
-        let ends = zide_syntax::matching_pair(language, &text, self.buffer.byte_of(at))?;
+        let byte = self.buffer.byte_of(at);
+        let ends = match self.current_syntax() {
+            Some(syntax) => syntax.matching_pair(&text, byte)?,
+            None => zide_syntax::matching_pair(language, &text, byte)?,
+        };
         Some(
             ends.into_iter()
                 .map(|r| self.buffer.offset_of_byte(r.start)..self.buffer.offset_of_byte(r.end))
@@ -1088,7 +1100,11 @@ impl Viewer {
         let current = self.current_selection();
         let text = self.buffer.text();
         let bytes = self.buffer.byte_of(current.start)..self.buffer.byte_of(current.end);
-        let Some(next) = zide_syntax::extend_selection(self.language, &text, bytes) else {
+        let next = match self.current_syntax() {
+            Some(syntax) => syntax.extend_selection(&text, bytes),
+            None => zide_syntax::extend_selection(self.language, &text, bytes),
+        };
+        let Some(next) = next else {
             return;
         };
         let next = self.buffer.offset_of_byte(next.start)..self.buffer.offset_of_byte(next.end);

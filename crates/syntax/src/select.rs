@@ -6,9 +6,9 @@
 
 use std::ops::Range;
 
-use tree_sitter::Parser;
+use tree_sitter::Tree;
 
-use crate::{LanguageId, grammars};
+use crate::{LanguageId, Syntax};
 
 /// The range to select next, in bytes of `source`. `selection` is what is selected now (empty
 /// at the caret when nothing is). `None` when the whole text is selected already.
@@ -17,8 +17,19 @@ pub fn extend_selection(
     source: &str,
     selection: Range<usize>,
 ) -> Option<Range<usize>> {
+    let syntax = language.and_then(|language| Syntax::new(language, source));
+    extend_selection_in(syntax.as_ref().map(Syntax::tree), source, selection)
+}
+
+/// [`extend_selection`] on the syntax tree of `source`, already parsed (`None`: a text without
+/// syntax, where the line is the next candidate after the word).
+pub(crate) fn extend_selection_in(
+    tree: Option<&Tree>,
+    source: &str,
+    selection: Range<usize>,
+) -> Option<Range<usize>> {
     let mut candidates = vec![word_at(source, selection.start)];
-    match language.and_then(|language| syntax_ranges(language, source, selection.clone())) {
+    match tree.and_then(|tree| syntax_ranges(tree, source, selection.clone())) {
         Some(ranges) => candidates.extend(ranges.into_iter().map(Some)),
         None => candidates.push(line_at(source, selection.start)),
     }
@@ -78,14 +89,7 @@ fn trim(source: &str, range: Range<usize>) -> Option<Range<usize>> {
 
 /// What each syntax node around the selection offers: its inside (between its brackets or
 /// quotes) and itself.
-fn syntax_ranges(
-    language: LanguageId,
-    source: &str,
-    selection: Range<usize>,
-) -> Option<Vec<Range<usize>>> {
-    let mut parser = Parser::new();
-    parser.set_language(&grammars()[language.0].language).ok()?;
-    let tree = parser.parse(source, None)?;
+fn syntax_ranges(tree: &Tree, source: &str, selection: Range<usize>) -> Option<Vec<Range<usize>>> {
     let mut node = tree
         .root_node()
         .descendant_for_byte_range(selection.start, selection.end)?;

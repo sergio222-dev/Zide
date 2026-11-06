@@ -177,6 +177,17 @@ impl Syntax {
         highlight_tree(&grammars()[self.language.0], &self.tree, source)
     }
 
+    /// The two ends of the pair the caret at byte `at` of `source` (the text of the tree)
+    /// belongs to; see [`matching_pair`].
+    pub fn matching_pair(&self, source: &str, at: usize) -> Option<[Range<usize>; 2]> {
+        pair::matching_pair_in(self.language, &self.tree, source, at)
+    }
+
+    /// The range [`extend_selection`] picks next, on `source`, the text of the tree.
+    pub fn extend_selection(&self, source: &str, selection: Range<usize>) -> Option<Range<usize>> {
+        select::extend_selection_in(Some(&self.tree), source, selection)
+    }
+
     /// The foldable regions of `source`, the text of the tree.
     pub fn fold_regions(&self, source: &str) -> Vec<FoldRegion> {
         fold::regions(&grammars()[self.language.0], &self.tree, source)
@@ -362,6 +373,22 @@ mod tests {
                 fold_regions(language, &text),
                 "{step}"
             );
+            for at in (0..=text.len()).filter(|&at| text.is_char_boundary(at)) {
+                assert_eq!(
+                    syntax.matching_pair(&text, at),
+                    matching_pair(language, &text, at),
+                    "pair at {at}, {step}"
+                );
+                for end in [at, (at + 3).min(text.len())] {
+                    if text.is_char_boundary(end) {
+                        assert_eq!(
+                            syntax.extend_selection(&text, at..end),
+                            extend_selection(Some(language), &text, at..end),
+                            "selection {at}..{end}, {step}"
+                        );
+                    }
+                }
+            }
         };
         for (i, (start, end, text)) in edits.iter().enumerate() {
             buffer.edit(*start..*end, text);
