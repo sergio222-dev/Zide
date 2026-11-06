@@ -26,6 +26,7 @@ mod viewer;
 mod welcome;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::*;
 use viewer::{Effect, FindStatus, FormatRequest, HighlightKey, Viewer};
 use welcome::{OpenProject, Welcome};
@@ -1400,8 +1401,10 @@ impl Workspace {
                         (true, false) => Some(theme::TREE_SELECTED),
                         _ => None,
                     };
+                    let path = SharedString::from(row.path.clone());
                     let line = div()
                         .id(("tree-row", index))
+                        .tooltip(move |window, cx| Tooltip::new(path.clone()).build(window, cx))
                         .h(px(22.))
                         .flex()
                         .items_center()
@@ -1963,6 +1966,8 @@ impl Workspace {
 
         let mut root = div()
             .id("workspace")
+            .flex()
+            .flex_col()
             .size_full()
             .bg(rgb(theme::BACKGROUND))
             .key_context("Workspace")
@@ -2050,7 +2055,9 @@ impl Workspace {
             .child(
                 div()
                     .flex()
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
                     .children(self.tree_visible.then(|| self.project_tree(cx)))
                     .child(match &self.viewer {
                         Some(viewer) => div()
@@ -2108,7 +2115,8 @@ impl Workspace {
                             "Press Space twice to open the popup. Alt+1 shows the project tree.",
                         ),
                     }),
-            );
+            )
+            .children(self.viewer.as_ref().map(Viewer::status_bar));
 
         let Some(popup) = &self.popup else {
             return root;
@@ -2273,59 +2281,64 @@ impl Workspace {
         let failed = status
             .as_ref()
             .is_some_and(|s| s.error.is_some() || (s.total == 0 && !pattern_empty));
-        let mut column =
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .px_3()
-                .py_1()
-                .border_b_1()
-                .border_color(rgb(theme::CONTROL_BORDER))
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .items_center()
-                        .child(div().flex_1().child(Input::new(&panel.find)))
-                        .child(
-                            div()
-                                .min_w(px(90.))
-                                .text_color(rgb(if failed { theme::ERROR } else { theme::MUTED }))
-                                .child(summary),
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_1()
+            .border_b_1()
+            .border_color(rgb(theme::CONTROL_BORDER))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().child(Input::new(&panel.find)))
+                    .child(
+                        div()
+                            .min_w(px(90.))
+                            .text_color(rgb(if failed { theme::ERROR } else { theme::MUTED }))
+                            .child(summary),
+                    )
+                    .child(
+                        small_button(
+                            "find-case",
+                            "Cc",
+                            "Match case (Alt+C)",
+                            options.case_sensitive,
                         )
-                        .child(
-                            small_button("find-case", "Cc", options.case_sensitive).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.toggle_find_option(
-                                        |o| o.case_sensitive = !o.case_sensitive,
-                                        cx,
-                                    )
-                                }),
-                            ),
-                        )
-                        .child(small_button("find-word", "W", options.whole_word).on_click(
-                            cx.listener(|this, _, _, cx| {
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_find_option(|o| o.case_sensitive = !o.case_sensitive, cx)
+                        })),
+                    )
+                    .child(
+                        small_button("find-word", "W", "Whole word (Alt+W)", options.whole_word)
+                            .on_click(cx.listener(|this, _, _, cx| {
                                 this.toggle_find_option(|o| o.whole_word = !o.whole_word, cx)
-                            }),
-                        ))
-                        .child(small_button("find-regex", ".*", options.regex).on_click(
+                            })),
+                    )
+                    .child(
+                        small_button("find-regex", ".*", "Regex (Alt+R)", options.regex).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.toggle_find_option(|o| o.regex = !o.regex, cx)
                             }),
-                        ))
-                        .child(
-                            small_button("find-prev", "↑", false)
-                                .on_click(cx.listener(|this, _, _, cx| this.find_step(false, cx))),
-                        )
-                        .child(
-                            small_button("find-next", "↓", false)
-                                .on_click(cx.listener(|this, _, _, cx| this.find_step(true, cx))),
-                        )
-                        .child(small_button("find-close", "✕", false).on_click(
+                        ),
+                    )
+                    .child(
+                        small_button("find-prev", "↑", "Previous match (Shift+F3)", false)
+                            .on_click(cx.listener(|this, _, _, cx| this.find_step(false, cx))),
+                    )
+                    .child(
+                        small_button("find-next", "↓", "Next match (F3)", false)
+                            .on_click(cx.listener(|this, _, _, cx| this.find_step(true, cx))),
+                    )
+                    .child(
+                        small_button("find-close", "✕", "Close (Esc)", false).on_click(
                             cx.listener(|this, _, window, cx| this.close_find(window, cx)),
-                        )),
-                );
+                        ),
+                    ),
+            );
         if panel.show_replace {
             column = column.child(
                 div()
@@ -2334,11 +2347,11 @@ impl Workspace {
                     .items_center()
                     .child(div().flex_1().child(Input::new(&panel.replace)))
                     .child(
-                        small_button("replace-one", "Replace", false)
+                        small_button("replace-one", "Replace", "Replace this match", false)
                             .on_click(cx.listener(|this, _, _, cx| this.replace_one(cx))),
                     )
                     .child(
-                        small_button("replace-all", "Replace all", false)
+                        small_button("replace-all", "Replace all", "Replace every match", false)
                             .on_click(cx.listener(|this, _, _, cx| this.replace_everywhere(cx))),
                     ),
             );
@@ -2347,9 +2360,20 @@ impl Workspace {
     }
 }
 
-fn small_button(id: &'static str, label: &'static str, on: bool) -> Stateful<Div> {
+/// A tooltip builder showing `text`, for `.tooltip(...)`.
+fn tooltip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    move |window, cx| Tooltip::new(text).build(window, cx)
+}
+
+fn small_button(
+    id: &'static str,
+    label: &'static str,
+    tip: &'static str,
+    on: bool,
+) -> Stateful<Div> {
     let button = div()
         .id(id)
+        .tooltip(tooltip(tip))
         .px_2()
         .rounded_sm()
         .border_1()
@@ -2487,7 +2511,7 @@ fn highlighted_bytes(text: String, byte_ranges: Vec<Range<usize>>) -> StyledText
 /// A clickable toggle; `title` is informational only.
 fn chip(
     label: &'static str,
-    _title: &'static str,
+    title: &'static str,
     on: bool,
     id: &'static str,
     cx: &mut Context<Workspace>,
@@ -2495,6 +2519,7 @@ fn chip(
 ) -> Stateful<Div> {
     let chip = div()
         .id(id)
+        .tooltip(tooltip(title))
         .px_1()
         .rounded_sm()
         .border_1()

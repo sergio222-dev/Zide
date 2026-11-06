@@ -12,6 +12,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::status_bar::StatusBar;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::*;
 use zide_git::{BlameLine, LineChange};
 use zide_lsp::{
@@ -880,6 +883,25 @@ impl Viewer {
     /// True when the next key starts a Normal-mode command (nothing half typed).
     pub fn awaits_command(&self) -> bool {
         self.vim.mode() == Mode::Normal && self.vim.pending().is_empty() && !self.z_pending
+    }
+
+    /// The status bar for this editor: mode and pending keys on the left, the notice in the
+    /// middle and the cursor position on the right.
+    pub fn status_bar(&self) -> StatusBar {
+        let at = self.buffer.position_of(self.vim.cursor());
+        StatusBar::new()
+            .bg(rgb(theme::BACKGROUND))
+            .text_color(rgb(theme::MUTED))
+            .left(match self.vim.mode() {
+                Mode::Normal => "NORMAL",
+                Mode::Insert => "INSERT",
+                Mode::Visual => "VISUAL",
+                Mode::VisualLine => "VISUAL LINE",
+            })
+            .left(self.pending_keys())
+            .left(if self.is_dirty() { "[+]" } else { "" })
+            .child(self.notice.clone().unwrap_or_default())
+            .right(format!("{}:{}", at.line + 1, at.column + 1))
     }
 
     /// What is typed so far of an unfinished command, for the status bar.
@@ -1791,6 +1813,7 @@ impl Viewer {
                     div()
                         .relative()
                         .flex()
+                        .w_full() // the whole row takes the click, not just the text
                         .h(px(row_height))
                         .cursor_text()
                         .on_mouse_move(move |event, _, cx| hover(Some((row, event.position)), cx))
@@ -1815,6 +1838,7 @@ impl Viewer {
                                 )
                                 .children(starts.contains(&row).then(|| {
                                     let on_fold = on_fold.clone();
+                                    let is_folded = folded.contains(&row);
                                     div()
                                         .absolute()
                                         .top_0()
@@ -1822,8 +1846,13 @@ impl Viewer {
                                         .w(px(14. * scale))
                                         .h(px(row_height))
                                         .text_center()
+                                        .id(("fold", row))
                                         .cursor_pointer()
-                                        .child(if folded.contains(&row) { "▸" } else { "▾" })
+                                        .tooltip(move |window, cx| {
+                                            let tip = if is_folded { "Unfold" } else { "Fold" };
+                                            Tooltip::new(tip).build(window, cx)
+                                        })
+                                        .child(if is_folded { "▸" } else { "▾" })
                                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                             cx.stop_propagation(); // not a click on the text
                                             on_fold(row, cx)
@@ -1888,29 +1917,9 @@ impl Viewer {
                         .size_full(),
                     )
                     .child(list)
+                    .vertical_scrollbar(&self.scroll)
                     .children(sticky)
                     .children(popup),
-            )
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .flex()
-                    .gap_3()
-                    .text_color(rgb(theme::MUTED))
-                    .child(match self.vim.mode() {
-                        Mode::Normal => "NORMAL",
-                        Mode::Insert => "INSERT",
-                        Mode::Visual => "VISUAL",
-                        Mode::VisualLine => "VISUAL LINE",
-                    })
-                    .child(self.pending_keys())
-                    .child(if self.is_dirty() { "[+]" } else { "" })
-                    .child(self.notice.clone().unwrap_or_default())
-                    .child(div().ml_auto().child({
-                        let at = self.buffer.position_of(self.vim.cursor());
-                        format!("{}:{}", at.line + 1, at.column + 1)
-                    })),
             )
     }
 }
