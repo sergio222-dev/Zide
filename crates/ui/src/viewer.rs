@@ -1689,7 +1689,7 @@ impl Viewer {
                                 .pr_3()
                                 .text_right()
                                 .text_color(rgb(theme::DIM))
-                                .child((line + 1).to_string()),
+                                .child(rows.number(line, cursor_line).to_string()),
                         )
                         .child(
                             StyledText::new(shown.text.clone())
@@ -1807,7 +1807,7 @@ impl Viewer {
                                 .pr_3()
                                 .text_right()
                                 .text_color(rgb(theme::DIM))
-                                .child((row + 1).to_string())
+                                .child(rows.number(row, cursor_line).to_string())
                                 .children(
                                     changes.get(&row).map(|change| {
                                         change_mark(*change, gutter, scale, row_height)
