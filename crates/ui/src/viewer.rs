@@ -15,7 +15,7 @@ use zide_syntax::{Class, LanguageId, Span, highlight, language_for_path};
 use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
-use crate::{indent, theme};
+use crate::{indent, rows::Rows, theme};
 
 /// Files larger than this are not opened.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -184,6 +184,8 @@ pub struct Viewer {
     semantic: Option<(HighlightKey, Arc<Vec<Range<usize>>>)>,
     /// Display lines of `buffer` as of `built_at`.
     lines: Arc<Vec<Line>>,
+    /// Which of those lines the list shows, one per row.
+    rows: Arc<Rows>,
     built_at: Revision,
     scroll: UniformListScrollHandle,
     /// A `z` was typed and its second key (`t`, `z`, `b`...) is awaited.
@@ -228,6 +230,7 @@ impl Viewer {
             trail: None,
             semantic: None,
             lines: Arc::default(),
+            rows: Arc::default(),
             built_at: buffer.revision(),
             buffer,
             scroll: UniformListScrollHandle::new(),
@@ -253,7 +256,8 @@ impl Viewer {
         let offset = self.buffer.line_start(row);
         self.vim.set_cursor(&self.buffer, offset);
         self.vim.handle(&mut self.buffer, Key::Char('^')); // first non-blank of the line
-        self.scroll.scroll_to_item(row, ScrollStrategy::Top);
+        self.scroll
+            .scroll_to_item(self.rows.row_of(row), ScrollStrategy::Top);
     }
 
     /// Shows `notice` in the status line (`None` clears it).
@@ -320,8 +324,8 @@ impl Viewer {
         }
         let word = self.buffer.slice(range);
         let (top, rows) = self.view_metrics().unwrap_or((0, 60));
-        let first = top.saturating_sub(rows);
-        let last = (top + 2 * rows).min(self.buffer.line_count());
+        let first = self.rows.line(top.saturating_sub(rows));
+        let last = (self.rows.line(top + 2 * rows) + 1).min(self.buffer.line_count());
         let is_word = |c: char| c.is_alphanumeric() || c == '_';
         let mut found = Vec::new();
         for row in first..last {
@@ -373,7 +377,7 @@ impl Viewer {
         let Some((viewport, current)) = self.view_pixels() else {
             return fallback(self);
         };
-        let max = (self.buffer.line_count() as f32 * self.row_height() - viewport).max(0.);
+        let max = (self.rows.len() as f32 * self.row_height() - viewport).max(0.);
         self.anim = Some(ScrollAnim {
             from: current,
             to: top(viewport).clamp(0., max),
@@ -417,7 +421,9 @@ impl Viewer {
 
     /// `zt`, `zz`, `zb`: puts the cursor line at the top, middle or bottom of the view.
     fn place_cursor_line(&mut self, strategy: ScrollStrategy) {
-        let line = self.buffer.position_of(self.vim.cursor()).line;
+        let line = self
+            .rows
+            .row_of(self.buffer.position_of(self.vim.cursor()).line);
         let row = self.row_height();
         let y = line as f32 * row;
         self.glide_to(
@@ -434,14 +440,16 @@ impl Viewer {
     fn scroll_half_page(&mut self, down: bool) {
         let (top, rows) = self.view_metrics().unwrap_or((0, 20));
         let half = (rows / 2).max(1);
-        let line = self.buffer.position_of(self.vim.cursor()).line;
-        let last = self.buffer.line_count().saturating_sub(1);
-        let line = if down {
-            (line + half).min(last)
+        let row = self
+            .rows
+            .row_of(self.buffer.position_of(self.vim.cursor()).line);
+        let last = self.rows.len().saturating_sub(1);
+        let row = if down {
+            (row + half).min(last)
         } else {
-            line.saturating_sub(half)
+            row.saturating_sub(half)
         };
-        self.vim.move_to_line(&self.buffer, line);
+        self.vim.move_to_line(&self.buffer, self.rows.line(row));
         let shift = half as f32 * self.row_height();
         let top = top as f32 * self.row_height();
         self.glide_to(|_| if down { top + shift } else { top - shift }, |_| {});
@@ -526,8 +534,7 @@ impl Viewer {
         if self.buffer.revision() != self.built_at {
             self.rebuild();
         }
-        let line = self.buffer.position_of(self.vim.cursor()).line;
-        self.scroll.scroll_to_item(line, ScrollStrategy::Nearest);
+        self.reveal_cursor();
         Effect::None
     }
 
@@ -849,8 +856,7 @@ impl Viewer {
         };
         let start = matches[index].start;
         self.vim.set_cursor(&self.buffer, start);
-        let line = self.buffer.position_of(start).line;
-        self.scroll.scroll_to_item(line, ScrollStrategy::Nearest);
+        self.reveal_cursor();
     }
 
     fn match_at_cursor(&self) -> Option<usize> {
@@ -952,10 +958,15 @@ impl Viewer {
             None => 0,
         };
         self.vim.set_cursor(&self.buffer, offset);
-        self.scroll.scroll_to_item(
-            self.buffer.position_of(self.vim.cursor()).line,
-            ScrollStrategy::Nearest,
-        );
+        self.reveal_cursor();
+    }
+
+    /// Scrolls the least that brings the cursor's row into view.
+    fn reveal_cursor(&mut self) {
+        let row = self
+            .rows
+            .row_of(self.buffer.position_of(self.vim.cursor()).line);
+        self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
     }
 
     /// Re-highlights the whole text. Fine for ordinary files; large ones will need a debounce.
@@ -965,6 +976,7 @@ impl Viewer {
             .map(|language| highlight(language, &self.buffer.text()))
             .unwrap_or_default();
         self.lines = Arc::new(build_lines(&self.buffer, &spans));
+        self.rows = Arc::new(Rows::all(self.lines.len()));
         self.outline = match stub_language(&self.path) {
             Some(language) if self.editable => extract_nodes(language, &self.buffer.text()),
             _ => Vec::new(),
@@ -1041,6 +1053,7 @@ impl Viewer {
 
     pub fn render(&self) -> Div {
         let lines = self.lines.clone();
+        let rows = self.rows.clone();
         let digits = lines.len().to_string().len();
         let (cursor_line, cursor_cell) = self.cursor_cell();
         let insert = self.vim.mode() == Mode::Insert;
@@ -1064,9 +1077,10 @@ impl Viewer {
         let cell_width = self.cell_width.unwrap_or(8.);
         let row_height = self.row_height();
         let scale = self.font_size / DEFAULT_FONT_SIZE;
-        let list = uniform_list("viewer", lines.len(), move |range, _, _| {
+        let list = uniform_list("viewer", rows.len(), move |range, _, _| {
             range
                 .map(|row| {
+                    let row = rows.line(row);
                     let line = &lines[row];
                     let text = line.text.clone();
                     let mut colors = line.colors.clone();

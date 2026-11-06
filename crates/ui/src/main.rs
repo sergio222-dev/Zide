@@ -15,6 +15,7 @@ use std::{
 };
 
 mod indent;
+mod rows;
 mod session;
 mod theme;
 mod usages;

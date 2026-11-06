@@ -13,7 +13,7 @@ S7. After an edit the regions are recomputed; a collapsed region stays collapsed
 
 ## Tasks
 - [x] T1 (S1, S2) zide-syntax: `fold_regions(language, source) -> Vec<FoldRegion { start_line, end_line, kind }>` for Rust, JS, TS, TSX; tests per kind. Route: inline. PR A.
-- [ ] T2 (S3, S4) viewer: map between list rows and buffer lines (visible lines), behavior-preserving with no folds; every row/line site uses it. Route: inline. PR B (with T3).
+- [x] T2 (S3, S4) viewer: map between list rows and buffer lines (visible lines), behavior-preserving with no folds; every row/line site uses it. Route: inline. PR B (with T3).
 - [ ] T3 (S3, S4, S5, S7) viewer fold state, collapse/expand, placeholder rendering, cursor snapping, auto-unfold, `z` keys. Route: inline. PR B.
 - [ ] T4 (S5, S6) gutter chevrons with click, IntelliJ keys (Ctrl+minus/plus), go/py regions if cheap. Route: inline. PR C.
 
