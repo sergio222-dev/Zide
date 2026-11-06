@@ -21,7 +21,12 @@ use zide_syntax::{
 use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
-use crate::{indent, rows::Rows, theme};
+use crate::{
+    indent,
+    rows::Rows,
+    sticky::{MAX_STICKY, Scope, sticky_headers},
+    theme,
+};
 
 /// Files larger than this are not opened.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -212,6 +217,8 @@ pub struct Viewer {
     font_family: SharedString,
     /// Declarations of the file as of `built_at`, for the breadcrumb.
     outline: Vec<StubNode>,
+    /// The declarations of `outline` that span several lines, for sticky scroll.
+    scopes: Vec<Scope>,
     /// Name of the project folder, first crumb of the breadcrumb.
     root_name: String,
     /// Who last changed each line of the file on disk, when git knows it.
@@ -265,6 +272,7 @@ impl Viewer {
             settled_top: 0.,
             font_family: EDITOR_FONTS[0].into(),
             outline: Vec::new(),
+            scopes: Vec::new(),
             root_name: root
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -1057,7 +1065,24 @@ impl Viewer {
     fn reveal_cursor(&mut self) {
         self.unfold_hiding(self.cursor_line());
         let row = self.rows.row_of(self.cursor_line());
+        // a cursor under the pinned declarations is out of sight: scroll until it is right
+        // below them
+        if let Some((top, _)) = self.view_metrics()
+            && row < top + self.pinned_at(top).len()
+        {
+            let mut first = row;
+            for _ in 0..MAX_STICKY {
+                first = row.saturating_sub(self.pinned_at(first).len());
+            }
+            self.scroll.scroll_to_item(first, ScrollStrategy::Top);
+            return;
+        }
         self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+    }
+
+    /// The header lines pinned above the code when `top` is the first row on screen.
+    fn pinned_at(&self, top: usize) -> Vec<usize> {
+        sticky_headers(&self.scopes, |row| self.rows.line(row), top)
     }
 
     fn cursor_line(&self) -> usize {
@@ -1168,6 +1193,30 @@ impl Viewer {
             Some(language) if self.editable => extract_nodes(language, &self.buffer.text()),
             _ => Vec::new(),
         };
+        let line_of = |byte: u32| {
+            let offset = self.buffer.offset_of_byte(byte as usize);
+            self.buffer.position_of(offset).line
+        };
+        self.scopes = self
+            .outline
+            .iter()
+            .filter(|n| {
+                !matches!(
+                    n.kind,
+                    StubKind::Import
+                        | StubKind::Field
+                        | StubKind::Variant
+                        | StubKind::Const
+                        | StubKind::TypeAlias
+                        | StubKind::Macro
+                )
+            })
+            .map(|n| Scope {
+                start: line_of(n.range.start),
+                end: line_of(n.range.end.saturating_sub(1)),
+            })
+            .filter(|s| s.end > s.start)
+            .collect();
         self.built_at = self.buffer.revision();
     }
 
@@ -1274,6 +1323,40 @@ impl Viewer {
         let cell_width = self.cell_width.unwrap_or(8.);
         let row_height = self.row_height();
         let scale = self.font_size / DEFAULT_FONT_SIZE;
+        let pinned: Vec<_> = self
+            .pinned_at((self.settled_top / row_height) as usize)
+            .into_iter()
+            .filter_map(|line| Some((line, self.lines.get(line)?)))
+            .collect();
+        let sticky = (!pinned.is_empty()).then(|| {
+            let gutter = (12. * digits as f32 + 28.) * scale;
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .bg(rgb(theme::BACKGROUND))
+                .border_b_1()
+                .border_color(rgb(theme::BORDER))
+                .children(pinned.into_iter().map(|(line, shown)| {
+                    div()
+                        .flex()
+                        .h(px(row_height))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .w(px(gutter))
+                                .pr_3()
+                                .text_right()
+                                .text_color(rgb(theme::DIM))
+                                .child((line + 1).to_string()),
+                        )
+                        .child(
+                            StyledText::new(shown.text.clone())
+                                .with_highlights(shown.colors.clone()),
+                        )
+                }))
+        });
         let list = uniform_list("viewer", rows.len(), move |range, _, _| {
             range
                 .map(|row| {
@@ -1421,10 +1504,12 @@ impl Viewer {
             .child(
                 div()
                     .flex_1()
+                    .relative()
                     .font_family(self.font_family.clone())
                     .text_size(px(self.font_size))
                     .whitespace_nowrap()
-                    .child(list),
+                    .child(list)
+                    .children(sticky),
             )
             .child(
                 div()
@@ -1976,6 +2061,18 @@ mod tests {
         assert!(viewer.pair_highlights().is_empty());
         type_keys(&mut viewer, "l"); // on the `)`: its partner is the `(`
         assert_eq!(*viewer.pair_highlights(), vec![12..13, 10..11]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn declarations_scrolled_out_of_view_are_pinned_outermost_first() {
+        let text = "struct S;\nimpl S {\n    fn a(&self) {\n        let x = 1;\n        let y = 2;\n    }\n    fn b(&self) {}\n}\n";
+        let (dir, file) = temp_file_as("sticky", "a.rs", text);
+        let viewer = Viewer::open(&dir, &file);
+        assert!(viewer.pinned_at(0).is_empty());
+        assert!(viewer.pinned_at(1).is_empty()); // the impl line is the top row itself
+        assert_eq!(viewer.pinned_at(3), vec![1, 2]); // inside `a`, in the impl
+        assert_eq!(viewer.pinned_at(6), vec![1]); // `b` fits in one line: not a scope
         fs::remove_dir_all(dir).unwrap();
     }
 

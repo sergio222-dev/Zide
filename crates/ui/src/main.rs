@@ -18,6 +18,7 @@ mod indent;
 mod meter;
 mod rows;
 mod session;
+mod sticky;
 mod theme;
 mod usages;
 mod viewer;
