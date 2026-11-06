@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod file_icon;
 mod indent;
 mod meter;
 mod projects;
@@ -25,6 +26,7 @@ mod usages;
 mod viewer;
 mod welcome;
 
+use gpui_kit::component::Icon;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -1447,6 +1449,11 @@ impl Workspace {
                             (true, true) => "▾",
                             (true, false) => "▸",
                         }))
+                        .child({
+                            let (icon, color) =
+                                file_icon::for_row(&row.name, row.dir, row.expanded);
+                            Icon::new(icon).size_4().text_color(rgb(color))
+                        })
                         .child(row.name.clone())
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             workspace.update(cx, |this, cx| {
@@ -2667,7 +2674,7 @@ fn main() {
     // without a folder, the welcome screen lists the projects opened before
     let root = first.map(PathBuf::from);
 
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let app = gpui_kit::application().with_assets(file_icon::AppAssets);
     app.run(move |cx| {
         gpui_kit::init(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);

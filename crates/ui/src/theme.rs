@@ -43,3 +43,9 @@ pub const CHANGE_REMOVED: u32 = 0x7d848f;
 /// The chip with a parameter's name before an argument.
 pub const HINT_BG: u32 = 0x2f3239;
 pub const HINT_TEXT: u32 = 0x8c93a1;
+
+/// Icons of the project tree.
+pub const ICON_FOLDER: u32 = 0xe5c07b;
+pub const ICON_CODE: u32 = 0x61afef;
+pub const ICON_DATA: u32 = 0x98c379;
+pub const ICON_MEDIA: u32 = 0xc678dd;
