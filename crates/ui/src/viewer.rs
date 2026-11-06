@@ -694,6 +694,30 @@ impl Viewer {
         }
     }
 
+    /// Where the file is now: the first line on screen and the caret. `None` before the first
+    /// layout, when the scroll is not known.
+    pub fn view(&self) -> Option<crate::session::View> {
+        self.view_metrics()?;
+        let at = self.buffer.position_of(self.vim.cursor());
+        Some(crate::session::View {
+            top: self
+                .rows
+                .line((self.settled_top / self.row_height()) as usize),
+            line: at.line,
+            column: at.column,
+        })
+    }
+
+    /// Goes back to where the file was left (what it has now may be shorter).
+    pub fn restore_view(&mut self, view: crate::session::View) {
+        let line = view.line.min(self.lines.len() - 1);
+        let offset = self.buffer.line_start(line) + view.column;
+        self.vim.set_cursor(&self.buffer, offset);
+        let top = view.top.min(self.lines.len() - 1);
+        self.scroll
+            .scroll_to_item(self.rows.row_of(top), ScrollStrategy::Top);
+    }
+
     /// `(first visible row, visible rows)` as of the last layout, if there was one.
     fn view_metrics(&self) -> Option<(usize, usize)> {
         let state = self.scroll.0.borrow();
@@ -2685,6 +2709,24 @@ mod tests {
             ),
             [(2, "x".to_string()), (6, "y".to_string())]
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_place_a_file_was_left_at_comes_back_within_what_the_file_still_has() {
+        let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let (dir, file) = temp_file("restore", &text);
+        let mut viewer = Viewer::open(&dir, &file);
+        assert_eq!(viewer.view(), None); // nothing drawn yet: the scroll is not known
+        let place = |top, line, column| crate::session::View { top, line, column };
+        let cursor = |v: &Viewer| {
+            let at = v.buffer.position_of(v.vim.cursor());
+            (at.line, at.column)
+        };
+        viewer.restore_view(place(40, 45, 3));
+        assert_eq!(cursor(&viewer), (45, 3));
+        viewer.restore_view(place(900, 900, 900)); // the file shrank: the end of it
+        assert_eq!(cursor(&viewer).0, 100);
         fs::remove_dir_all(dir).unwrap();
     }
 

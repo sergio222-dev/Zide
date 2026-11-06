@@ -569,8 +569,18 @@ impl Workspace {
 
     /// Saves the open file; called whenever the user's attention leaves the editor.
     fn autosave(&mut self, cx: &mut Context<Self>) {
+        self.remember_view(); // it runs whenever the user leaves: another window, a popup, closing
         if self.viewer.as_mut().is_some_and(|viewer| viewer.save()) {
             self.refresh_git(cx);
+        }
+    }
+
+    /// Keeps where the open file is scrolled to and its caret, for the next time it is opened.
+    fn remember_view(&self) {
+        if let Some(viewer) = &self.viewer
+            && let Some(view) = viewer.view()
+        {
+            session::remember_view(&self.root, viewer.path(), view);
         }
     }
 
@@ -1557,6 +1567,7 @@ impl Workspace {
             self.recent.insert(0, file);
             self.recent.truncate(MAX_RECENT);
         }
+        self.remember_view();
         if let Some(old) = self.viewer.take() {
             self.parked.insert(old.path().to_string(), old);
             if self.parked.len() > MAX_RECENT
@@ -1565,14 +1576,21 @@ impl Workspace {
                 self.parked.remove(&oldest);
             }
         }
-        let mut viewer = match self.parked.remove(path) {
-            Some(parked) if !parked.is_stale() => parked,
-            _ => Viewer::open(&self.root, path),
+        let (mut viewer, reopened) = match self.parked.remove(path) {
+            Some(parked) if !parked.is_stale() => (parked, false),
+            _ => (Viewer::open(&self.root, path), true),
         };
         if let Some(line) = line {
             viewer.go_to_line(line);
         }
         viewer.set_font_size(self.font_size);
+        // a file read again starts where it was left, unless it was opened at a line
+        if line.is_none()
+            && reopened
+            && let Some(view) = session::view(&self.root, path)
+        {
+            viewer.restore_view(view);
+        }
         self.viewer = Some(viewer);
         self.refresh_git(cx);
         session::remember_file(&self.root, path);
