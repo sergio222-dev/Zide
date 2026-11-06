@@ -1,6 +1,8 @@
 //! Which buffer lines the list shows. Without folds every line is a row; a folded region
 //! takes its hidden lines out, so rows and lines stop being the same number.
 
+use std::ops::Range;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Rows {
     /// The buffer line shown by each row, ascending.
@@ -9,6 +11,7 @@ pub struct Rows {
 
 impl Rows {
     /// Every one of `count` lines is a row.
+    #[cfg(test)]
     pub fn all(count: usize) -> Self {
         Self {
             lines: (0..count).collect(),
@@ -16,8 +19,7 @@ impl Rows {
     }
 
     /// The `count` lines except those in `hidden` (sorted, disjoint ranges).
-    #[cfg(test)]
-    pub fn hiding(count: usize, hidden: &[std::ops::Range<usize>]) -> Self {
+    pub fn hiding(count: usize, hidden: &[Range<usize>]) -> Self {
         let mut hidden = hidden.iter().peekable();
         let lines = (0..count)
             .filter(|line| {
@@ -48,6 +50,11 @@ impl Rows {
             .partition_point(|&shown| shown <= line)
             .saturating_sub(1)
     }
+
+    /// False when `line` is folded away.
+    pub fn shows(&self, line: usize) -> bool {
+        self.lines.binary_search(&line).is_ok()
+    }
 }
 
 #[cfg(test)]
@@ -74,6 +81,7 @@ mod tests {
     #[test]
     fn a_hidden_line_belongs_to_the_row_of_its_fold() {
         let rows = Rows::hiding(8, &[2..4, 7..8]);
+        assert!(rows.shows(1) && !rows.shows(2) && !rows.shows(3) && rows.shows(4));
         assert_eq!(rows.row_of(1), 1); // the header of the fold
         assert_eq!(rows.row_of(3), 1);
         assert_eq!(rows.row_of(4), 2);

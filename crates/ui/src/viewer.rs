@@ -1,6 +1,7 @@
 //! File editor view: line numbers, syntax colors, a block cursor and Vim keys.
 
 use std::{
+    collections::BTreeSet,
     fs,
     ops::Range,
     path::{Path, PathBuf},
@@ -11,7 +12,9 @@ use std::{
 
 use gpui_kit::*;
 use zide_stubs::{StubKind, StubNode, extract_nodes, language_for_path as stub_language};
-use zide_syntax::{Class, LanguageId, Span, highlight, language_for_path};
+use zide_syntax::{
+    Class, FoldRegion, LanguageId, Span, fold_regions, highlight, language_for_path,
+};
 use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
@@ -186,6 +189,10 @@ pub struct Viewer {
     lines: Arc<Vec<Line>>,
     /// Which of those lines the list shows, one per row.
     rows: Arc<Rows>,
+    /// Regions of the text that can fold, by start line, as of `built_at`.
+    folds: Vec<FoldRegion>,
+    /// Start lines of the regions folded away; the region must still exist to count.
+    collapsed: BTreeSet<usize>,
     built_at: Revision,
     scroll: UniformListScrollHandle,
     /// A `z` was typed and its second key (`t`, `z`, `b`...) is awaited.
@@ -231,6 +238,8 @@ impl Viewer {
             semantic: None,
             lines: Arc::default(),
             rows: Arc::default(),
+            folds: Vec::new(),
+            collapsed: BTreeSet::new(),
             built_at: buffer.revision(),
             buffer,
             scroll: UniformListScrollHandle::new(),
@@ -256,6 +265,7 @@ impl Viewer {
         let offset = self.buffer.line_start(row);
         self.vim.set_cursor(&self.buffer, offset);
         self.vim.handle(&mut self.buffer, Key::Char('^')); // first non-blank of the line
+        self.unfold_hiding(row);
         self.scroll
             .scroll_to_item(self.rows.row_of(row), ScrollStrategy::Top);
     }
@@ -473,6 +483,10 @@ impl Viewer {
         self.anim = None; // a key press takes over from a glide
         if self.z_pending {
             self.z_pending = false;
+            if let Key::Char(command @ ('a' | 'o' | 'c' | 'M' | 'R')) = key {
+                self.fold_command(command);
+                return Effect::None;
+            }
             let strategy = match key {
                 Key::Char('t') | Key::Enter => Some(ScrollStrategy::Top),
                 Key::Char('z' | '.') => Some(ScrollStrategy::Center),
@@ -530,10 +544,12 @@ impl Viewer {
         {
             return Effect::None; // an error message is not a document
         }
+        let before = self.cursor_line();
         self.vim.handle(&mut self.buffer, key);
         if self.buffer.revision() != self.built_at {
             self.rebuild();
         }
+        self.snap_cursor(before);
         self.reveal_cursor();
         Effect::None
     }
@@ -963,10 +979,89 @@ impl Viewer {
 
     /// Scrolls the least that brings the cursor's row into view.
     fn reveal_cursor(&mut self) {
-        let row = self
-            .rows
-            .row_of(self.buffer.position_of(self.vim.cursor()).line);
+        self.unfold_hiding(self.cursor_line());
+        let row = self.rows.row_of(self.cursor_line());
         self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+    }
+
+    fn cursor_line(&self) -> usize {
+        self.buffer.position_of(self.vim.cursor()).line
+    }
+
+    /// The cursor never rests on a hidden line: one that a movement left on one goes to the
+    /// line after the fold when it moved down (`from` is where it was) and to the fold's
+    /// first line when it moved up.
+    fn snap_cursor(&mut self, from: usize) {
+        let line = self.cursor_line();
+        if self.rows.shows(line) {
+            return;
+        }
+        let header = self.rows.row_of(line);
+        let row = if line > from {
+            (header + 1).min(self.rows.len() - 1)
+        } else {
+            header
+        };
+        self.vim.move_to_line(&self.buffer, self.rows.line(row));
+    }
+
+    /// Rebuilds the rows from the regions that are folded.
+    fn rebuild_rows(&mut self) {
+        let mut hidden: Vec<Range<usize>> = Vec::new();
+        for region in self
+            .folds
+            .iter()
+            .filter(|r| self.collapsed.contains(&r.start_line))
+        {
+            let range = region.start_line + 1..region.end_line + 1;
+            match hidden.last_mut() {
+                Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+                _ => hidden.push(range),
+            }
+        }
+        self.rows = Arc::new(Rows::hiding(self.lines.len(), &hidden));
+    }
+
+    /// Opens every folded region that hides `line`.
+    fn unfold_hiding(&mut self, line: usize) {
+        let before = self.collapsed.len();
+        for region in &self.folds {
+            if region.start_line < line && line <= region.end_line {
+                self.collapsed.remove(&region.start_line);
+            }
+        }
+        if self.collapsed.len() != before {
+            self.rebuild_rows();
+        }
+    }
+
+    /// `za`, `zo`, `zc`, `zM`, `zR`.
+    fn fold_command(&mut self, command: char) {
+        let line = self.cursor_line();
+        let folded = self.collapsed.contains(&line);
+        match command {
+            'o' | 'a' if folded => {
+                self.collapsed.remove(&line);
+            }
+            'c' | 'a' => {
+                // the innermost region around the cursor that is still open
+                let region = self
+                    .folds
+                    .iter()
+                    .filter(|r| r.start_line <= line && line <= r.end_line)
+                    .filter(|r| !self.collapsed.contains(&r.start_line))
+                    .max_by_key(|r| r.start_line);
+                if let Some(region) = region {
+                    self.collapsed.insert(region.start_line);
+                }
+            }
+            'M' => self.collapsed = self.folds.iter().map(|r| r.start_line).collect(),
+            'R' => self.collapsed.clear(),
+            _ => {}
+        }
+        self.rebuild_rows();
+        self.snap_cursor(usize::MAX); // inside a new fold: on its first line
+        self.reveal_cursor();
     }
 
     /// Re-highlights the whole text. Fine for ordinary files; large ones will need a debounce.
@@ -976,7 +1071,13 @@ impl Viewer {
             .map(|language| highlight(language, &self.buffer.text()))
             .unwrap_or_default();
         self.lines = Arc::new(build_lines(&self.buffer, &spans));
-        self.rows = Arc::new(Rows::all(self.lines.len()));
+        self.folds = match self.language {
+            Some(language) if self.editable => fold_regions(language, &self.buffer.text()),
+            _ => Vec::new(),
+        };
+        let starts: BTreeSet<usize> = self.folds.iter().map(|r| r.start_line).collect();
+        self.collapsed.retain(|line| starts.contains(line));
+        self.rebuild_rows();
         self.outline = match stub_language(&self.path) {
             Some(language) if self.editable => extract_nodes(language, &self.buffer.text()),
             _ => Vec::new(),
@@ -1054,6 +1155,12 @@ impl Viewer {
     pub fn render(&self) -> Div {
         let lines = self.lines.clone();
         let rows = self.rows.clone();
+        let folded: BTreeSet<usize> = self
+            .collapsed
+            .iter()
+            .copied()
+            .filter(|line| rows.shows(*line))
+            .collect();
         let digits = lines.len().to_string().len();
         let (cursor_line, cursor_cell) = self.cursor_cell();
         let insert = self.vim.mode() == Mode::Insert;
@@ -1163,6 +1270,15 @@ impl Viewer {
                                 .child((row + 1).to_string()),
                         )
                         .child(StyledText::new(text).with_highlights(colors))
+                        .children(folded.contains(&row).then(|| {
+                            div()
+                                .px_1()
+                                .mx_1()
+                                .rounded_sm()
+                                .bg(rgb(theme::BORDER))
+                                .text_color(rgb(theme::DIM))
+                                .child("...")
+                        }))
                         .children(dots)
                         .children(caret)
                 })
@@ -1915,6 +2031,84 @@ mod tests {
         // with unsaved edits the file is kept, so nothing of ours is lost
         type_keys(&mut viewer, "x");
         assert!(!viewer.is_stale());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    const FOLDABLE: &str = "fn a() {\n    one();\n    two();\n}\nfn b() {\n    three();\n}\n";
+
+    fn shown(viewer: &Viewer) -> Vec<usize> {
+        (0..viewer.rows.len())
+            .map(|r| viewer.rows.line(r))
+            .collect()
+    }
+
+    fn cursor_line(viewer: &Viewer) -> usize {
+        viewer.buffer.position_of(viewer.vim.cursor()).line
+    }
+
+    #[::core::prelude::v1::test]
+    fn zc_folds_the_block_around_the_cursor_and_za_toggles_it() {
+        let (dir, file) = temp_file_as("fold-zc", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        assert_eq!(shown(&viewer).len(), 8);
+        type_keys(&mut viewer, "jzc");
+        assert_eq!(shown(&viewer), [0, 4, 5, 6, 7]);
+        assert_eq!(cursor_line(&viewer), 0); // the cursor was inside: it goes to the header
+        type_keys(&mut viewer, "zo");
+        assert_eq!(shown(&viewer).len(), 8);
+        type_keys(&mut viewer, "za");
+        assert_eq!(shown(&viewer), [0, 4, 5, 6, 7]);
+        type_keys(&mut viewer, "za");
+        assert_eq!(shown(&viewer).len(), 8);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn zm_folds_everything_and_zr_opens_everything() {
+        let (dir, file) = temp_file_as("fold-zm", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "zM");
+        assert_eq!(shown(&viewer), [0, 4, 7]);
+        type_keys(&mut viewer, "zR");
+        assert_eq!(shown(&viewer).len(), 8);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn j_and_k_step_over_a_folded_block() {
+        let (dir, file) = temp_file_as("fold-jk", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "zcj");
+        assert_eq!(cursor_line(&viewer), 4);
+        type_keys(&mut viewer, "k");
+        assert_eq!(cursor_line(&viewer), 0);
+        type_keys(&mut viewer, "G");
+        assert!(viewer.rows.shows(cursor_line(&viewer)));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_jump_into_a_folded_block_opens_it() {
+        let (dir, file) = temp_file_as("fold-jump", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "zM");
+        viewer.go_to_line(3); // `two();`
+        assert_eq!(shown(&viewer), [0, 1, 2, 3, 4, 7]);
+        assert_eq!(cursor_line(&viewer), 2);
+        type_keys(&mut viewer, "zM");
+        viewer.next_method(false); // back to `a`, then forward again into `b`
+        viewer.next_method(true);
+        assert_eq!(cursor_line(&viewer), 4);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_fold_survives_an_edit_elsewhere() {
+        let (dir, file) = temp_file_as("fold-edit", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "zcjjjjx"); // fold `a`, delete a char in `b`
+        assert_eq!(shown(&viewer), [0, 4, 5, 6, 7]);
+        assert!(viewer.is_dirty());
         fs::remove_dir_all(dir).unwrap();
     }
 }
