@@ -57,6 +57,9 @@ pub type FoldClick = Rc<dyn Fn(usize, &mut App)>;
 /// editor.
 pub type HoverMove = Rc<dyn Fn(Option<(usize, Point<Pixels>)>, &mut App)>;
 
+/// Called with the line and window position of a click on the text.
+pub type TextClick = Rc<dyn Fn(usize, Point<Pixels>, &mut App)>;
+
 /// Per line, the diagnostics to underline and their display bytes.
 type Squiggles = HashMap<usize, Vec<(usize, Range<usize>)>>;
 
@@ -381,17 +384,49 @@ impl Viewer {
         (12. * digits as f32 + 28.) * self.font_size / DEFAULT_FONT_SIZE
     }
 
+    /// The cell of the line text at window position `x`, `None` over the line numbers. With
+    /// `nearest` the edge closest to `x` is meant (where a caret goes), else the cell it is in.
+    fn cell_under(&self, x: Pixels, nearest: bool) -> Option<usize> {
+        let x = f32::from(x - self.editor_bounds.get().origin.x) - self.gutter_width();
+        let cells = x / self.cell_width.unwrap_or(8.);
+        (x >= 0.).then_some((if nearest { cells + 0.5 } else { cells }) as usize)
+    }
+
+    /// A click at window position `at` on `row`: the caret goes to that character. True when it
+    /// was on the text.
+    pub fn click(&mut self, row: usize, at: Point<Pixels>) -> bool {
+        let Some(line) = self.lines.get(row) else {
+            return false;
+        };
+        let inserting = self.vim.mode() == Mode::Insert;
+        let Some(cell) = self.cell_under(at.x, inserting) else {
+            return false;
+        };
+        // the display byte of that cell, then the character it belongs to (a tab spans several)
+        let byte = line
+            .text
+            .char_indices()
+            .nth(cell)
+            .map_or(line.text.len(), |(byte, _)| byte);
+        let column = match &line.cols {
+            Some(cols) => cols.iter().rposition(|&shown| shown <= byte).unwrap_or(0),
+            None => byte,
+        }
+        .min(line.chars);
+        let offset = self.buffer.line_start(row) + column;
+        self.anim = None;
+        self.z_pending = false;
+        self.vim.click(&mut self.buffer, offset);
+        true
+    }
+
     /// The mouse is at `at` (window coordinates) over `row`, or left the editor. True when the
     /// popup must change.
     pub fn set_hover(&mut self, over: Option<(usize, Point<Pixels>)>) -> bool {
         let found = over.and_then(|(row, at)| {
             let bounds = self.editor_bounds.get();
-            let x = f32::from(at.x - bounds.origin.x) - self.gutter_width();
-            if x < 0. {
-                return None;
-            }
             let line = self.lines.get(row)?;
-            let column = (x / self.cell_width.unwrap_or(8.)) as usize;
+            let column = self.cell_under(at.x, false)?;
             let byte = line.text.char_indices().nth(column)?.0;
             let under: Vec<usize> = self
                 .squiggles
@@ -1474,7 +1509,7 @@ impl Viewer {
     }
 
     /// `on_fold` is called with the start line of the region whose chevron was clicked.
-    pub fn render(&self, on_fold: FoldClick, on_hover: HoverMove) -> Div {
+    pub fn render(&self, on_fold: FoldClick, on_hover: HoverMove, on_click: TextClick) -> Div {
         let lines = self.lines.clone();
         let rows = self.rows.clone();
         let folded: BTreeSet<usize> = self
@@ -1638,15 +1673,21 @@ impl Viewer {
                             .bg(rgba(theme::WHITESPACE))
                     });
                     let hover = on_hover.clone();
+                    let click = on_click.clone();
                     div()
                         .relative()
                         .flex()
                         .h(px(row_height))
+                        .cursor_text()
                         .on_mouse_move(move |event, _, cx| hover(Some((row, event.position)), cx))
+                        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                            click(row, event.position, cx)
+                        })
                         .children(bands)
                         .child(
                             div()
                                 .relative()
+                                .cursor_default()
                                 .flex_shrink_0()
                                 .w(px(gutter))
                                 .pr_3()
@@ -1670,6 +1711,7 @@ impl Viewer {
                                         .cursor_pointer()
                                         .child(if folded.contains(&row) { "▸" } else { "▾" })
                                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                            cx.stop_propagation(); // not a click on the text
                                             on_fold(row, cx)
                                         })
                                 })),
@@ -1712,6 +1754,7 @@ impl Viewer {
             .child(
                 div()
                     .id("editor")
+                    .cursor_text()
                     .flex_1()
                     .relative()
                     .font_family(self.font_family.clone())
@@ -2336,6 +2379,27 @@ mod tests {
             message: message.into(),
             ..Default::default()
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_click_puts_the_caret_on_the_character_under_the_mouse() {
+        let (dir, file) = temp_file("click", "hello\n\tab\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let gutter = viewer.gutter_width();
+        // without a layout the cells are 8 px wide and the editor starts at the window's corner
+        let at = |cell: f32| point(px(gutter + cell * 8. + 1.), px(0.));
+        let cursor = |v: &Viewer| v.buffer.position_of(v.vim.cursor());
+        assert!(viewer.click(0, at(2.)));
+        assert_eq!((cursor(&viewer).line, cursor(&viewer).column), (0, 2));
+        assert!(viewer.click(0, at(30.))); // past the end: the last character
+        assert_eq!(cursor(&viewer).column, 4);
+        assert!(viewer.click(1, at(4.))); // the tab fills 4 cells: `a` is the next one
+        assert_eq!((cursor(&viewer).line, cursor(&viewer).column), (1, 1));
+        assert!(viewer.click(1, at(2.))); // inside the tab
+        assert_eq!(cursor(&viewer).column, 0);
+        assert!(!viewer.click(0, point(px(3.), px(0.)))); // on the line numbers
+        assert_eq!(cursor(&viewer).column, 0);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[::core::prelude::v1::test]

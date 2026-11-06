@@ -2053,6 +2053,19 @@ impl Workspace {
                                         });
                                     }
                                 }),
+                                std::rc::Rc::new({
+                                    let workspace = cx.entity();
+                                    move |row, at, cx| {
+                                        workspace.update(cx, |this, cx| {
+                                            if let Some(viewer) = &mut this.viewer
+                                                && viewer.click(row, at)
+                                            {
+                                                this.tree_focused = false; // keys are the editor's
+                                                cx.notify();
+                                            }
+                                        });
+                                    }
+                                }),
                             ))
                             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                                 if event.modifiers.control {
