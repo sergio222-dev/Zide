@@ -28,6 +28,9 @@ pub enum Event {
         text: String,
         is_error: bool,
         cost_usd: f64,
+        /// Why the turn ended when it did not simply finish, e.g. `aborted_streaming`
+        /// after `Session::interrupt`.
+        terminal_reason: Option<String>,
     },
     /// Claude wants to run a tool and waits for `Session::allow` or `Session::deny`.
     PermissionRequest {
@@ -108,6 +111,7 @@ pub fn parse_event(line: &str) -> Option<Event> {
             text: value["result"].as_str().unwrap_or_default().to_owned(),
             is_error: value["is_error"].as_bool().unwrap_or(false),
             cost_usd: value["total_cost_usd"].as_f64().unwrap_or(0.0),
+            terminal_reason: value["terminal_reason"].as_str().map(str::to_owned),
         },
         _ => Event::Other,
     })
@@ -171,9 +175,19 @@ mod tests {
             Some(Event::Result {
                 text: "done".into(),
                 is_error: false,
-                cost_usd: 0.5
+                cost_usd: 0.5,
+                terminal_reason: None,
             })
         );
+    }
+
+    #[test]
+    fn interrupted_result_says_why() {
+        let line = r#"{"type":"result","is_error":false,"terminal_reason":"aborted_streaming"}"#;
+        assert!(matches!(
+            parse_event(line),
+            Some(Event::Result { terminal_reason: Some(r), .. }) if r == "aborted_streaming"
+        ));
     }
 
     #[test]

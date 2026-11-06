@@ -68,6 +68,16 @@ impl Session {
         self.write(&message)
     }
 
+    /// Stops the turn in progress. The turn still ends with an `Event::Result` (its
+    /// `terminal_reason` says it was aborted) and the session stays usable.
+    pub fn interrupt(&mut self) -> io::Result<()> {
+        self.write(&json!({
+            "type": "control_request",
+            "request_id": "interrupt",
+            "request": {"subtype": "interrupt"},
+        }))
+    }
+
     /// Lets the tool run. `input` is the request's input, possibly edited.
     pub fn allow(&mut self, request_id: &str, input: &Value) -> io::Result<()> {
         self.respond(request_id, json!({"behavior": "allow", "updatedInput": input}))
