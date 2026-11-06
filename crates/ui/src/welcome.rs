@@ -1,6 +1,9 @@
 //! The screen Zide opens on when it is started without a folder: the projects opened before.
 
-use std::path::{Path, PathBuf};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+};
 
 use gpui_kit::{
     component::{
@@ -11,7 +14,7 @@ use gpui_kit::{
     *,
 };
 
-use crate::{projects, theme};
+use crate::{FindAction, projects, theme};
 
 /// The user picked a project, from the list or with the file picker.
 pub struct OpenProject(pub PathBuf);
@@ -23,6 +26,18 @@ pub struct Welcome {
     /// The list of matching projects.
     commands: Entity<CommandState>,
     /// The highlighted match, as a position in the filtered list.
+    selected: usize,
+    /// The command palette (Ctrl+Shift+A), when open.
+    palette: Option<Palette>,
+    _subscription: Subscription,
+}
+
+/// The commands the welcome screen can run, searched by name.
+const COMMANDS: [&str; 2] = ["Open", "Quit"];
+
+struct Palette {
+    input: Entity<InputState>,
+    commands: Entity<CommandState>,
     selected: usize,
     _subscription: Subscription,
 }
@@ -61,26 +76,128 @@ impl Welcome {
             filter,
             commands: cx.new(|cx| CommandState::new(window, cx)),
             selected: 0,
+            palette: None,
             _subscription: subscription,
         }
     }
 
     /// Asks for a folder with the system's picker; picking none changes nothing.
     fn pick_folder(&mut self, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Open".into()),
-        });
+        let picked = choose_folder(cx);
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = picked.await
-                && let Some(folder) = paths.into_iter().next()
-            {
+            if let Some(folder) = picked.await {
                 this.update(cx, |_, cx| cx.emit(OpenProject(folder))).ok();
             }
         })
         .detach();
+    }
+
+    /// Opens the palette, or closes it; the filter gets the focus back when it closes.
+    fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.take().is_some() {
+            self.filter.update(cx, |state, cx| state.focus(window, cx));
+            return cx.notify();
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Type a command"));
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    if let Some(palette) = &mut this.palette {
+                        palette.selected = 0;
+                    }
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    let query = input.read(cx).value().to_string();
+                    let selected = this.palette.as_ref().map_or(0, |p| p.selected);
+                    if let Some(&command) = matching_commands(&query).get(selected) {
+                        this.run_command(command, window, cx);
+                    }
+                }
+                _ => {}
+            },
+        );
+        input.update(cx, |state, cx| state.focus(window, cx));
+        self.palette = Some(Palette {
+            input,
+            commands: cx.new(|cx| CommandState::new(window, cx)),
+            selected: 0,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn run_command(&mut self, command: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_palette(window, cx);
+        match COMMANDS[command] {
+            "Open" => self.pick_folder(cx),
+            _ => cx.quit(),
+        }
+    }
+
+    /// The palette overlay: an input over the commands that match it.
+    fn palette_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
+        let palette = self.palette.as_mut()?;
+        let query = palette.input.read(cx).value().to_string();
+        let found = matching_commands(&query);
+        palette.selected = palette.selected.min(found.len().saturating_sub(1));
+        let (state, selected) = (palette.commands.clone(), palette.selected);
+        window.defer(cx, move |window, cx| {
+            state.update(cx, |state, cx| {
+                state.set_selected_index(Some(IndexPath::new(selected)), window, cx)
+            });
+        });
+        let items: Vec<_> = found
+            .iter()
+            .map(|&i| CommandItem::new().child(move |_, _| div().child(COMMANDS[i])))
+            .collect();
+        let (hovered, confirmed) = (cx.entity(), cx.entity());
+        let list = Command::new(&palette.commands)
+            .items(items)
+            .searchable(false)
+            .bordered(false)
+            .max_h(px(320.))
+            .empty(|_, _, _| div().p_3().text_color(rgb(theme::DIM)).child("No results"))
+            .on_select(move |path, _, cx| {
+                hovered.update(cx, |this, cx| {
+                    if let Some(palette) = this.palette.as_mut().filter(|p| p.selected != path.row)
+                    {
+                        palette.selected = path.row;
+                        cx.notify();
+                    }
+                });
+            })
+            .on_confirm(move |path, window, cx| {
+                confirmed.update(cx, |this, cx| {
+                    let Some(palette) = &this.palette else { return };
+                    let query = palette.input.read(cx).value().to_string();
+                    if let Some(&command) = matching_commands(&query).get(path.row) {
+                        this.run_command(command, window, cx);
+                    }
+                });
+            });
+        Some(
+            div()
+                .absolute()
+                .top(px(80.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(480.))
+                        .p_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(theme::BORDER))
+                        .bg(rgb(theme::POPUP))
+                        .child(Input::new(&palette.input))
+                        .child(list),
+                ),
+        )
     }
 }
 
@@ -122,6 +239,25 @@ fn project_item(project: &Path) -> CommandItem {
     })
 }
 
+/// Asks for a folder with the system's picker; none is picked when it is dismissed.
+pub fn choose_folder(cx: &mut App) -> impl Future<Output = Option<PathBuf>> + use<> {
+    let picked = cx.prompt_for_paths(PathPromptOptions {
+        files: false,
+        directories: true,
+        multiple: false,
+        prompt: Some("Open".into()),
+    });
+    async move { picked.await.ok()?.ok()??.into_iter().next() }
+}
+
+/// The indices of the `COMMANDS` whose name contains `query`, ignoring case.
+fn matching_commands(query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    (0..COMMANDS.len())
+        .filter(|&i| COMMANDS[i].to_lowercase().contains(&query))
+        .collect()
+}
+
 /// The indices of the `projects` whose title or location contains `query`, ignoring case.
 fn matching(projects: &[PathBuf], query: &str) -> Vec<usize> {
     let query = query.trim().to_lowercase();
@@ -136,6 +272,7 @@ fn matching(projects: &[PathBuf], query: &str) -> Vec<usize> {
 
 impl Render for Welcome {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.palette_view(window, cx);
         let query = self.filter.read(cx).value().to_string();
         let found = matching(&self.projects, &query);
         self.selected = self.selected.min(found.len().saturating_sub(1));
@@ -180,18 +317,35 @@ impl Render for Welcome {
             });
         div()
             .id("welcome")
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .key_context("Welcome")
+            .on_action(
+                cx.listener(|this, _: &FindAction, window, cx| this.toggle_palette(window, cx)),
+            )
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.as_str();
+                if let Some(palette) = &mut this.palette {
+                    let query = palette.input.read(cx).value().to_string();
+                    let last = matching_commands(&query).len().saturating_sub(1);
+                    match key {
+                        "down" => palette.selected = (palette.selected + 1).min(last),
+                        "up" => palette.selected = palette.selected.saturating_sub(1),
+                        "escape" => return this.toggle_palette(window, cx),
+                        _ => return,
+                    }
+                    return cx.notify();
+                }
                 let last = {
                     let query = this.filter.read(cx).value().to_string();
                     matching(&this.projects, &query).len().saturating_sub(1)
                 };
-                match event.keystroke.key.as_str() {
+                match key {
                     "down" => this.selected = (this.selected + 1).min(last),
                     "up" => this.selected = this.selected.saturating_sub(1),
                     _ => return,
                 }
                 cx.notify();
             }))
+            .relative()
             .flex()
             .size_full()
             .bg(rgb(theme::BACKGROUND))
@@ -247,6 +401,7 @@ impl Render for Welcome {
                     )
                     .child(div().flex_1().min_h_0().p_2().child(list)),
             )
+            .children(palette)
     }
 }
 
