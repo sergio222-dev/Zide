@@ -1625,7 +1625,19 @@ impl Workspace {
         {
             viewer.restore_view(view);
         }
+        let large = reopened && viewer.is_plain();
         self.viewer = Some(viewer);
+        if large {
+            self.notify(
+                Notification::warning(format!(
+                    "This file has more than {} lines. Syntax highlighting, folding and the \
+                     outline are off to keep editing fast.",
+                    viewer::SYNTAX_LINE_LIMIT
+                ))
+                .title("Large file"),
+                cx,
+            );
+        }
         self.refresh_git(cx);
         session::remember_file(&self.root, path);
         self.tree.reveal(path);

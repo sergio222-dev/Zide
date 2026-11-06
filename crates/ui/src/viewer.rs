@@ -33,6 +33,9 @@ use crate::{
 
 /// Files larger than this are not opened.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// A file with more lines than this opens as plain text: no highlighting, folds, outline or
+/// pair matching, which would reread the whole file at every edit.
+pub const SYNTAX_LINE_LIMIT: usize = 20_000;
 const TAB_WIDTH: usize = 4;
 /// Row height as a multiple of the font size (20px at the default 16px).
 const ROW_RATIO: f32 = 1.25;
@@ -236,6 +239,8 @@ pub struct Viewer {
     buffer: Buffer,
     vim: Vim,
     language: Option<LanguageId>,
+    /// Too long for syntax features: edited as plain text.
+    plain: bool,
     trail: Option<SelectionTrail>,
     /// Usages of the word at `key` that a language server found.
     semantic: Option<(HighlightKey, Arc<Vec<Range<usize>>>)>,
@@ -301,7 +306,8 @@ impl Viewer {
         let editable = text.is_ok();
         let text = text.unwrap_or_else(|message| message);
         let buffer = Buffer::new(&text);
-        let language = language_for_path(relative);
+        let plain = editable && buffer.line_count() > SYNTAX_LINE_LIMIT;
+        let language = language_for_path(relative).filter(|_| !plain);
         let mut viewer = Self {
             find: None,
             path: relative.to_string(),
@@ -312,6 +318,7 @@ impl Viewer {
             notice: None,
             vim: Vim::default(),
             language,
+            plain,
             trail: None,
             semantic: None,
             lines: Arc::default(),
@@ -345,6 +352,11 @@ impl Viewer {
         };
         viewer.rebuild();
         viewer
+    }
+
+    /// True when the file was too long for syntax features and is edited as plain text.
+    pub fn is_plain(&self) -> bool {
+        self.plain
     }
 
     /// Records who last changed each line of the file on disk (`None`: git has no answer).
@@ -1521,7 +1533,9 @@ impl Viewer {
         self.refresh_changes();
         self.refresh_squiggles();
         self.outline = match stub_language(&self.path) {
-            Some(language) if self.editable => extract_nodes(language, &self.buffer.text()),
+            Some(language) if self.editable && !self.plain => {
+                extract_nodes(language, &self.buffer.text())
+            }
             _ => Vec::new(),
         };
         let line_of = |byte: u32| {
@@ -3160,6 +3174,32 @@ mod tests {
         assert_eq!(shown(&viewer).len(), 8);
         viewer.toggle_fold(1); // no region starts on this line
         assert_eq!(shown(&viewer).len(), 8);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_file_over_the_line_limit_opens_as_plain_text() {
+        let block = "fn f() {\n    1;\n}\n";
+        let small = block.repeat(10);
+        let large = block.repeat(SYNTAX_LINE_LIMIT / 3 + 10);
+        let (dir, file) = temp_file_as("limit-small", "a.rs", &small);
+        let viewer = Viewer::open(&dir, &file);
+        assert!(!viewer.is_plain());
+        assert!(!viewer.folds.is_empty() && !viewer.outline.is_empty());
+        assert!(viewer.lines.iter().any(|line| !line.colors.is_empty()));
+        fs::remove_dir_all(dir).unwrap();
+
+        let (dir, file) = temp_file_as("limit-large", "a.rs", &large);
+        let mut viewer = Viewer::open(&dir, &file);
+        assert!(viewer.is_plain());
+        assert!(viewer.folds.is_empty() && viewer.outline.is_empty());
+        assert!(viewer.lines.iter().all(|line| line.colors.is_empty()));
+        // still an editor: it edits, and pair matching and selection are off
+        type_keys(&mut viewer, "ix");
+        viewer.handle_key(Key::Esc);
+        assert!(viewer.is_dirty());
+        assert!(viewer.text().starts_with("xfn f()"));
+        assert!(viewer.folds.is_empty() && viewer.outline.is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
 }
