@@ -12,6 +12,7 @@ use std::{
 };
 
 use gpui_kit::*;
+use zide_git::BlameLine;
 use zide_stubs::{StubKind, StubNode, extract_nodes, language_for_path as stub_language};
 use zide_syntax::{
     Class, FoldRegion, LanguageId, Span, fold_regions, highlight, language_for_path,
@@ -212,6 +213,8 @@ pub struct Viewer {
     outline: Vec<StubNode>,
     /// Name of the project folder, first crumb of the breadcrumb.
     root_name: String,
+    /// Who last changed each line of the file on disk, when git knows it.
+    blame: Option<Arc<Vec<BlameLine>>>,
 }
 
 impl Viewer {
@@ -258,9 +261,24 @@ impl Viewer {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            blame: None,
         };
         viewer.rebuild();
         viewer
+    }
+
+    /// Records who last changed each line of the file on disk (`None`: git has no answer).
+    pub fn set_blame(&mut self, blame: Option<Vec<BlameLine>>) {
+        self.blame = blame.map(Arc::new);
+    }
+
+    /// The blame of the cursor's line, in gray after the code. Only while the buffer is what is
+    /// on disk: after an edit the lines no longer match what git saw.
+    fn blame_label(&self) -> Option<String> {
+        if self.is_dirty() {
+            return None;
+        }
+        Some(self.blame.as_ref()?.get(self.cursor_line())?.label())
     }
 
     /// Puts the cursor on 1-based `line` and brings it into view.
@@ -294,21 +312,27 @@ impl Viewer {
 
     /// Writes the buffer to its file when it has unsaved changes. Refuses to overwrite a file
     /// that changed on disk since it was read: the notice says so and the edits stay in memory.
-    pub fn save(&mut self) {
+    /// True when it wrote the file (its blame is then out of date).
+    pub fn save(&mut self) -> bool {
         if !self.is_dirty() {
-            return;
+            return false;
         }
         if disk_stamp(&self.full_path) != self.disk {
             self.notice = Some("not saved: the file changed on disk".into());
-            return;
+            return false;
         }
         match fs::write(&self.full_path, self.buffer.text()) {
             Ok(()) => {
                 self.saved_at = self.buffer.revision();
                 self.disk = disk_stamp(&self.full_path);
                 self.notice = None;
+                self.blame = None;
+                true
             }
-            Err(e) => self.notice = Some(format!("not saved: {e}")),
+            Err(e) => {
+                self.notice = Some(format!("not saved: {e}"));
+                false
+            }
         }
     }
 
@@ -1179,6 +1203,7 @@ impl Viewer {
         let starts: BTreeSet<usize> = self.folds.iter().map(|r| r.start_line).collect();
         let digits = lines.len().to_string().len();
         let (cursor_line, cursor_cell) = self.cursor_cell();
+        let blame = self.blame_label();
         let insert = self.vim.mode() == Mode::Insert;
         let selection = self
             .vim
@@ -1302,6 +1327,15 @@ impl Viewer {
                                 })),
                         )
                         .child(StyledText::new(text).with_highlights(colors))
+                        .children(blame.clone().filter(|_| row == cursor_line).map(|label| {
+                            div()
+                                .flex_shrink_0()
+                                .ml_6()
+                                .whitespace_nowrap()
+                                .italic()
+                                .text_color(rgb(theme::DIM))
+                                .child(label)
+                        }))
                         .children(folded.contains(&row).then(|| {
                             div()
                                 .px_1()
@@ -1843,6 +1877,32 @@ mod tests {
         viewer.save();
         assert!(!viewer.is_dirty());
         assert_eq!(fs::read_to_string(dir.join(&file)).unwrap(), "two\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn blame_shows_for_the_cursor_line_until_the_buffer_is_edited_or_saved() {
+        let (dir, file) = temp_file("blame", "one\ntwo\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        assert_eq!(viewer.blame_label(), None); // git has not answered yet
+        let entry = |summary: &str| BlameLine {
+            author: "Sergio Molina".into(),
+            time: 0,
+            tz_minutes: 0,
+            summary: summary.into(),
+            committed: true,
+        };
+        viewer.set_blame(Some(vec![entry("first"), entry("second")]));
+        assert_eq!(
+            viewer.blame_label().as_deref(),
+            Some("Molina, 1/1/70, 12:00 AM \u{2022} first")
+        );
+        type_keys(&mut viewer, "j");
+        assert!(viewer.blame_label().unwrap().ends_with("second"));
+        type_keys(&mut viewer, "x");
+        assert_eq!(viewer.blame_label(), None); // edited: the lines no longer match
+        assert!(viewer.save());
+        assert_eq!(viewer.blame_label(), None); // saved: waits for the new blame
         fs::remove_dir_all(dir).unwrap();
     }
 

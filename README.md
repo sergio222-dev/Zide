@@ -25,6 +25,7 @@ Only Linux x86_64 is published for now.
 - **Find and replace** in the file (with regex, case and whole-word toggles) and Find in Files.
 - **Find Usages** (`Alt+F7`): semantic through a language server, text search as a fallback.
 - **Code folding** for blocks, declarations, imports and long comments, with gutter chevrons.
+- **Git blame** in gray after the cursor line: author's last name, date, time and commit summary.
 - **Project tree** panel, with IntelliJ ordering and reveal of the open file.
 - **Syntax highlighting** with tree-sitter (Rust, JavaScript, TypeScript, TSX, Go, Python).
 - **Breadcrumb** with the enclosing symbols at the cursor.
