@@ -6,20 +6,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// One small file per project and kind of fact, named after the project's path.
-fn file_for(root: &Path, kind: &str) -> Option<PathBuf> {
-    let name = root.to_string_lossy().replace(['/', '\\', ':'], "_");
-    Some(
-        dirs::data_dir()?
-            .join("zide")
-            .join("sessions")
-            .join(format!("{name}.{kind}")),
-    )
+/// Folder inside the project where Zide keeps what it remembers about it, so what a project
+/// costs in space is visible there.
+const FOLDER: &str = ".zide";
+
+/// One small file per kind of fact, in the project's `.zide` folder.
+fn file_for(root: &Path, kind: &str) -> PathBuf {
+    root.join(FOLDER).join(kind)
 }
 
 /// The file (relative to `root`) that was open last, if it still exists.
 pub fn last_file(root: &Path) -> Option<String> {
-    let relative = fs::read_to_string(file_for(root, "last-file")?).ok()?;
+    let relative = fs::read_to_string(file_for(root, "last-file")).ok()?;
     let relative = relative.trim();
     root.join(relative).is_file().then(|| relative.to_string())
 }
@@ -32,7 +30,7 @@ pub fn remember_file(root: &Path, relative: &str) {
 
 /// The editor font size this project was left with.
 pub fn font_size(root: &Path) -> Option<f32> {
-    let size: f32 = fs::read_to_string(file_for(root, "font-size")?)
+    let size: f32 = fs::read_to_string(file_for(root, "font-size"))
         .ok()?
         .trim()
         .parse()
@@ -58,7 +56,7 @@ const MAX_VIEWS: usize = 100;
 
 /// Where `relative` was left, if it was.
 pub fn view(root: &Path, relative: &str) -> Option<View> {
-    let text = fs::read_to_string(file_for(root, "views")?).ok()?;
+    let text = fs::read_to_string(file_for(root, "views")).ok()?;
     text.lines().find_map(|entry| parse_view(entry, relative))
 }
 
@@ -67,9 +65,7 @@ pub fn remember_view(root: &Path, relative: &str, view: View) {
     if relative.contains(['\t', '\n']) {
         return;
     }
-    let Some(file) = file_for(root, "views") else {
-        return;
-    };
+    let file = file_for(root, "views");
     let old = fs::read_to_string(&file).unwrap_or_default();
     let mut entries = vec![format!(
         "{}\t{}\t{}\t{relative}",
@@ -96,12 +92,18 @@ fn parse_view(entry: &str, relative: &str) -> Option<View> {
     })
 }
 
+/// Creates the folder with a `.gitignore` that ignores it whole, so the project's own
+/// `.gitignore` stays untouched.
 fn write(root: &Path, kind: &str, content: &str) {
-    let Some(file) = file_for(root, kind) else {
-        return;
-    };
+    let file = file_for(root, kind);
     if let Some(folder) = file.parent() {
-        let _ = fs::create_dir_all(folder);
+        if fs::create_dir_all(folder).is_err() {
+            return;
+        }
+        let ignore = folder.join(".gitignore");
+        if !ignore.exists() {
+            let _ = fs::write(ignore, "*\n");
+        }
     }
     let _ = fs::write(file, content);
 }
@@ -121,13 +123,17 @@ mod tests {
         assert_eq!(last_file(&root).as_deref(), Some("src/a.rs"));
         fs::remove_file(root.join("src/a.rs")).unwrap();
         assert_eq!(last_file(&root), None);
-        fs::remove_file(file_for(&root, "last-file").unwrap()).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join(".zide/.gitignore")).unwrap(),
+            "*\n"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn each_file_keeps_where_it_was_left_and_the_oldest_are_forgotten() {
         let root = std::env::temp_dir().join(format!("zide-views-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
         let place = |top| View {
             top,
             line: top + 2,
@@ -147,17 +153,18 @@ mod tests {
         assert_eq!(view(&root, "f99.rs"), Some(place(99)));
         remember_view(&root, "tab\there", place(1)); // not storable: ignored
         assert_eq!(view(&root, "tab\there"), None);
-        fs::remove_file(file_for(&root, "views").unwrap()).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn the_font_size_is_remembered_per_project() {
         let root = std::env::temp_dir().join(format!("zide-font-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
         assert_eq!(font_size(&root), None);
         remember_font_size(&root, 21.5);
         assert_eq!(font_size(&root), Some(21.5));
-        fs::write(file_for(&root, "font-size").unwrap(), "big").unwrap();
+        fs::write(file_for(&root, "font-size"), "big").unwrap();
         assert_eq!(font_size(&root), None);
-        fs::remove_file(file_for(&root, "font-size").unwrap()).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }
