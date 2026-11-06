@@ -16,6 +16,7 @@ use std::{
 
 mod file_icon;
 mod indent;
+mod markdown;
 mod meter;
 mod projects;
 mod rows;
@@ -63,6 +64,7 @@ actions!(
         FindInFiles,
         RecentFiles,
         ToggleProjectTree,
+        ToggleMarkdownPreview,
         FindUsages,
         ReformatCode,
         ExtendSelection,
@@ -154,6 +156,13 @@ fn action_registry() -> Vec<ActionDef> {
             action: Some(Box::new(ToggleProjectTree)),
             closes_popup: true,
             run: |ws, _, cx| ws.toggle_tree(cx),
+        },
+        ActionDef {
+            name: "Toggle Markdown Preview",
+            synonyms: &["markdown", "md", "render"],
+            action: Some(Box::new(ToggleMarkdownPreview)),
+            closes_popup: true,
+            run: |ws, _, cx| ws.toggle_md_preview(cx),
         },
         ActionDef {
             name: "Recent Files",
@@ -327,6 +336,10 @@ struct Workspace {
     /// The project tree on the left.
     tree: Tree,
     tree_visible: bool,
+    /// The rendered Markdown beside the editor (Ctrl+Shift+M), for `.md` files.
+    md_preview: bool,
+    /// The open Markdown file's text as a cheaply cloned shared string, rebuilt only when it changes.
+    md_source: Option<(String, Revision, SharedString)>,
     /// Keys go to the tree instead of the editor.
     tree_focused: bool,
     /// A `g` was typed in the tree (`gg` goes to the top).
@@ -413,6 +426,8 @@ impl Workspace {
             meter: meter::FrameMeter::from_env(),
             tree: Tree::new(),
             tree_visible: false,
+            md_preview: false,
+            md_source: None,
             tree_focused: false,
             tree_g: false,
             highlight_requested: None,
@@ -1361,6 +1376,56 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Ctrl+Shift+M: shows or hides the rendered Markdown beside the editor.
+    fn toggle_md_preview(&mut self, cx: &mut Context<Self>) {
+        self.md_preview = !self.md_preview;
+        cx.notify();
+    }
+
+    /// The preview of the open file, when it is Markdown and the preview is on. The text is
+    /// copied out of the buffer only when its revision changed.
+    fn markdown_preview(&mut self, cx: &mut Context<Self>) -> Option<markdown::TextView> {
+        let viewer = self
+            .viewer
+            .as_ref()
+            .filter(|v| markdown::is_markdown(v.path()))?;
+        if !self.md_preview {
+            return None;
+        }
+        let key = (viewer.path(), viewer.revision());
+        let stale = self
+            .md_source
+            .as_ref()
+            .is_none_or(|(path, rev, _)| (path.as_str(), *rev) != key);
+        if stale {
+            let source = SharedString::from(viewer.text());
+            self.md_source = Some((key.0.to_string(), key.1, source));
+        }
+        let (current, _, source) = self.md_source.as_ref()?;
+        let workspace = cx.entity();
+        Some(markdown::preview(
+            source.clone(),
+            self.root.clone(),
+            current.clone(),
+            move |path, cx| {
+                workspace.update(cx, |this, cx| this.open_link(&path, cx));
+            },
+        ))
+    }
+
+    /// A click on a link of the Markdown preview: opens the project file it names, if any.
+    fn open_link(&mut self, path: &str, cx: &mut Context<Self>) {
+        let known = self
+            .index
+            .as_ref()
+            .is_some_and(|index| index.paths().iter().any(|p| p == path));
+        if known {
+            self.open_file(path, None, cx);
+            self.tree_focused = false;
+            cx.notify();
+        }
+    }
+
     /// Ctrl+H / Ctrl+L: moves the focus to the project tree (showing it if hidden) or back to
     /// the editor.
     fn focus_tree(&mut self, tree: bool, cx: &mut Context<Self>) {
@@ -2017,6 +2082,7 @@ impl Workspace {
         self.request_highlights(cx);
         self.request_diagnostics(cx);
 
+        let preview = self.markdown_preview(cx);
         let mut root = div()
             .id("workspace")
             .size_full()
@@ -2063,6 +2129,9 @@ impl Workspace {
                 }),
             )
             .on_action(cx.listener(|this, _: &ToggleProjectTree, _, cx| this.toggle_tree(cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleMarkdownPreview, _, cx| this.toggle_md_preview(cx)),
+            )
             .on_action(cx.listener(|this, _: &FindUsages, window, cx| this.find_usages(window, cx)))
             .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
             .on_action(cx.listener(|this, _: &FocusTree, _, cx| this.focus_tree(true, cx)))
@@ -2163,7 +2232,17 @@ impl Workspace {
                         None => div().flex_1().p_4().text_color(rgb(theme::DIM)).child(
                             "Press Space twice to open the popup. Alt+1 shows the project tree.",
                         ),
-                    }),
+                    })
+                    .children(preview.map(|view| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .p_4()
+                            .border_l_1()
+                            .border_color(rgb(theme::BORDER))
+                            .child(view)
+                    })),
             );
 
         let Some(popup) = &self.popup else {
@@ -2705,6 +2784,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-f", FindInFiles, Some("Workspace")),
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
             KeyBinding::new("alt-f7", FindUsages, Some("Workspace")),
             KeyBinding::new("ctrl-alt-l", ReformatCode, Some("Workspace")),
             KeyBinding::new("ctrl-h", FocusTree, Some("Workspace")),
