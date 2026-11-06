@@ -96,6 +96,8 @@ const UPDATE_REPO: &str = "sergio222-dev/Zide";
 const MAX_FILE_RESULTS: usize = 200;
 const MAX_SYMBOL_RESULTS: usize = 200;
 const MAX_RECENT: usize = 50;
+/// Height of a row of the project tree, in pixels.
+const TREE_ROW_HEIGHT: f32 = 22.;
 const MAX_TEXT_RESULTS: usize = 1000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1522,6 +1524,10 @@ impl Workspace {
                 self.tree.collapse();
                 TreeOutcome::None
             }
+            (_, Some(Key::Ctrl(c @ ('d' | 'u')))) => {
+                self.tree.move_half_page(self.tree_visible_rows(), c == 'd');
+                TreeOutcome::None
+            }
             (_, Some(Key::Enter)) => self.tree.activate(),
             (_, Some(Key::Char('G'))) => {
                 self.tree.select_last();
@@ -1542,6 +1548,17 @@ impl Workspace {
             _ => TreeOutcome::None,
         };
         self.apply_tree_outcome(outcome, cx);
+    }
+
+    /// How many tree rows fit on screen, as of the last layout.
+    fn tree_visible_rows(&self) -> usize {
+        self.tree_scroll
+            .0
+            .borrow()
+            .last_item_size
+            .map_or(0, |size| {
+                (f32::from(size.item.height) / TREE_ROW_HEIGHT) as usize
+            })
     }
 
     fn apply_tree_outcome(&mut self, outcome: TreeOutcome, cx: &mut Context<Self>) {
@@ -1570,7 +1587,7 @@ impl Workspace {
                     };
                     let line = div()
                         .id(("tree-row", index))
-                        .h(px(22.))
+                        .h(px(TREE_ROW_HEIGHT))
                         .flex()
                         .items_center()
                         .gap_1()

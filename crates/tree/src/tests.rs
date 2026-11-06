@@ -133,3 +133,24 @@ fn click_selects_and_acts_like_enter() {
     assert_eq!(t.click(1), Outcome::Open("d/f.rs".into()));
     assert_eq!(t.selected(), Some(1));
 }
+
+#[test]
+fn half_a_page_moves_half_the_visible_rows_and_stops_at_the_ends() {
+    let files: Vec<String> = (0..30).map(|i| format!("f{i:02}")).collect();
+    let files: Vec<&str> = files.iter().map(String::as_str).collect();
+    let mut t = tree(&files, &[]);
+    t.select(0);
+    t.move_half_page(10, true);
+    assert_eq!(t.selected(), Some(5));
+    t.move_half_page(10, true);
+    assert_eq!(t.selected(), Some(10));
+    t.move_half_page(10, false);
+    assert_eq!(t.selected(), Some(5));
+    t.move_half_page(100, true); // half of 100 is past the last row
+    assert_eq!(t.selected(), Some(29));
+    t.move_half_page(100, false);
+    t.move_half_page(100, false);
+    assert_eq!(t.selected(), Some(0));
+    t.move_half_page(0, true); // nothing laid out yet: still one row
+    assert_eq!(t.selected(), Some(1));
+}

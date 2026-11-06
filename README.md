@@ -121,6 +121,9 @@ line says a new release is available.
 Vim fold keys (`za`, `zo`, `zc`, `zM`, `zR`) and scroll keys (`zt`, `zz`, `zb`, `Ctrl+D`,
 `Ctrl+U`) work in normal mode.
 
+In the project tree (`Alt+1` focuses it): `j` / `k` / `h` / `l` or the arrows move and expand,
+`gg` / `G` go to the first / last row, `Ctrl+D` / `Ctrl+U` move half a page, `Enter` opens.
+
 ### Frame rate (debug)
 
 `ZIDE_FPS=1 zide` shows an overlay with the rate of the burst of frames in progress (a scroll
