@@ -5,6 +5,7 @@ use std::{
     fs,
     ops::Range,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
     time::SystemTime,
     time::{Duration, Instant},
@@ -40,6 +41,9 @@ const EDITOR_FONTS: &[&str] = &[
     "Menlo",
     "Consolas",
 ];
+
+/// Called with the start line of the region whose chevron was clicked.
+pub type FoldClick = Rc<dyn Fn(usize, &mut App)>;
 
 struct Line {
     /// Char offset of the line in the buffer, and its length in chars.
@@ -1035,8 +1039,18 @@ impl Viewer {
         }
     }
 
+    /// Folds the region that starts on `line`, or opens it when it is folded (a click on its
+    /// chevron). The cursor goes to the fold's first line if it was inside.
+    pub fn toggle_fold(&mut self, line: usize) {
+        if !self.collapsed.remove(&line) && self.folds.iter().any(|r| r.start_line == line) {
+            self.collapsed.insert(line);
+        }
+        self.rebuild_rows();
+        self.snap_cursor(usize::MAX);
+    }
+
     /// `za`, `zo`, `zc`, `zM`, `zR`.
-    fn fold_command(&mut self, command: char) {
+    pub fn fold_command(&mut self, command: char) {
         let line = self.cursor_line();
         let folded = self.collapsed.contains(&line);
         match command {
@@ -1152,7 +1166,8 @@ impl Viewer {
             .child(symbols)
     }
 
-    pub fn render(&self) -> Div {
+    /// `on_fold` is called with the start line of the region whose chevron was clicked.
+    pub fn render(&self, on_fold: FoldClick) -> Div {
         let lines = self.lines.clone();
         let rows = self.rows.clone();
         let folded: BTreeSet<usize> = self
@@ -1161,6 +1176,7 @@ impl Viewer {
             .copied()
             .filter(|line| rows.shows(*line))
             .collect();
+        let starts: BTreeSet<usize> = self.folds.iter().map(|r| r.start_line).collect();
         let digits = lines.len().to_string().len();
         let (cursor_line, cursor_cell) = self.cursor_cell();
         let insert = self.vim.mode() == Mode::Insert;
@@ -1223,7 +1239,7 @@ impl Viewer {
                     }
                     // The caret is drawn on the cell grid, so it is as wide on a space or
                     // a thin letter as on any other character.
-                    let gutter = (12. * digits as f32 + 16.) * scale;
+                    let gutter = (12. * digits as f32 + 28.) * scale;
                     let caret = (row == cursor_line).then(|| {
                         let column = text[..cursor_cell.start.min(text.len())].chars().count();
                         let left = px(gutter + column as f32 * cell_width);
@@ -1262,12 +1278,28 @@ impl Viewer {
                         .children(bands)
                         .child(
                             div()
+                                .relative()
                                 .flex_shrink_0()
                                 .w(px(gutter))
                                 .pr_3()
                                 .text_right()
                                 .text_color(rgb(theme::DIM))
-                                .child((row + 1).to_string()),
+                                .child((row + 1).to_string())
+                                .children(starts.contains(&row).then(|| {
+                                    let on_fold = on_fold.clone();
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .left(px(2. * scale))
+                                        .w(px(14. * scale))
+                                        .h(px(row_height))
+                                        .text_center()
+                                        .cursor_pointer()
+                                        .child(if folded.contains(&row) { "▸" } else { "▾" })
+                                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                            on_fold(row, cx)
+                                        })
+                                })),
                         )
                         .child(StyledText::new(text).with_highlights(colors))
                         .children(folded.contains(&row).then(|| {
@@ -2109,6 +2141,21 @@ mod tests {
         type_keys(&mut viewer, "zcjjjjx"); // fold `a`, delete a char in `b`
         assert_eq!(shown(&viewer), [0, 4, 5, 6, 7]);
         assert!(viewer.is_dirty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn clicking_a_chevron_toggles_the_region_that_starts_on_its_line() {
+        let (dir, file) = temp_file_as("fold-click", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "j");
+        viewer.toggle_fold(0);
+        assert_eq!(shown(&viewer), [0, 4, 5, 6, 7]);
+        assert_eq!(cursor_line(&viewer), 0); // it was inside the fold
+        viewer.toggle_fold(0);
+        assert_eq!(shown(&viewer).len(), 8);
+        viewer.toggle_fold(1); // no region starts on this line
+        assert_eq!(shown(&viewer).len(), 8);
         fs::remove_dir_all(dir).unwrap();
     }
 }

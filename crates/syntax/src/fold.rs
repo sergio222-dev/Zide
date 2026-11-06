@@ -70,6 +70,24 @@ fn rules_for(extension: &str) -> Option<Rules> {
                 node.kind() == "comment" && source[node.start_byte()..].starts_with("/*")
             },
         }),
+        "go" => Some(Rules {
+            blocks: &[
+                "block",
+                "field_declaration_list",
+                "interface_type",
+                "literal_value",
+                "import_spec_list",
+                "var_declaration",
+                "const_declaration",
+            ],
+            imports: &["import_declaration"],
+            line_comment: |source, node| {
+                node.kind() == "comment" && source[node.start_byte()..].starts_with("//")
+            },
+            block_comment: |source, node| {
+                node.kind() == "comment" && source[node.start_byte()..].starts_with("/*")
+            },
+        }),
         _ => None,
     }
 }
@@ -270,6 +288,20 @@ mod tests {
 
     #[test]
     fn a_language_without_rules_has_no_regions() {
-        assert_eq!(regions("a.go", "func f() {\n}\n"), []);
+        assert_eq!(regions("a.py", "def f():\n    pass\n"), []);
+    }
+
+    #[test]
+    fn go_folds_imports_types_and_function_bodies() {
+        let source = "package main\n\nimport (\n\t\"a\"\n\t\"b\"\n)\n\ntype S struct {\n\tx int\n}\n\nfunc f() {\n\tif x {\n\t\ty()\n\t}\n}\n";
+        assert_eq!(
+            regions("a.go", source),
+            [
+                (2, 5, FoldKind::Imports),
+                (7, 9, FoldKind::Block),
+                (11, 15, FoldKind::Block),
+                (12, 14, FoldKind::Block),
+            ]
+        );
     }
 }
