@@ -2,7 +2,7 @@
 
 use std::{
     cell::RefCell,
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     fs,
     ops::Range,
     path::{Path, PathBuf},
@@ -13,7 +13,7 @@ use std::{
 };
 
 use gpui_kit::*;
-use zide_git::BlameLine;
+use zide_git::{BlameLine, LineChange};
 use zide_stubs::{StubKind, StubNode, extract_nodes, language_for_path as stub_language};
 use zide_syntax::{
     Class, FoldRegion, LanguageId, Span, fold_regions, highlight, language_for_path,
@@ -223,6 +223,10 @@ pub struct Viewer {
     root_name: String,
     /// Who last changed each line of the file on disk, when git knows it.
     blame: Option<Arc<Vec<BlameLine>>>,
+    /// The file as of the last commit, to mark what changed since.
+    head: Option<Arc<String>>,
+    /// The lines that differ from `head`, as of the current text.
+    changes: Arc<HashMap<usize, LineChange>>,
     /// The two ends of the pair under the caret (char ranges), for the revision and caret
     /// they were found at.
     pair: RefCell<Option<(PairKey, Pair)>>,
@@ -278,6 +282,8 @@ impl Viewer {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             blame: None,
+            head: None,
+            changes: Arc::default(),
             pair: RefCell::new(None),
         };
         viewer.rebuild();
@@ -287,6 +293,20 @@ impl Viewer {
     /// Records who last changed each line of the file on disk (`None`: git has no answer).
     pub fn set_blame(&mut self, blame: Option<Vec<BlameLine>>) {
         self.blame = blame.map(Arc::new);
+    }
+
+    /// Records the file as of the last commit (`None`: nothing to compare with) and marks the
+    /// lines that differ from it.
+    pub fn set_head(&mut self, head: Option<String>) {
+        self.head = head.map(Arc::new);
+        self.refresh_changes();
+    }
+
+    fn refresh_changes(&mut self) {
+        self.changes = Arc::new(match &self.head {
+            Some(head) if self.editable => zide_git::line_changes(head, &self.buffer.text()),
+            _ => HashMap::new(),
+        });
     }
 
     /// The blame of the cursor's line, in gray after the code. Only while the buffer is what is
@@ -1189,6 +1209,7 @@ impl Viewer {
         let starts: BTreeSet<usize> = self.folds.iter().map(|r| r.start_line).collect();
         self.collapsed.retain(|line| starts.contains(line));
         self.rebuild_rows();
+        self.refresh_changes();
         self.outline = match stub_language(&self.path) {
             Some(language) if self.editable => extract_nodes(language, &self.buffer.text()),
             _ => Vec::new(),
@@ -1301,6 +1322,7 @@ impl Viewer {
         let digits = lines.len().to_string().len();
         let (cursor_line, cursor_cell) = self.cursor_cell();
         let blame = self.blame_label();
+        let changes = self.changes.clone();
         let insert = self.vim.mode() == Mode::Insert;
         let selection = self
             .vim
@@ -1450,6 +1472,11 @@ impl Viewer {
                                 .text_right()
                                 .text_color(rgb(theme::DIM))
                                 .child((row + 1).to_string())
+                                .children(
+                                    changes.get(&row).map(|change| {
+                                        change_mark(*change, gutter, scale, row_height)
+                                    }),
+                                )
                                 .children(starts.contains(&row).then(|| {
                                     let on_fold = on_fold.clone();
                                     div()
@@ -1730,6 +1757,24 @@ fn expand_tabs(line: &str) -> (String, Vec<usize>) {
 }
 
 // gpui's glob import shadows `test`, hence the explicit attribute path below.
+/// The bar in the gutter, between the line number and the code, that says how the line differs
+/// from the last commit; deletions are a short notch on the line edge where the lines were.
+fn change_mark(change: LineChange, gutter: f32, scale: f32, row_height: f32) -> Div {
+    let (color, top, height) = match change {
+        LineChange::Added => (theme::CHANGE_ADDED, 0., row_height),
+        LineChange::Modified => (theme::CHANGE_MODIFIED, 0., row_height),
+        LineChange::Removed => (theme::CHANGE_REMOVED, 0., 4. * scale),
+        LineChange::RemovedBelow => (theme::CHANGE_REMOVED, row_height - 4. * scale, 4. * scale),
+    };
+    div()
+        .absolute()
+        .top(px(top))
+        .left(px(gutter - 6. * scale))
+        .w(px(3. * scale))
+        .h(px(height))
+        .bg(rgb(color))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2019,6 +2064,23 @@ mod tests {
         viewer.save();
         assert!(!viewer.is_dirty());
         assert_eq!(fs::read_to_string(dir.join(&file)).unwrap(), "two\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn lines_that_differ_from_the_last_commit_are_marked_and_follow_the_edits() {
+        let (dir, file) = temp_file("changes", "one\ntwo\nthree\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        assert!(viewer.changes.is_empty()); // git has not answered yet
+        viewer.set_head(Some("one\ntwo\nthree\n".into()));
+        assert!(viewer.changes.is_empty()); // same as the commit
+        type_keys(&mut viewer, "jdd");
+        assert_eq!(viewer.changes.get(&1), Some(&LineChange::Removed));
+        type_keys(&mut viewer, "Onew");
+        viewer.handle_key(Key::Esc);
+        assert_eq!(viewer.changes.get(&1), Some(&LineChange::Modified));
+        viewer.set_head(None); // untracked: nothing to compare with
+        assert!(viewer.changes.is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
 

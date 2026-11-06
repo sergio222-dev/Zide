@@ -551,26 +551,33 @@ impl Workspace {
     /// Saves the open file; called whenever the user's attention leaves the editor.
     fn autosave(&mut self, cx: &mut Context<Self>) {
         if self.viewer.as_mut().is_some_and(|viewer| viewer.save()) {
-            self.refresh_blame(cx);
+            self.refresh_git(cx);
         }
     }
 
-    /// Asks git, off the UI thread, who last changed each line of the open file.
-    fn refresh_blame(&mut self, cx: &mut Context<Self>) {
+    /// Asks git, off the UI thread, who last changed each line of the open file and what the last
+    /// commit had, to mark the lines that differ.
+    fn refresh_git(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path().to_string()) else {
             return;
         };
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let asked = path.clone();
-            let blame = cx
+            let (blame, head) = cx
                 .background_executor()
-                .spawn(async move { zide_git::blame(&root, &asked) })
+                .spawn(async move {
+                    (
+                        zide_git::blame(&root, &asked),
+                        zide_git::head_content(&root, &asked),
+                    )
+                })
                 .await;
             this.update(cx, |this, cx| {
                 // The viewer may have moved on to another file meanwhile.
                 if let Some(viewer) = this.viewer.as_mut().filter(|v| v.path() == path) {
                     viewer.set_blame(blame);
+                    viewer.set_head(head);
                     cx.notify();
                 }
             })
@@ -1448,7 +1455,7 @@ impl Workspace {
         }
         viewer.set_font_size(self.font_size);
         self.viewer = Some(viewer);
-        self.refresh_blame(cx);
+        self.refresh_git(cx);
         session::remember_file(&self.root, path);
         self.tree.reveal(path);
         self.tree_focused = false; // a file was opened: the keys are the editor's
