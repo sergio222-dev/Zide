@@ -69,7 +69,12 @@ const RUST: ServerSpec = ServerSpec {
     command: "rust-analyzer",
     args: &[],
     install: "rustup component add rust-analyzer",
-    native: None,
+    // rust-glancer keeps ~100 MB where rust-analyzer needs ~4 GB on a workspace this size, but
+    // has no diagnostics and no proc-macro support: it is used only when installed.
+    native: Some(Native {
+        find: crate::servers::native_rust,
+        args: &["lsp"],
+    }),
 };
 
 const TYPESCRIPT: ServerSpec = ServerSpec {

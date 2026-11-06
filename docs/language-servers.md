@@ -13,7 +13,7 @@ Zide looks for each server in this order:
 
 | Language | Files | Command | Install (pick one) |
 | --- | --- | --- | --- |
-| Rust | `.rs` | `rust-analyzer` | `rustup component add rust-analyzer` (on the `PATH`), or put the binary in `<folder>/bin/` |
+| Rust | `.rs` | `rust-glancer lsp` (low memory), else `rust-analyzer` | `rust-glancer`: put the binary from its [releases](https://github.com/rust-glancer/rust-glancer/releases) in `~/.local/share/zide/servers/bin/` (Zide's folder only). Fallback when that is absent: `rustup component add rust-analyzer` (`PATH`), or the binary in `<folder>/bin/` |
 | TypeScript / JavaScript | `.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs` | `tsc --lsp --stdio` (TypeScript 7, native) | `npm install --prefix ~/.local/share/zide/servers typescript` (Zide's folder). Fallback when that is absent: `typescript-language-server --stdio`, installed with `npm install --prefix ~/.local/share/zide/servers typescript-language-server typescript@5` or `npm install -g typescript-language-server typescript@5` (`PATH`) |
 | Go | `.go` | `gopls` | `GOBIN=~/.local/share/zide/servers/bin go install golang.org/x/tools/gopls@latest` (Zide's folder), or `go install golang.org/x/tools/gopls@latest` (`$GOPATH/bin` on the `PATH`) |
 | Python | `.py` `.pyi` | `pyright-langserver --stdio` | `npm install --prefix ~/.local/share/zide/servers pyright` (Zide's folder), or `npm install -g pyright` (`PATH`) |
@@ -35,6 +35,17 @@ If it prints an error and exits, Zide reports the same problem.
   of that language, so by the time you ask it has usually finished.
 
 Restart Zide after installing a server.
+
+## Rust: rust-glancer or rust-analyzer
+
+On a workspace the size of Zide's, rust-analyzer grows to about 4 GB as soon as it answers any
+semantic query (find usages, highlights, hints), because it loads every dependency. rust-glancer
+stays around 100 MB and answered Find Usages in half a second.
+
+It is used only when its binary is in Zide's folder, never from the `PATH`. Its limits: no
+diagnostics, no proc-macro support (usages inside macro-generated code are missed), and it indexes
+on save, so the buffers you have not saved are analysed less precisely. Remove the binary to go
+back to rust-analyzer.
 
 ## TypeScript 7
 
