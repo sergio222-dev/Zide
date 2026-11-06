@@ -183,6 +183,21 @@ pub fn check(http: &dyn Http, repo: &str, current: &Version) -> Result<Option<Up
     Ok(find_update(current, &latest_release(http, repo)?, target))
 }
 
+/// Whether finding `found` deserves a notification. Not when that version (or a newer one) is
+/// already installed and only waits for a restart, and not when it was announced before, unless
+/// the user `asked` for the check. A newer release than the announced one is announced again.
+pub fn should_announce(
+    found: &Version,
+    announced: Option<&Version>,
+    installed: Option<&Version>,
+    asked: bool,
+) -> bool {
+    if installed.is_some_and(|installed| installed >= found) {
+        return false;
+    }
+    asked || announced != Some(found)
+}
+
 fn public_key() -> Result<PublicKey, Error> {
     public_key_from(PUBLIC_KEY)
 }
@@ -266,6 +281,32 @@ mod tests {
     use std::{collections::HashMap, io::Cursor};
 
     use super::*;
+
+    #[test]
+    fn a_release_is_announced_once_per_version() {
+        assert!(should_announce(&v("0.2.0"), None, None, false));
+        assert!(!should_announce(
+            &v("0.2.0"),
+            Some(&v("0.2.0")),
+            None,
+            false
+        ));
+        assert!(should_announce(&v("0.3.0"), Some(&v("0.2.0")), None, false));
+    }
+
+    #[test]
+    fn asking_announces_it_again() {
+        assert!(should_announce(&v("0.2.0"), Some(&v("0.2.0")), None, true));
+    }
+
+    #[test]
+    fn an_installed_release_is_never_announced_again() {
+        let installed = v("0.2.0");
+        assert!(!should_announce(&v("0.2.0"), None, Some(&installed), false));
+        assert!(!should_announce(&v("0.2.0"), None, Some(&installed), true));
+        assert!(!should_announce(&v("0.1.5"), None, Some(&installed), true));
+        assert!(should_announce(&v("0.3.0"), None, Some(&installed), false));
+    }
 
     struct Fake(HashMap<String, Vec<u8>>);
 

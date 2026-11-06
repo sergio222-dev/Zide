@@ -6,7 +6,7 @@
 
 use std::{
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -95,6 +95,8 @@ struct TextOptions {
 
 /// GitHub repository releases are published to.
 const UPDATE_REPO: &str = "sergio222-dev/Zide";
+/// How often a running Zide looks for a newer release.
+const UPDATE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const MAX_FILE_RESULTS: usize = 200;
 const MAX_SYMBOL_RESULTS: usize = 200;
 const MAX_RECENT: usize = 50;
@@ -267,7 +269,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["upgrade", "check for updates", "new version"],
             action: None,
             closes_popup: true,
-            run: |ws, _, cx| ws.update_zide(cx),
+            run: |_, _, cx| cx.emit(UpdateRequested),
         },
         ActionDef {
             name: "Quit",
@@ -354,6 +356,11 @@ struct MdPreview {
     synced_top: Option<usize>,
 }
 
+/// The user asked for "Update Zide"; the [`Shell`] owns updates, so the workspace only asks.
+struct UpdateRequested;
+
+impl EventEmitter<UpdateRequested> for Workspace {}
+
 struct Workspace {
     focus: FocusHandle,
     /// Editor font size, changed with Ctrl+wheel and shared by every file.
@@ -407,10 +414,7 @@ struct Workspace {
     symbols: Option<Arc<StubStore>>,
     registry: std::rc::Rc<Vec<ActionDef>>,
     action_texts: Vec<ActionText>,
-    /// A newer release found by the startup check or by "Update Zide".
-    update: Option<zide_update::Update>,
-    updating: bool,
-    /// Where the update notifications are shown.
+    /// Where notifications are shown.
     window: AnyWindowHandle,
 }
 
@@ -488,12 +492,9 @@ impl Workspace {
                 })
                 .collect(),
             registry: std::rc::Rc::new(registry),
-            update: None,
-            updating: false,
             window: window.window_handle(),
         };
         workspace.rescan(cx);
-        workspace.check_for_update(false, cx);
         if let Some(size) = session::font_size(&workspace.root) {
             workspace.font_size = size.clamp(viewer::MIN_FONT_SIZE, viewer::MAX_FONT_SIZE);
         }
@@ -1078,11 +1079,8 @@ impl Workspace {
         }
     }
 
-    /// Tells the user something about updates: a notification, and the editor's status line
-    /// (when a file is open).
-    fn update_notice(&mut self, text: String, cx: &mut Context<Self>) {
-        eprintln!("update: {text}");
-        self.notify(Notification::info(text.clone()), cx);
+    /// Shows `text` in the editor's status line (when a file is open).
+    fn set_notice(&mut self, text: String, cx: &mut Context<Self>) {
         if let Some(viewer) = &mut self.viewer {
             viewer.set_notice(Some(text));
         }
@@ -1095,93 +1093,6 @@ impl Workspace {
                 window.push_notification(notification.placement(Anchor::BottomRight), cx)
             })
             .ok();
-    }
-
-    /// The startup notification: a newer release exists and the button installs it.
-    fn announce_update(&self, version: &zide_update::Version, cx: &mut Context<Self>) {
-        let workspace = cx.weak_entity();
-        let notification = Notification::info(format!("Zide {version} is available"))
-            .title("Update available")
-            .action(move |_, _, cx| {
-                let workspace = workspace.clone();
-                let handle = cx.entity();
-                Button::new("install-update")
-                    .primary()
-                    .label("Update")
-                    .on_click(move |_, window, cx| {
-                        workspace.update(cx, |this, cx| this.update_zide(cx)).ok();
-                        handle.update(cx, |n, cx| n.dismiss(window, cx));
-                    })
-            });
-        self.notify(notification, cx);
-    }
-
-    /// Looks for a newer release in the background. At startup (`explicit == false`) it only
-    /// speaks when there is one; asked for, it also says when there is none or it failed.
-    /// Nothing is installed here.
-    fn check_for_update(&mut self, explicit: bool, cx: &mut Context<Self>) {
-        // debug: ZIDE_FAKE_VERSION=0.0.1 makes the running version look old, to see the update notification
-        let version =
-            std::env::var("ZIDE_FAKE_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").into());
-        let Ok(current) = zide_update::Version::parse(&version) else {
-            return;
-        };
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(
-                    async move { zide_update::check(&zide_update::Online, UPDATE_REPO, &current) },
-                )
-                .await;
-            this.update(cx, |this, cx| match outcome {
-                Ok(Some(update)) => {
-                    this.announce_update(&update.version, cx);
-                    this.update = Some(update);
-                }
-                Ok(None) if explicit => this.update_notice("Zide is up to date".into(), cx),
-                Err(e) if explicit => this.update_notice(format!("update check failed: {e}"), cx),
-                _ => {}
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// "Update Zide": installs the release found earlier (or looks for one first). The new
-    /// version runs the next time Zide starts.
-    fn update_zide(&mut self, cx: &mut Context<Self>) {
-        if self.updating {
-            return;
-        }
-        let Some(update) = self.update.clone() else {
-            return self.check_for_update(true, cx);
-        };
-        let Ok(exe) = std::env::current_exe() else {
-            return self.update_notice("update failed: unknown executable path".into(), cx);
-        };
-        self.updating = true;
-        self.update_notice(format!("downloading Zide {}...", update.version), cx);
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async move { zide_update::apply(&zide_update::Online, &update, &exe) })
-                .await;
-            this.update(cx, |this, cx| {
-                this.updating = false;
-                match outcome {
-                    Ok(version) => {
-                        this.update = None;
-                        this.update_notice(
-                            format!("Zide {version} installed: restart to use it"),
-                            cx,
-                        );
-                    }
-                    Err(e) => this.update_notice(format!("update failed: {e}"), cx),
-                }
-            })
-            .ok();
-        })
-        .detach();
     }
 
     /// Reformat Code (IntelliJ's Ctrl+Alt+L): the Visual selection if there is one, else the
@@ -2924,10 +2835,21 @@ fn popup_frame(
 }
 
 /// The window's content: the welcome screen until a project is opened, then its workspace.
+/// It also owns the updates and their notifications, so they work on both screens.
 struct Shell {
     content: Content,
     _opened: Subscription,
     _activation: Option<Subscription>,
+    _update_requests: Option<Subscription>,
+    /// Where notifications are shown.
+    window: AnyWindowHandle,
+    /// A newer release found by a check and announced, waiting to be installed.
+    update: Option<zide_update::Update>,
+    updating: bool,
+    /// The release installed by this run: it starts after a restart, so it is not news again.
+    installed: Option<zide_update::Version>,
+    /// Checks at startup and then every [`UPDATE_INTERVAL`].
+    _updates: Task<()>,
 }
 
 enum Content {
@@ -2945,11 +2867,197 @@ impl Shell {
                 this.show_workspace(event.0.clone(), window, cx)
             },
         );
+        let updates = cx.spawn(async move |this, cx| {
+            loop {
+                if this
+                    .update(cx, |this, cx| this.check_for_update(false, cx))
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor().timer(UPDATE_INTERVAL).await;
+            }
+        });
         Self {
             content: Content::Welcome(welcome),
             _opened: opened,
             _activation: None,
+            _update_requests: None,
+            window: window.window_handle(),
+            update: None,
+            updating: false,
+            installed: None,
+            _updates: updates,
         }
+    }
+
+    /// Tells the user something about updates: a notification, and the editor's status line
+    /// (when a project is open).
+    fn update_notice(&mut self, text: String, cx: &mut Context<Self>) {
+        self.notify(Notification::info(text.clone()), cx);
+        self.status_notice(text, cx);
+    }
+
+    /// The status line and the log, without a toast.
+    fn status_notice(&mut self, text: String, cx: &mut Context<Self>) {
+        eprintln!("update: {text}");
+        if let Content::Workspace(workspace) = &self.content {
+            workspace.update(cx, |this, cx| this.set_notice(text, cx));
+        }
+    }
+
+    /// The update is installed: the toast stays until the user restarts into it.
+    fn announce_restart(
+        &self,
+        version: &zide_update::Version,
+        exe: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let shell = cx.weak_entity();
+        let notification = Notification::info(format!("Zide {version} is installed"))
+            .title("Restart to update")
+            .action(move |_, _, cx| {
+                let shell = shell.clone();
+                let exe = exe.clone();
+                let handle = cx.entity();
+                Button::new("restart")
+                    .primary()
+                    .label("Restart")
+                    .on_click(move |_, window, cx| {
+                        handle.update(cx, |n, cx| n.dismiss(window, cx));
+                        shell.update(cx, |this, cx| this.restart(&exe, cx)).ok();
+                    })
+            });
+        self.notify(notification, cx);
+    }
+
+    /// Starts the installed Zide on the open project (or on the welcome screen) and quits this
+    /// one. `exe` is the path the update was installed to: after the replacement the running
+    /// executable's own path reads as deleted.
+    fn restart(&mut self, exe: &Path, cx: &mut Context<Self>) {
+        self.autosave(cx);
+        let args: Vec<std::ffi::OsString> = match &self.content {
+            Content::Workspace(workspace) => vec![workspace.read(cx).root.clone().into()],
+            Content::Welcome(_) => Vec::new(),
+        };
+        match std::process::Command::new(exe).args(args).spawn() {
+            Ok(_) => cx.quit(),
+            Err(e) => self.update_notice(format!("restart failed: {e}"), cx),
+        }
+    }
+
+    fn notify(&self, notification: Notification, cx: &mut Context<Self>) {
+        self.window
+            .update(cx, |_, window, cx| {
+                window.push_notification(notification.placement(Anchor::BottomRight), cx)
+            })
+            .ok();
+    }
+
+    /// A newer release exists and the button installs it.
+    fn announce_update(&self, version: &zide_update::Version, cx: &mut Context<Self>) {
+        let shell = cx.weak_entity();
+        let notification = Notification::info(format!("Zide {version} is available"))
+            .title("Update available")
+            .action(move |_, _, cx| {
+                let shell = shell.clone();
+                let handle = cx.entity();
+                Button::new("install-update")
+                    .primary()
+                    .label("Update")
+                    .on_click(move |_, window, cx| {
+                        shell.update(cx, |this, cx| this.update_zide(cx)).ok();
+                        handle.update(cx, |n, cx| n.dismiss(window, cx));
+                    })
+            });
+        self.notify(notification, cx);
+    }
+
+    /// Looks for a newer release in the background. On its own (`explicit == false`) it only
+    /// speaks about a release it has not announced yet; asked for, it also says when there is
+    /// none or it failed. Nothing is installed here.
+    fn check_for_update(&mut self, explicit: bool, cx: &mut Context<Self>) {
+        if self.updating {
+            return;
+        }
+        // debug: ZIDE_FAKE_VERSION=0.0.1 makes the running version look old, to see the update notification
+        let version =
+            std::env::var("ZIDE_FAKE_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").into());
+        let Ok(current) = zide_update::Version::parse(&version) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(
+                    async move { zide_update::check(&zide_update::Online, UPDATE_REPO, &current) },
+                )
+                .await;
+            this.update(cx, |this, cx| match outcome {
+                Ok(Some(update)) => {
+                    let announced = this.update.as_ref().map(|known| &known.version);
+                    if zide_update::should_announce(
+                        &update.version,
+                        announced,
+                        this.installed.as_ref(),
+                        explicit,
+                    ) {
+                        this.announce_update(&update.version, cx);
+                        this.update = Some(update);
+                    } else if explicit {
+                        this.update_notice(
+                            format!("Zide {} is installed: restart to use it", update.version),
+                            cx,
+                        );
+                    }
+                }
+                Ok(None) if explicit => this.update_notice("Zide is up to date".into(), cx),
+                Err(e) if explicit => this.update_notice(format!("update check failed: {e}"), cx),
+                _ => {}
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Installs the release found earlier (or looks for one first). The new version runs the
+    /// next time Zide starts.
+    fn update_zide(&mut self, cx: &mut Context<Self>) {
+        if self.updating {
+            return;
+        }
+        let Some(update) = self.update.clone() else {
+            return self.check_for_update(true, cx);
+        };
+        let Ok(exe) = std::env::current_exe() else {
+            return self.update_notice("update failed: unknown executable path".into(), cx);
+        };
+        self.updating = true;
+        self.update_notice(format!("downloading Zide {}...", update.version), cx);
+        let installed_at = exe.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { zide_update::apply(&zide_update::Online, &update, &exe) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.updating = false;
+                match outcome {
+                    Ok(version) => {
+                        this.update = None;
+                        this.installed = Some(version.clone());
+                        this.status_notice(
+                            format!("Zide {version} installed: restart to use it"),
+                            cx,
+                        );
+                        this.announce_restart(&version, installed_at, cx);
+                    }
+                    Err(e) => this.update_notice(format!("update failed: {e}"), cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Opens `root` in this window and remembers it for the welcome screen.
@@ -2968,6 +3076,11 @@ impl Shell {
                     .ok();
             }
         }));
+        self._update_requests = Some(
+            cx.subscribe(&workspace, |this, _, _: &UpdateRequested, cx| {
+                this.update_zide(cx)
+            }),
+        );
         workspace.read(cx).focus.clone().focus(window, cx);
         self.content = Content::Workspace(workspace);
         cx.notify();
