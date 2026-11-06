@@ -25,7 +25,10 @@ mod usages;
 mod viewer;
 mod welcome;
 
+use gpui_kit::component::WindowExt;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
 use viewer::{Effect, FindStatus, FormatRequest, HighlightKey, Viewer};
 use welcome::{OpenProject, Welcome};
@@ -362,10 +365,12 @@ struct Workspace {
     /// A newer release found by the startup check or by "Update Zide".
     update: Option<zide_update::Update>,
     updating: bool,
+    /// Where the update notifications are shown.
+    window: AnyWindowHandle,
 }
 
 impl Workspace {
-    fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
+    fn new(root: PathBuf, window: &Window, cx: &mut Context<Self>) -> Self {
         // file-system changes arrive on a watcher thread; a foreground task reacts to them
         let (changes_tx, changes_rx) = async_channel::unbounded::<Change>();
         cx.spawn(async move |this, cx| {
@@ -437,6 +442,7 @@ impl Workspace {
             registry: std::rc::Rc::new(registry),
             update: None,
             updating: false,
+            window: window.window_handle(),
         };
         workspace.rescan(cx);
         workspace.check_for_update(false, cx);
@@ -1020,13 +1026,42 @@ impl Workspace {
         }
     }
 
-    /// Tells the user something about updates, in the editor's status line (when a file is open).
+    /// Tells the user something about updates: a notification, and the editor's status line
+    /// (when a file is open).
     fn update_notice(&mut self, text: String, cx: &mut Context<Self>) {
         eprintln!("update: {text}");
+        self.notify(Notification::info(text.clone()), cx);
         if let Some(viewer) = &mut self.viewer {
             viewer.set_notice(Some(text));
         }
         cx.notify();
+    }
+
+    fn notify(&self, notification: Notification, cx: &mut Context<Self>) {
+        self.window
+            .update(cx, |_, window, cx| {
+                window.push_notification(notification, cx)
+            })
+            .ok();
+    }
+
+    /// The startup notification: a newer release exists and the button installs it.
+    fn announce_update(&self, version: &zide_update::Version, cx: &mut Context<Self>) {
+        let workspace = cx.weak_entity();
+        let notification = Notification::info(format!("Zide {version} is available"))
+            .title("Update available")
+            .action(move |_, _, cx| {
+                let workspace = workspace.clone();
+                let handle = cx.entity();
+                Button::new("install-update")
+                    .primary()
+                    .label("Update")
+                    .on_click(move |_, window, cx| {
+                        workspace.update(cx, |this, cx| this.update_zide(cx)).ok();
+                        handle.update(cx, |n, cx| n.dismiss(window, cx));
+                    })
+            });
+        self.notify(notification, cx);
     }
 
     /// Looks for a newer release in the background. At startup (`explicit == false`) it only
@@ -1045,12 +1080,8 @@ impl Workspace {
                 .await;
             this.update(cx, |this, cx| match outcome {
                 Ok(Some(update)) => {
-                    let text = format!(
-                        "Zide {} is available: run \"Update Zide\" from the Actions tab",
-                        update.version
-                    );
+                    this.announce_update(&update.version, cx);
                     this.update = Some(update);
-                    this.update_notice(text, cx);
                 }
                 Ok(None) if explicit => this.update_notice("Zide is up to date".into(), cx),
                 Err(e) if explicit => this.update_notice(format!("update check failed: {e}"), cx),
@@ -2588,7 +2619,7 @@ impl Shell {
     fn show_workspace(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let root = root.canonicalize().unwrap_or(root);
         projects::record(&root);
-        let workspace = cx.new(|cx| Workspace::new(root, cx));
+        let workspace = cx.new(|cx| Workspace::new(root, window, cx));
         let saver = workspace.downgrade();
         self._activation = Some(cx.observe_window_activation(window, move |_, window, cx| {
             if !window.is_window_active() {
