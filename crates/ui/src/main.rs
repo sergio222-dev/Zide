@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod indent;
 mod session;
 mod theme;
 mod usages;

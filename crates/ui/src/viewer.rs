@@ -15,7 +15,7 @@ use zide_syntax::{Class, LanguageId, Span, highlight, language_for_path};
 use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
-use crate::theme;
+use crate::{indent, theme};
 
 /// Files larger than this are not opened.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -47,6 +47,9 @@ struct Line {
     /// Display byte of each `char` of the line (and of its end), when that is not the identity
     /// (tabs, multi-byte characters).
     cols: Option<Vec<usize>>,
+    /// How many indent bands the line has, each `step` columns wide.
+    level: usize,
+    step: usize,
 }
 
 impl Line {
@@ -1093,10 +1096,32 @@ impl Viewer {
                             caret.w(px(cell_width)).bg(rgba(0xff7a0099)) // a block you can see
                         }
                     });
+                    let bands = (0..line.level).map(|i| {
+                        let left = gutter + (i * line.step) as f32 * cell_width;
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px(left))
+                            .w(px(line.step as f32 * cell_width))
+                            .h(px(row_height))
+                            .bg(rgba(theme::INDENT_BANDS[i % theme::INDENT_BANDS.len()]))
+                    });
+                    let dots = indent::dots(&line.text).into_iter().map(|column| {
+                        let left = gutter + (column as f32 + 0.5) * cell_width - 1.;
+                        div()
+                            .absolute()
+                            .top(px(row_height / 2. - 1.))
+                            .left(px(left))
+                            .w(px(2.))
+                            .h(px(2.))
+                            .rounded_full()
+                            .bg(rgba(theme::WHITESPACE))
+                    });
                     div()
                         .relative()
                         .flex()
                         .h(px(row_height))
+                        .children(bands)
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -1107,6 +1132,7 @@ impl Viewer {
                                 .child((row + 1).to_string()),
                         )
                         .child(StyledText::new(text).with_highlights(colors))
+                        .children(dots)
                         .children(caret)
                 })
                 .collect()
@@ -1215,7 +1241,7 @@ fn style(class: Class) -> HighlightStyle {
 /// Splits the text into display lines (tabs expanded) with their colors, in line coordinates.
 fn build_lines(buffer: &Buffer, spans: &[Span]) -> Vec<Line> {
     let mut next_span = 0;
-    (0..buffer.line_count())
+    let mut lines: Vec<Line> = (0..buffer.line_count())
         .map(|index| {
             let raw = buffer.line(index);
             let start = buffer.byte_of(buffer.line_start(index));
@@ -1246,9 +1272,20 @@ fn build_lines(buffer: &Buffer, spans: &[Span]) -> Vec<Line> {
                 text,
                 colors,
                 cols,
+                level: 0,
+                step: 1,
             }
         })
-        .collect()
+        .collect();
+    let (step, levels) = {
+        let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
+        indent::levels(&texts)
+    };
+    for (line, level) in lines.iter_mut().zip(levels) {
+        line.level = level;
+        line.step = step;
+    }
+    lines
 }
 
 /// The declarations of `outline` (in source order) that contain `byte`, outermost first.
@@ -1637,6 +1674,8 @@ mod tests {
             text,
             colors: Vec::new(),
             cols: None,
+            level: 0,
+            step: 1,
         }
     }
 
