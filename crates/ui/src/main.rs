@@ -1068,7 +1068,10 @@ impl Workspace {
     /// speaks when there is one; asked for, it also says when there is none or it failed.
     /// Nothing is installed here.
     fn check_for_update(&mut self, explicit: bool, cx: &mut Context<Self>) {
-        let Ok(current) = zide_update::Version::parse(env!("CARGO_PKG_VERSION")) else {
+        // debug: ZIDE_FAKE_VERSION=0.0.1 makes the running version look old, to see the update notification
+        let version =
+            std::env::var("ZIDE_FAKE_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").into());
+        let Ok(current) = zide_update::Version::parse(&version) else {
             return;
         };
         cx.spawn(async move |this, cx| {
