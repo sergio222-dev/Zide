@@ -132,6 +132,12 @@ cargo test --workspace
 
 Releasing is described in [docs/releasing.md](docs/releasing.md).
 
+## Credits
+
+Zide is developed with the [Gentle AI](https://github.com/Gentleman-Programming/gentle-ai)
+harness by [Gentleman Programming](https://github.com/Gentleman-Programming), which configures
+the agent workflow (persistent memory, skills and spec-driven development) used to build it.
+
 ## License
 
 Apache-2.0
