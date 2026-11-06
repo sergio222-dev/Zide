@@ -2,11 +2,24 @@
 # Installs the latest Zide release to ~/.local/bin (or $ZIDE_BIN_DIR).
 #   curl -fsSL https://raw.githubusercontent.com/sergio222-dev/Zide/main/scripts/install.sh | sh
 # Pin a version with ZIDE_VERSION=0.1.0. The signature is checked when `minisign` is installed.
+# Uninstall (removes the binary; add --purge to also delete settings, sessions, language
+# servers and caches):
+#   curl -fsSL https://raw.githubusercontent.com/sergio222-dev/Zide/main/scripts/install.sh | sh -s -- --uninstall [--purge]
 set -eu
 
 repo="sergio222-dev/Zide"
 bin_dir="${ZIDE_BIN_DIR:-$HOME/.local/bin}"
 public_key="RWSTKtnMI9IrzUUoLyjrScQDHa0K2O3f4QEz6pcE+7/ucSlIIKLkWfGs"
+
+if [ "${1:-}" = "--uninstall" ]; then
+  rm -f "$bin_dir/zide"
+  echo "Removed $bin_dir/zide"
+  if [ "${2:-}" = "--purge" ]; then
+    rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/zide" "${XDG_CACHE_HOME:-$HOME/.cache}/zide"
+    echo "Removed Zide data and cache."
+  fi
+  exit 0
+fi
 
 [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "x86_64" ] || {
   echo "zide: only Linux x86_64 is published" >&2

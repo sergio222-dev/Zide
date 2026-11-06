@@ -9,6 +9,13 @@ One line (installs to `~/.local/bin`, checks the signature if `minisign` is inst
 curl -fsSL https://raw.githubusercontent.com/sergio222-dev/Zide/main/scripts/install.sh | sh
 ```
 
+Uninstall with the same script (`--purge` also deletes settings, sessions, language servers
+and caches under `~/.local/share/zide` and `~/.cache/zide`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sergio222-dev/Zide/main/scripts/install.sh | sh -s -- --uninstall [--purge]
+```
+
 Or by hand: download `zide-<version>-x86_64-unknown-linux-gnu.tar.gz` from the
 [releases page](https://github.com/sergio222-dev/Zide/releases), then:
 
