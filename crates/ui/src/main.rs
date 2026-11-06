@@ -16,16 +16,19 @@ use std::{
 
 mod indent;
 mod meter;
+mod projects;
 mod rows;
 mod session;
 mod sticky;
 mod theme;
 mod usages;
 mod viewer;
+mod welcome;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
 use viewer::{Effect, FindStatus, FormatRequest, HighlightKey, Viewer};
+use welcome::{OpenProject, Welcome};
 use zide_core::{Change, DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
 use zide_index::FileIndex;
 use zide_lsp::{Client, Error as LspError, server_for};
@@ -348,7 +351,6 @@ struct Workspace {
     /// Bumped on every symbol indexing; the result of an older one is dropped.
     symbols_generation: u64,
     _watcher: Option<ProjectWatcher>,
-    _activation: Option<Subscription>,
     /// `None` until the symbols of the current index are parsed.
     symbols: Option<Arc<StubStore>>,
     registry: std::rc::Rc<Vec<ActionDef>>,
@@ -405,7 +407,6 @@ impl Workspace {
             changes_tx,
             symbols_generation: 0,
             _watcher: None,
-            _activation: None,
             symbols: None,
             action_texts: registry
                 .iter()
@@ -2382,6 +2383,72 @@ fn popup_frame(
         .child(div().text_xs().text_color(rgb(theme::MUTED)).child(status))
 }
 
+/// The window's content: the welcome screen until a project is opened, then its workspace.
+struct Shell {
+    content: Content,
+    _opened: Subscription,
+    _activation: Option<Subscription>,
+}
+
+enum Content {
+    Welcome(Entity<Welcome>),
+    Workspace(Entity<Workspace>),
+}
+
+impl Shell {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let welcome = cx.new(|_| Welcome::new());
+        let opened = cx.subscribe_in(
+            &welcome,
+            window,
+            |this, _, event: &OpenProject, window, cx| {
+                this.show_workspace(event.0.clone(), window, cx)
+            },
+        );
+        Self {
+            content: Content::Welcome(welcome),
+            _opened: opened,
+            _activation: None,
+        }
+    }
+
+    /// Opens `root` in this window and remembers it for the welcome screen.
+    fn show_workspace(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let root = root.canonicalize().unwrap_or(root);
+        projects::record(&root);
+        let workspace = cx.new(|cx| Workspace::new(root, cx));
+        let saver = workspace.downgrade();
+        self._activation = Some(cx.observe_window_activation(window, move |_, window, cx| {
+            if !window.is_window_active() {
+                saver
+                    .update(cx, |this, cx| {
+                        this.autosave(cx);
+                        cx.notify();
+                    })
+                    .ok();
+            }
+        }));
+        workspace.read(cx).focus.clone().focus(window, cx);
+        self.content = Content::Workspace(workspace);
+        cx.notify();
+    }
+
+    fn autosave(&self, cx: &mut Context<Self>) {
+        if let Content::Workspace(workspace) = &self.content {
+            workspace.update(cx, |this, cx| this.autosave(cx));
+        }
+    }
+}
+
+impl Render for Shell {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(match &self.content {
+            Content::Welcome(welcome) => welcome.clone().into_any_element(),
+            Content::Workspace(workspace) => workspace.clone().into_any_element(),
+        })
+    }
+}
+
 fn main() {
     let first = std::env::args_os().nth(1);
     if matches!(
@@ -2391,10 +2458,8 @@ fn main() {
         println!("zide {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    let root = first
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().expect("no current directory"));
-    let root = root.canonicalize().unwrap_or(root);
+    // without a folder, the welcome screen lists the projects opened before
+    let root = first.map(PathBuf::from);
 
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
@@ -2438,23 +2503,16 @@ fn main() {
             },
             cx,
             move |window, cx| {
-                let workspace = cx.new(|cx| Workspace::new(root, cx));
-                workspace.update(cx, |this, cx| {
-                    this._activation =
-                        Some(cx.observe_window_activation(window, |this, window, cx| {
-                            if !window.is_window_active() {
-                                this.autosave(cx);
-                                cx.notify();
-                            }
-                        }));
-                });
-                let saver = workspace.downgrade();
+                let shell = cx.new(|cx| Shell::new(window, cx));
+                if let Some(root) = root {
+                    shell.update(cx, |this, cx| this.show_workspace(root, window, cx));
+                }
+                let saver = shell.downgrade();
                 window.on_window_should_close(cx, move |_, cx| {
                     saver.update(cx, |this, cx| this.autosave(cx)).ok();
                     true
                 });
-                workspace.read(cx).focus.clone().focus(window, cx);
-                workspace
+                shell
             },
         )
         .expect("failed to open window");
