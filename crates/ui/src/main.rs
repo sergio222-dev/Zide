@@ -29,8 +29,10 @@ mod viewer;
 mod welcome;
 
 use gpui_kit::component::Icon;
+use gpui_kit::component::IndexPath;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
@@ -302,10 +304,11 @@ struct Popup {
     /// Where the Text rows came from, beside the count (e.g. a language server).
     note: String,
     actions: Arc<Vec<ActionHit>>,
+    /// Draws the Actions rows; the query, matching and selection stay Zide's.
+    commands: Entity<CommandState>,
     symbols: Arc<Vec<SymbolHit>>,
     options: TextOptions,
     selected: usize,
-    scroll: UniformListScrollHandle,
     /// Text tab filters: file mask (`*.rs`) and directory (`crates/ui`).
     mask_input: Entity<InputState>,
     dir_input: Entity<InputState>,
@@ -325,9 +328,6 @@ impl Popup {
 
     fn select(&mut self, row: usize) {
         self.selected = row;
-        if self.len() > 0 {
-            self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
-        }
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -702,6 +702,7 @@ impl Workspace {
             })
             .collect();
         input.update(cx, |state, cx| state.focus(window, cx));
+        let commands = cx.new(|cx| CommandState::new(window, cx));
         self.popup = Some(Popup {
             input,
             query: String::new(),
@@ -711,10 +712,10 @@ impl Workspace {
             text_status: String::new(),
             note: String::new(),
             actions: Arc::default(),
+            commands,
             symbols: Arc::default(),
             options: TextOptions::default(),
             selected: 0,
-            scroll: UniformListScrollHandle::new(),
             mask_input,
             dir_input,
             _subscriptions: [subscription]
@@ -2443,98 +2444,27 @@ impl Workspace {
             filters,
         );
         let selected = popup.selected;
-        let list = match (popup.tab, &self.index) {
-            (Tab::Files | Tab::Recent, Some(index)) => {
-                let (index, hits) = (index.clone(), popup.files.clone());
-                Some(uniform_list("files", hits.len(), move |range, _, _| {
-                    range
-                        .map(|row| {
-                            let path = index.paths()[hits[row].index].clone();
-                            row_frame(row == selected)
-                                .child(highlighted(path, ranges_in_chars(&hits[row])))
-                        })
-                        .collect()
-                }))
-            }
-            (Tab::Symbols, Some(index)) => {
-                let (index, hits) = (index.clone(), popup.symbols.clone());
-                let symbols = self.symbols.clone();
-                Some(uniform_list("symbols", hits.len(), move |range, _, _| {
-                    let Some(symbols) = &symbols else {
-                        return Vec::new();
-                    };
-                    range
-                        .map(|row| {
-                            let symbol = symbols.symbol(hits[row].entry);
-                            let ranges = hits[row].fragments.iter().map(|f| f.start..f.end);
-                            row_frame(row == selected)
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .w(px(64.))
-                                        .text_color(rgb(theme::MUTED))
-                                        .child(kind_label(symbol.node.kind)),
-                                )
-                                .child(highlighted(
-                                    symbol.node.name.as_deref().unwrap_or_default().to_string(),
-                                    ranges.collect(),
-                                ))
-                                .child(div().ml_auto().text_color(rgb(theme::MUTED)).child(
-                                    format!(
-                                    "{}{}:{}",
-                                    symbol.container.map_or(String::new(), |c| format!("{c} · ")),
-                                    index.paths()[symbol.file],
-                                    symbol.node.line
-                                ),
-                                ))
-                        })
-                        .collect()
-                }))
-            }
-            (Tab::Text, Some(index)) => {
-                let (index, hits) = (index.clone(), popup.text.clone());
-                Some(uniform_list("text", hits.len(), move |range, _, _| {
-                    range
-                        .map(|row| text_row(&index, &hits[row], row == selected))
-                        .collect()
-                }))
-            }
-            (Tab::Actions, _) => {
-                let hits = popup.actions.clone();
-                let registry = self.registry.clone();
-                Some(uniform_list(
-                    "actions",
-                    hits.len(),
-                    move |range, window, cx| {
-                        range
-                            .map(|row| {
-                                let def = &registry[hits[row].index];
-                                // the shortcut comes from the real keymap, so it always matches it
-                                let shortcut = def
-                                    .action
-                                    .as_ref()
-                                    .map(|a| window.keystroke_text_for(a.as_ref(), cx))
-                                    .unwrap_or_default();
-                                row_frame(row == selected)
-                                    .child(highlighted(
-                                        def.name.to_string(),
-                                        hits[row].fragments.clone(),
-                                    ))
-                                    .child(
-                                        div()
-                                            .ml_auto()
-                                            .text_color(rgb(theme::MUTED))
-                                            .child(shortcut),
-                                    )
-                            })
-                            .collect()
-                    },
-                ))
-            }
+        let rows = match (popup.tab, &self.index) {
+            (Tab::Actions, _) => Some(action_items(&popup.actions, &self.registry)),
+            (Tab::Files | Tab::Recent, Some(index)) => Some(file_items(index, &popup.files)),
+            (Tab::Text, Some(index)) => Some(text_items(index, &popup.text)),
+            (Tab::Symbols, Some(index)) => self
+                .symbols
+                .as_ref()
+                .map(|symbols| symbol_items(index, symbols, &popup.symbols)),
             _ => None,
         };
-        if let Some(list) = list {
-            frame = frame.child(list.track_scroll(&popup.scroll).w_full().h(px(320.)));
+        if let Some(rows) = rows {
+            let list = command_list(
+                &popup.commands,
+                rows,
+                selected,
+                popup.tab,
+                &cx.entity(),
+                window,
+                cx,
+            );
+            frame = frame.child(div().w_full().h(px(320.)).child(list));
         }
         root = root.child(frame);
         root
@@ -2718,33 +2648,182 @@ fn ranges_in_chars(hit: &FileHit) -> Vec<Range<usize>> {
     hit.fragments.iter().map(|f| f.start..f.end).collect()
 }
 
-fn row_frame(selected: bool) -> Div {
-    let row = div().h(px(24.)).px_2().flex().gap_2().overflow_hidden();
-    if selected {
-        row.bg(rgb(theme::ACTIVE_BG))
-    } else {
-        row
-    }
+/// The rows of the Actions, Files, Recent and Symbols tabs, drawn by gpui-kit's command list.
+/// Zide still matches and orders the hits and owns the query and the selection; the list only
+/// shows them, and its hover and click go back to the workspace.
+fn command_list(
+    commands: &Entity<CommandState>,
+    rows: Vec<CommandItem>,
+    selected: usize,
+    tab: Tab,
+    workspace: &Entity<Workspace>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Command {
+    // Follows Zide's selection. Deferred so the list has taken this frame's items first,
+    // and it scrolls the row into view.
+    let state = commands.clone();
+    window.defer(cx, move |window, cx| {
+        state.update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::new(selected)), window, cx)
+        });
+    });
+    let (hovered, confirmed) = (workspace.clone(), workspace.clone());
+    Command::new(commands)
+        .items(rows)
+        .searchable(false)
+        .bordered(false)
+        .max_h(px(320.))
+        .empty(|_, _, _| div().p_3().text_color(rgb(theme::DIM)).child("No results"))
+        .on_select(move |path, _, cx| {
+            hovered.update(cx, |this, cx| {
+                if let Some(popup) = this.popup.as_mut().filter(|p| p.tab == tab)
+                    && popup.selected != path.row
+                {
+                    popup.selected = path.row;
+                    cx.notify();
+                }
+            });
+        })
+        .on_confirm(move |path, window, cx| {
+            confirmed.update(cx, |this, cx| {
+                if let Some(popup) = &mut this.popup {
+                    popup.selected = path.row;
+                }
+                this.open_selected(window, cx);
+            });
+        })
 }
 
-fn text_row(index: &FileIndex, hit: &TextHit, selected: bool) -> Div {
-    // show the line without its indentation, moving the match ranges with it
-    let text = hit.text.trim_start();
-    let shift = hit.text.len() - text.len();
-    let ranges = hit
-        .ranges
-        .iter()
-        .filter(|r| r.end > shift)
-        .map(|r| r.start.saturating_sub(shift)..r.end - shift)
-        .collect();
-    row_frame(selected)
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_color(rgb(theme::MUTED))
-                .child(format!("{}:{}", index.paths()[hit.file], hit.line)),
-        )
-        .child(highlighted_bytes(text.to_string(), ranges))
+fn action_items(hits: &[ActionHit], registry: &std::rc::Rc<Vec<ActionDef>>) -> Vec<CommandItem> {
+    hits.iter()
+        .map(|hit| {
+            let registry = registry.clone();
+            let (index, fragments) = (hit.index, hit.fragments.clone());
+            CommandItem::new().child(move |_, cx| {
+                let def = &registry[index];
+                let shortcut = def
+                    .action
+                    .as_ref()
+                    .map(|a| shortcut_text(a.as_ref(), cx))
+                    .unwrap_or_default();
+                div()
+                    .flex()
+                    .flex_1()
+                    .gap_2()
+                    .child(highlighted(def.name.to_string(), fragments.clone()))
+                    .child(
+                        div()
+                            .ml_auto()
+                            .text_color(rgb(theme::MUTED))
+                            .child(shortcut),
+                    )
+            })
+        })
+        .collect()
+}
+
+fn file_items(index: &FileIndex, hits: &[FileHit]) -> Vec<CommandItem> {
+    hits.iter()
+        .map(|hit| {
+            let path = index.paths()[hit.index].clone();
+            let ranges = ranges_in_chars(hit);
+            CommandItem::new().child(move |_, _| highlighted(path.clone(), ranges.clone()))
+        })
+        .collect()
+}
+
+fn symbol_items(index: &FileIndex, symbols: &StubStore, hits: &[SymbolHit]) -> Vec<CommandItem> {
+    hits.iter()
+        .map(|hit| {
+            let symbol = symbols.symbol(hit.entry);
+            let kind = kind_label(symbol.node.kind);
+            let name = symbol.node.name.as_deref().unwrap_or_default().to_string();
+            let ranges: Vec<_> = hit.fragments.iter().map(|f| f.start..f.end).collect();
+            let place = format!(
+                "{}{}:{}",
+                symbol
+                    .container
+                    .map_or(String::new(), |c| format!("{c} · ")),
+                index.paths()[symbol.file],
+                symbol.node.line
+            );
+            CommandItem::new().child(move |_, _| {
+                div()
+                    .flex()
+                    .flex_1()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .w(px(64.))
+                            .text_color(rgb(theme::MUTED))
+                            .child(kind),
+                    )
+                    .child(highlighted(name.clone(), ranges.clone()))
+                    .child(
+                        div()
+                            .ml_auto()
+                            .text_color(rgb(theme::MUTED))
+                            .child(place.clone()),
+                    )
+            })
+        })
+        .collect()
+}
+
+/// The shortcut of `action` from the real keymap, empty when it has none. Unlike
+/// `Window::keystroke_text_for` it does not depend on the key context being rendered: the
+/// command list builds its rows outside the workspace's, where that lookup finds nothing and
+/// falls back to the action's type name.
+fn shortcut_text(action: &dyn Action, cx: &App) -> String {
+    cx.key_bindings()
+        .borrow()
+        .bindings_for_action(action)
+        .next_back()
+        .map(|binding| {
+            binding
+                .keystrokes()
+                .iter()
+                .map(|keystroke| keystroke.display(cx.platform_info().os).to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
+}
+
+fn text_items(index: &FileIndex, hits: &[TextHit]) -> Vec<CommandItem> {
+    hits.iter()
+        .map(|hit| {
+            // show the line without its indentation, moving the match ranges with it
+            let text = hit.text.trim_start();
+            let shift = hit.text.len() - text.len();
+            let ranges: Vec<_> = hit
+                .ranges
+                .iter()
+                .filter(|r| r.end > shift)
+                .map(|r| r.start.saturating_sub(shift)..r.end - shift)
+                .collect();
+            let place = format!("{}:{}", index.paths()[hit.file], hit.line);
+            let text = text.to_string();
+            CommandItem::new().child(move |_, _| {
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(rgb(theme::MUTED))
+                            .child(place.clone()),
+                    )
+                    .child(highlighted_bytes(text.clone(), ranges.clone()))
+            })
+        })
+        .collect()
 }
 
 const HIGHLIGHT: fn() -> HighlightStyle = || HighlightStyle {
@@ -2910,6 +2989,21 @@ impl Render for Shell {
     }
 }
 
+/// Zide's palette on the colors gpui-kit's components read, so the command list, the
+/// notifications and the rest look like the popup they sit in instead of the library's own dark.
+/// These colors are only read by the components, never by Zide's own elements.
+fn apply_palette(cx: &mut App) {
+    let colors = &mut gpui_kit::component::Theme::global_mut(cx).colors;
+    // background and text
+    colors.popover = rgb(theme::POPUP).into();
+    colors.popover_foreground = rgb(theme::TEXT).into();
+    // the selected row, like the active tab chip
+    colors.accent = rgb(theme::ACTIVE_BG).into();
+    colors.accent_foreground = rgb(theme::STRONG).into();
+    // shortcuts, paths, hints
+    colors.muted_foreground = rgb(theme::MUTED).into();
+}
+
 fn main() {
     let first = std::env::args_os().nth(1);
     if matches!(
@@ -2926,6 +3020,7 @@ fn main() {
     app.run(move |cx| {
         gpui_kit::init(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+        apply_palette(cx);
         // Root binds Tab to focus-next; a deeper context wins over it.
         cx.bind_keys([
             KeyBinding::new("tab", SwitchTab, Some("Workspace")),
