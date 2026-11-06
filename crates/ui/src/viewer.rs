@@ -941,6 +941,23 @@ impl Viewer {
         edits.len()
     }
 
+    /// Alt+Down / Alt+Up: moves the cursor to the name of the next (or previous) function,
+    /// method, class or interface, wherever the cursor is. With none left it goes to the end
+    /// (or the start) of the file.
+    pub fn next_method(&mut self, forward: bool) {
+        let from = self.buffer.byte_of(self.vim.cursor());
+        let offset = match declaration_beyond(&self.outline, from, forward) {
+            Some(byte) => self.buffer.offset_of_byte(byte),
+            None if forward => self.buffer.len(),
+            None => 0,
+        };
+        self.vim.set_cursor(&self.buffer, offset);
+        self.scroll.scroll_to_item(
+            self.buffer.position_of(self.vim.cursor()).line,
+            ScrollStrategy::Nearest,
+        );
+    }
+
     /// Re-highlights the whole text. Fine for ordinary files; large ones will need a debounce.
     fn rebuild(&mut self) {
         let spans = self
@@ -1286,6 +1303,33 @@ fn build_lines(buffer: &Buffer, spans: &[Span]) -> Vec<Line> {
         line.step = step;
     }
     lines
+}
+
+/// The byte where the nearest function, method, class or interface name starts, strictly
+/// after (`forward`) or before `from`. Structs and traits count as classes and interfaces.
+fn declaration_beyond(outline: &[StubNode], from: usize, forward: bool) -> Option<usize> {
+    let stops = outline
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.kind,
+                StubKind::Function
+                    | StubKind::Method
+                    | StubKind::Class
+                    | StubKind::Interface
+                    | StubKind::Struct
+                    | StubKind::Trait
+            )
+        })
+        .map(|node| match node.name_range.is_empty() {
+            true => node.range.start as usize,
+            false => node.name_range.start as usize,
+        });
+    if forward {
+        stops.filter(|&byte| byte > from).min()
+    } else {
+        stops.filter(|&byte| byte < from).max()
+    }
 }
 
 /// The declarations of `outline` (in source order) that contain `byte`, outermost first.
@@ -1688,6 +1732,44 @@ mod tests {
         assert_eq!(viewer.row_height(), MAX_FONT_SIZE * ROW_RATIO);
         viewer.set_font_size(0.);
         assert_eq!(viewer.row_height(), MIN_FONT_SIZE * ROW_RATIO);
+    }
+
+    #[::core::prelude::v1::test]
+    fn next_and_previous_method_walk_the_declarations() {
+        let source = "struct P;\nconst X: u8 = 1;\nimpl P {\n    fn one(&self) {}\n    fn two(&self) {}\n}\nfn free() {}\ntrait T {}\n";
+        let (dir, file) = temp_file_as("methods", "a.rs", source);
+        let mut viewer = Viewer::open(&dir, &file);
+        let word = |v: &Viewer| v.word_at_cursor();
+        let mut forward = Vec::new();
+        for _ in 0..5 {
+            viewer.next_method(true);
+            forward.push(word(&viewer));
+        }
+        // consts and impl blocks are not stops
+        assert_eq!(
+            forward,
+            ["P", "one", "two", "free", "T"].map(|n| Some(n.to_string()))
+        );
+        // with nothing left the cursor goes to the end of the file, and stays there
+        let mut end = Viewer::open(&dir, &file);
+        end.vim.set_cursor(&end.buffer, end.buffer.len());
+        viewer.next_method(true);
+        assert_eq!(viewer.vim.cursor(), end.vim.cursor());
+        viewer.next_method(true);
+        assert_eq!(viewer.vim.cursor(), end.vim.cursor());
+        let mut backward = Vec::new();
+        for _ in 0..5 {
+            viewer.next_method(false);
+            backward.push(word(&viewer));
+        }
+        assert_eq!(
+            backward,
+            ["T", "free", "two", "one", "P"].map(|n| Some(n.to_string()))
+        );
+        // and with nothing before, to the start
+        viewer.next_method(false);
+        assert_eq!(viewer.vim.cursor(), 0);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[::core::prelude::v1::test]

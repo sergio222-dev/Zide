@@ -58,6 +58,8 @@ actions!(
         FocusTree,
         FocusEditor,
         ShrinkSelection,
+        NextMethod,
+        PreviousMethod,
     ]
 );
 
@@ -825,6 +827,18 @@ impl Workspace {
             } else {
                 viewer.shrink_selection();
             }
+            cx.notify();
+        }
+    }
+
+    /// Alt+Down / Alt+Up in the editor.
+    fn jump_to_method(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.popup.is_some() || self.tree_focused {
+            cx.propagate(); // the popup and the tree move their selection with Down / Up
+            return;
+        }
+        if let Some(viewer) = &mut self.viewer {
+            viewer.next_method(forward);
             cx.notify();
         }
     }
@@ -1787,6 +1801,10 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &ShrinkSelection, _, cx| this.change_selection(false, cx)),
             )
+            .on_action(cx.listener(|this, _: &NextMethod, _, cx| this.jump_to_method(true, cx)))
+            .on_action(
+                cx.listener(|this, _: &PreviousMethod, _, cx| this.jump_to_method(false, cx)),
+            )
             .on_action(cx.listener(|this, _: &SwitchTab, _, cx| {
                 if this.popup.is_some() {
                     this.switch_tab(cx);
@@ -2315,6 +2333,8 @@ fn main() {
             KeyBinding::new("ctrl-l", FocusEditor, Some("Workspace")),
             KeyBinding::new("ctrl-w", ExtendSelection, Some("Workspace")),
             KeyBinding::new("ctrl-shift-w", ShrinkSelection, Some("Workspace")),
+            KeyBinding::new("alt-down", NextMethod, Some("Workspace")),
+            KeyBinding::new("alt-up", PreviousMethod, Some("Workspace")),
             KeyBinding::new("ctrl-shift-n", GoToFile, Some("Workspace")),
             KeyBinding::new("ctrl-alt-shift-n", GoToSymbol, Some("Workspace")),
             KeyBinding::new("ctrl-shift-a", FindAction, Some("Workspace")),
