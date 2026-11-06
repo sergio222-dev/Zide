@@ -718,6 +718,22 @@ impl Viewer {
         )
     }
 
+    /// The cursor's 0-based line and column.
+    pub fn cursor_spot(&self) -> (usize, usize) {
+        let at = self.buffer.position_of(self.vim.cursor());
+        (at.line, at.column)
+    }
+
+    /// Puts the cursor on the 0-based `line` and `column` (both clamped) and centers it.
+    pub fn go_to_spot(&mut self, line: usize, column: usize) {
+        let line = line.min(self.lines.len() - 1);
+        let offset = self.buffer.offset_of(Position { line, column });
+        self.vim.set_cursor(&self.buffer, offset);
+        self.unfold_hiding(line);
+        self.scroll
+            .scroll_to_item(self.rows.row_of(line), ScrollStrategy::Center);
+    }
+
     /// Puts the cursor on 1-based `line` and brings it into view.
     pub fn go_to_line(&mut self, line: u32) {
         let row = (line as usize).saturating_sub(1).min(self.lines.len() - 1);
@@ -2675,6 +2691,19 @@ mod tests {
         // the emoji is two UTF-16 units: column 2 is the `x`
         assert!(viewer.apply_format(revision, vec![edit_at(0, 2, 3, "y")]));
         assert_eq!(viewer.text(), "😀y\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn go_to_spot_puts_the_cursor_where_cursor_spot_said_and_clamps() {
+        let (dir, file) = temp_file("spot", "one\ntwo words\nthree\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.go_to_spot(1, 4);
+        assert_eq!(viewer.cursor_spot(), (1, 4));
+        viewer.go_to_spot(0, 99); // past the end of the line
+        assert_eq!(viewer.cursor_spot().0, 0);
+        viewer.go_to_spot(99, 0); // past the end of the file
+        assert!(viewer.cursor_spot().0 >= 2);
         fs::remove_dir_all(dir).unwrap();
     }
 

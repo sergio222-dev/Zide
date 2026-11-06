@@ -18,6 +18,7 @@ mod file_icon;
 mod indent;
 mod markdown;
 mod meter;
+mod nav;
 mod projects;
 mod rows;
 mod session;
@@ -65,6 +66,8 @@ actions!(
         RecentFiles,
         ToggleProjectTree,
         ToggleMarkdownPreview,
+        NavigateBack,
+        NavigateForward,
         FindUsages,
         ReformatCode,
         ExtendSelection,
@@ -163,6 +166,20 @@ fn action_registry() -> Vec<ActionDef> {
             action: Some(Box::new(ToggleMarkdownPreview)),
             closes_popup: true,
             run: |ws, _, cx| ws.toggle_md_preview(cx),
+        },
+        ActionDef {
+            name: "Navigate Back",
+            synonyms: &["previous location", "go back", "history"],
+            action: Some(Box::new(NavigateBack)),
+            closes_popup: true,
+            run: |ws, _, cx| ws.navigate(true, cx),
+        },
+        ActionDef {
+            name: "Navigate Forward",
+            synonyms: &["next location", "go forward", "history"],
+            action: Some(Box::new(NavigateForward)),
+            closes_popup: true,
+            run: |ws, _, cx| ws.navigate(false, cx),
         },
         ActionDef {
             name: "Recent Files",
@@ -349,6 +366,8 @@ struct Workspace {
     /// The rendered Markdown beside the editor (Ctrl+Shift+M), for `.md` files.
     md_preview: bool,
     md: Option<MdPreview>,
+    /// Where the cursor was before each jump, for the mouse's back and forward buttons.
+    nav: nav::NavHistory,
     /// Keys go to the tree instead of the editor.
     tree_focused: bool,
     /// A `g` was typed in the tree (`gg` goes to the top).
@@ -437,6 +456,7 @@ impl Workspace {
             tree_visible: false,
             md_preview: false,
             md: None,
+            nav: nav::NavHistory::default(),
             tree_focused: false,
             tree_g: false,
             highlight_requested: None,
@@ -1708,6 +1728,69 @@ impl Workspace {
     /// Shows `path`, parking the open file with its cursor and undo history. A parked file
     /// comes back as it was, unless it changed on disk in the meantime.
     fn open_file(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
+        // opening the file already shown is no jump, unless it goes to a line
+        if self
+            .viewer
+            .as_ref()
+            .is_some_and(|viewer| viewer.path() != path || line.is_some())
+        {
+            self.record_jump();
+        }
+        self.show_file(path, line, cx);
+    }
+
+    /// The place of the cursor in the open file.
+    fn current_place(&self) -> Option<nav::Place> {
+        let viewer = self.viewer.as_ref()?;
+        let (line, column) = viewer.cursor_spot();
+        Some(nav::Place {
+            path: viewer.path().to_string(),
+            line,
+            column,
+        })
+    }
+
+    /// The cursor is about to jump: Back will return to where it is now.
+    fn record_jump(&mut self) {
+        if let Some(place) = self.current_place() {
+            self.nav.record(place);
+        }
+    }
+
+    /// The mouse's back and forward buttons: moves the cursor to the previous or next place of
+    /// the history, opening its file if needed. Places in files that no longer exist are passed.
+    fn navigate(&mut self, back: bool, cx: &mut Context<Self>) {
+        if self.popup.is_some() {
+            return;
+        }
+        let Some(current) = self.current_place() else {
+            return;
+        };
+        loop {
+            let step = if back {
+                self.nav.back(current.clone())
+            } else {
+                self.nav.forward(current.clone())
+            };
+            let Some(place) = step else {
+                return;
+            };
+            if place.path != current.path && !self.root.join(&place.path).is_file() {
+                continue;
+            }
+            if place.path != current.path {
+                self.show_file(&place.path, None, cx);
+            }
+            if let Some(viewer) = &mut self.viewer {
+                viewer.go_to_spot(place.line, place.column);
+            }
+            cx.notify();
+            return;
+        }
+    }
+
+    /// Shows `path` without touching the navigation history.
+    fn show_file(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
         self.autosave(cx);
         self.warm_server(path, cx);
         // every way of opening a file (popup, tree) counts as a recent one
@@ -2175,6 +2258,16 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &ToggleProjectTree, _, cx| this.toggle_tree(cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleMarkdownPreview, _, cx| this.toggle_md_preview(cx)),
+            )
+            .on_action(cx.listener(|this, _: &NavigateBack, _, cx| this.navigate(true, cx)))
+            .on_action(cx.listener(|this, _: &NavigateForward, _, cx| this.navigate(false, cx)))
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _: &MouseDownEvent, _, cx| this.navigate(true, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _: &MouseDownEvent, _, cx| this.navigate(false, cx)),
             )
             .on_action(cx.listener(|this, _: &FindUsages, window, cx| this.find_usages(window, cx)))
             .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
@@ -2829,6 +2922,8 @@ fn main() {
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
             KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
+            KeyBinding::new("ctrl-alt-left", NavigateBack, Some("Workspace")),
+            KeyBinding::new("ctrl-alt-right", NavigateForward, Some("Workspace")),
             KeyBinding::new("alt-f7", FindUsages, Some("Workspace")),
             KeyBinding::new("ctrl-alt-l", ReformatCode, Some("Workspace")),
             KeyBinding::new("ctrl-h", FocusTree, Some("Workspace")),

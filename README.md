@@ -35,6 +35,7 @@ Only Linux x86_64 is published for now.
 - **Sticky scroll**: the class and function declarations that scrolled out of view stay pinned at the top of the editor (up to five, outermost first).
 - **Project tree** panel, with IntelliJ ordering and reveal of the open file.
 - **Markdown preview** (`Ctrl+Shift+M`): the rendered file beside the editor for `.md` files, updated as you type.
+- **Navigation history**: the mouse's back and forward buttons (and `Ctrl+Alt+Left` / `Ctrl+Alt+Right`) return to where the cursor was before each jump (opening a file, go to line, Find Usages, a link).
 - **Syntax highlighting** with tree-sitter (Rust, JavaScript, TypeScript, TSX, Go, Python, Markdown).
 - **Breadcrumb** with the enclosing symbols at the cursor.
 - **Whitespace dots and rainbow indent guides**, per-project font size (Ctrl+wheel to zoom).
@@ -108,6 +109,7 @@ line says a new release is available.
 | `Ctrl+Shift+F` | Find in Files |
 | `Alt+F7` | Find Usages |
 | `Alt+1` | Toggle project tree |
+| `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Navigate back / forward (also the mouse's back and forward buttons) |
 | `Ctrl+Shift+M` | Toggle Markdown preview (`.md` files) |
 | `Ctrl+H` / `Ctrl+L` | Focus tree / editor |
 | `Alt+Down` / `Alt+Up` | Next / previous method |
