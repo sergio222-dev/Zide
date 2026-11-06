@@ -798,6 +798,31 @@ impl Viewer {
             .scroll_to_item_strict(self.rows.row_of(top), ScrollStrategy::Top);
     }
 
+    /// The first and last lines on screen as of the last layout, if there was one.
+    pub fn visible_lines(&self) -> Option<(usize, usize)> {
+        let (top, rows) = self.view_metrics()?;
+        let last = self.lines.len().saturating_sub(1);
+        Some((
+            self.rows.line(top).min(last),
+            self.rows.line(top + rows).min(last),
+        ))
+    }
+
+    /// The bytes of `line` without its indentation and line break, or `None` when it is blank.
+    pub fn line_source_range(&self, line: usize) -> Option<std::ops::Range<usize>> {
+        if line >= self.buffer.line_count() {
+            return None;
+        }
+        let text = self.buffer.line(line);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let indent = text.chars().take_while(|c| c.is_whitespace()).count();
+        let start = self.buffer.line_start(line) + indent;
+        Some(self.buffer.byte_of(start)..self.buffer.byte_of(start + trimmed.chars().count()))
+    }
+
     /// `(first visible row, visible rows)` as of the last layout, if there was one.
     fn view_metrics(&self) -> Option<(usize, usize)> {
         let state = self.scroll.0.borrow();
@@ -2636,6 +2661,19 @@ mod tests {
         // the emoji is two UTF-16 units: column 2 is the `x`
         assert!(viewer.apply_format(revision, vec![edit_at(0, 2, 3, "y")]));
         assert_eq!(viewer.text(), "😀y\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_line_source_range_skips_indentation_and_blank_lines() {
+        let (dir, file) = temp_file("line-range", "# T\n\n  é x  \nend");
+        let viewer = Viewer::open(&dir, &file);
+        assert_eq!(viewer.line_source_range(0), Some(0..3));
+        assert_eq!(viewer.line_source_range(1), None);
+        // two spaces of indent, then `é x` (4 bytes) without the trailing spaces
+        assert_eq!(viewer.line_source_range(2), Some(7..11));
+        assert_eq!(viewer.line_source_range(3), Some(14..17));
+        assert_eq!(viewer.line_source_range(9), None);
         fs::remove_dir_all(dir).unwrap();
     }
 

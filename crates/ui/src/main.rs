@@ -325,6 +325,16 @@ enum LspState {
     Unavailable(String),
 }
 
+/// What the Markdown preview shows and where it was last scrolled to.
+struct MdPreview {
+    state: Entity<markdown::TextViewState>,
+    /// The file and revision whose text `state` holds.
+    path: String,
+    revision: Revision,
+    /// The editor's first visible line when the preview was last scrolled to follow it.
+    synced_top: Option<usize>,
+}
+
 struct Workspace {
     focus: FocusHandle,
     /// Editor font size, changed with Ctrl+wheel and shared by every file.
@@ -338,8 +348,7 @@ struct Workspace {
     tree_visible: bool,
     /// The rendered Markdown beside the editor (Ctrl+Shift+M), for `.md` files.
     md_preview: bool,
-    /// The open Markdown file's text as a cheaply cloned shared string, rebuilt only when it changes.
-    md_source: Option<(String, Revision, SharedString)>,
+    md: Option<MdPreview>,
     /// Keys go to the tree instead of the editor.
     tree_focused: bool,
     /// A `g` was typed in the tree (`gg` goes to the top).
@@ -427,7 +436,7 @@ impl Workspace {
             tree: Tree::new(),
             tree_visible: false,
             md_preview: false,
-            md_source: None,
+            md: None,
             tree_focused: false,
             tree_g: false,
             highlight_requested: None,
@@ -1382,8 +1391,9 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The preview of the open file, when it is Markdown and the preview is on. The text is
-    /// copied out of the buffer only when its revision changed.
+    /// The preview of the open file, when it is Markdown and the preview is on. The text goes
+    /// from the buffer to the preview only when its revision changed, and the preview follows
+    /// the editor's scroll.
     fn markdown_preview(&mut self, cx: &mut Context<Self>) -> Option<markdown::TextView> {
         let viewer = self
             .viewer
@@ -1392,21 +1402,55 @@ impl Workspace {
         if !self.md_preview {
             return None;
         }
-        let key = (viewer.path(), viewer.revision());
-        let stale = self
-            .md_source
-            .as_ref()
-            .is_none_or(|(path, rev, _)| (path.as_str(), *rev) != key);
-        if stale {
-            let source = SharedString::from(viewer.text());
-            self.md_source = Some((key.0.to_string(), key.1, source));
+        let (path, revision) = (viewer.path(), viewer.revision());
+        let md = match &mut self.md {
+            Some(md) => {
+                if md.path != path || md.revision != revision {
+                    let text = viewer.text();
+                    md.state.update(cx, |state, cx| state.set_text(&text, cx));
+                    md.path = path.to_string();
+                    md.revision = revision;
+                    md.synced_top = None;
+                }
+                md
+            }
+            None => self.md.insert(MdPreview {
+                state: cx.new(|cx| markdown::TextViewState::markdown(&viewer.text(), cx)),
+                path: path.to_string(),
+                revision,
+                synced_top: None,
+            }),
+        };
+        if let Some((top, bottom)) = viewer.visible_lines()
+            && md.synced_top != Some(top)
+        {
+            // Revealing only scrolls as far as needed to show the line: going down, that is the
+            // line at the bottom edge, so aim at the editor's last line to keep both aligned.
+            let down = md.synced_top.is_some_and(|previous| top > previous);
+            let lines: Vec<usize> = if down {
+                (top..=bottom).rev().collect()
+            } else {
+                (top..=bottom).collect()
+            };
+            md.synced_top = Some(top);
+            for range in lines
+                .into_iter()
+                .filter_map(|line| viewer.line_source_range(line))
+            {
+                if md
+                    .state
+                    .update(cx, |state, cx| state.reveal_range(range, cx).is_ok())
+                {
+                    break;
+                }
+            }
         }
-        let (current, _, source) = self.md_source.as_ref()?;
+        let state = md.state.clone();
         let workspace = cx.entity();
         Some(markdown::preview(
-            source.clone(),
+            &state,
             self.root.clone(),
-            current.clone(),
+            path.to_string(),
             move |path, cx| {
                 workspace.update(cx, |this, cx| this.open_link(&path, cx));
             },

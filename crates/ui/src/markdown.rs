@@ -4,11 +4,11 @@
 
 use std::path::{Path, PathBuf};
 
-pub use gpui_kit::component::text::TextView;
 use gpui_kit::component::text::{MarkdownNode, markdown_ast};
+pub use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::{
-    App, ElementId, ImageSource, ObjectFit, ParentElement, SharedString, Styled, StyledImage,
-    Window, div, img, px, relative,
+    App, Entity, ImageSource, ObjectFit, ParentElement, SharedString, Styled, StyledImage, Window,
+    div, img, px, relative,
 };
 
 /// Whether `path` is a Markdown file, so the preview applies to it.
@@ -57,11 +57,11 @@ pub fn image_source(root: &Path, current: &str, url: &str) -> ImageSource {
     }
 }
 
-/// The rendered `source` of the project file `current`, scrolling on its own and selectable
-/// with the mouse. Clicking a link to a project file calls `open` with its path; other links go
+/// The rendering of `state` (the Markdown of the project file `current`), scrolling on its own
+/// and selectable with the mouse. Clicking a link to a project file calls `open` with its path; other links go
 /// to the system.
 pub fn preview(
-    source: SharedString,
+    state: &Entity<TextViewState>,
     root: PathBuf,
     current: String,
     open: impl Fn(String, &mut App) + Send + Sync + 'static,
@@ -69,7 +69,7 @@ pub fn preview(
     let link_current = current.clone();
     let row_root = root.clone();
     let row_current = current.clone();
-    TextView::markdown(ElementId::Name("markdown-preview".into()), source)
+    TextView::new(state)
         .selectable(true)
         .scrollable(true)
         .image_source(move |uri| image_source(&root, &current, &uri.to_string()))
