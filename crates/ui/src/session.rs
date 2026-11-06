@@ -123,7 +123,10 @@ mod tests {
         assert_eq!(last_file(&root).as_deref(), Some("src/a.rs"));
         fs::remove_file(root.join("src/a.rs")).unwrap();
         assert_eq!(last_file(&root), None);
-        assert_eq!(fs::read_to_string(root.join(".zide/.gitignore")).unwrap(), "*\n");
+        assert_eq!(
+            fs::read_to_string(root.join(".zide/.gitignore")).unwrap(),
+            "*\n"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
