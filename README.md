@@ -2,7 +2,12 @@
 
 A fast, keyboard-driven code editor with Vim motions and an IntelliJ-style keymap, written in Rust.
 
-![Zide editing a TypeScript project](docs/screenshot.png)
+![Zide editing a Rust file](docs/screenshot.png)
+
+<p>
+  <img src="docs/search-files.png" alt="Search Everywhere, Files tab" width="49%">
+  <img src="docs/search-actions.png" alt="Search Everywhere, Actions tab" width="49%">
+</p>
 
 > Zide was built with [Claude](https://claude.com/claude-code) (Claude Code) and is written in
 > [Rust](https://www.rust-lang.org/), on top of the [GPUI](https://www.gpui.rs/) UI framework.
