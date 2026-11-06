@@ -51,6 +51,17 @@ impl Rows {
             .saturating_sub(1)
     }
 
+    /// What the gutter shows for `line` with the cursor on `cursor`, as in Vim's hybrid numbers:
+    /// the cursor's own line number, the others their distance in rows (a fold counts as one).
+    pub fn number(&self, line: usize, cursor: usize) -> usize {
+        let (row, cursor_row) = (self.row_of(line), self.row_of(cursor));
+        if row == cursor_row {
+            cursor + 1
+        } else {
+            row.abs_diff(cursor_row)
+        }
+    }
+
     /// False when `line` is folded away.
     pub fn shows(&self, line: usize) -> bool {
         self.lines.binary_search(&line).is_ok()
@@ -66,6 +77,22 @@ mod tests {
         let rows = Rows::all(5);
         assert_eq!(rows.len(), 5);
         assert!((0..5).all(|n| rows.line(n) == n && rows.row_of(n) == n));
+    }
+
+    #[test]
+    fn the_cursor_line_shows_its_number_and_the_others_their_distance() {
+        let rows = Rows::all(10);
+        let shown: Vec<_> = (3..8).map(|line| rows.number(line, 5)).collect();
+        assert_eq!(shown, [2, 1, 6, 1, 2]);
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn a_fold_counts_as_one_row_of_distance() {
+        let rows = Rows::hiding(10, &[2..6]); // lines 2..6 hide behind line 1's row
+        assert_eq!(rows.number(6, 1), 1);
+        assert_eq!(rows.number(7, 1), 2);
+        assert_eq!(rows.number(0, 7), 3);
     }
 
     #[test]
