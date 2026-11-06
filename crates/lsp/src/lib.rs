@@ -4,9 +4,10 @@ mod client;
 mod connection;
 mod framing;
 mod servers;
+mod settings;
 mod text;
 
-pub use client::{Client, ServerSpec, server_for};
+pub use client::{Client, ParameterHint, ServerSpec, server_for};
 pub use connection::{Connection, Error};
 pub use lsp_types::{
     Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location, NumberOrString,

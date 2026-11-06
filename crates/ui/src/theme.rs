@@ -39,3 +39,7 @@ pub const WHITESPACE: u32 = 0x5c6370b0;
 pub const CHANGE_ADDED: u32 = 0x4f9a56;
 pub const CHANGE_MODIFIED: u32 = 0x9a7040;
 pub const CHANGE_REMOVED: u32 = 0x7d848f;
+
+/// The chip with a parameter's name before an argument.
+pub const HINT_BG: u32 = 0x2f3239;
+pub const HINT_TEXT: u32 = 0x8c93a1;

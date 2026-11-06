@@ -161,8 +161,17 @@ fn handle_incoming(
         // a request from the server: it only needs to be told "nothing to configure"
         (Some(method), Some(id)) => {
             let result = if method == "workspace/configuration" {
-                let items = message["params"]["items"].as_array().map_or(0, Vec::len);
-                Value::Array(vec![Value::Null; items])
+                let items = message["params"]["items"]
+                    .as_array()
+                    .map_or(&[][..], Vec::as_slice);
+                Value::Array(
+                    items
+                        .iter()
+                        .map(|item| {
+                            crate::settings::section(item["section"].as_str().unwrap_or(""))
+                        })
+                        .collect(),
+                )
             } else {
                 Value::Null
             };

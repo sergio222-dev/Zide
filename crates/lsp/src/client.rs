@@ -8,7 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use lsp_types::{Diagnostic, DocumentHighlight, Location, Range, TextEdit};
+use lsp_types::{
+    Diagnostic, DocumentHighlight, InlayHint, InlayHintKind, InlayHintLabel, Location, Position,
+    Range, TextEdit,
+};
 use serde_json::{Value, json};
 
 use crate::{
@@ -31,6 +34,13 @@ fn store_diagnostics(published: &Published, method: &str, params: &Value) -> boo
         serde_json::from_value(params["diagnostics"].clone()).unwrap_or_default();
     published.lock().unwrap().insert(path, diagnostics);
     true
+}
+
+/// The name of a parameter, to show before the argument at `position` (`id:`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParameterHint {
+    pub position: Position,
+    pub label: String,
 }
 
 /// How to run the server of some languages.
@@ -171,6 +181,8 @@ pub struct Client {
     published: Published,
     /// The server answers `textDocument/diagnostic` (some, like TypeScript 7, never publish).
     pulls_diagnostics: bool,
+    /// The server answers `textDocument/inlayHint`.
+    has_inlay_hints: bool,
 }
 
 impl Client {
@@ -266,6 +278,7 @@ impl Client {
                         "references": {},
                         "publishDiagnostics": {"relatedInformation": true},
                         "diagnostic": {"dynamicRegistration": false},
+                        "inlayHint": {"dynamicRegistration": false},
                     },
                     "workspace": {"workspaceFolders": true, "configuration": true},
                     "window": {"workDoneProgress": true},
@@ -286,6 +299,8 @@ impl Client {
             versions: Mutex::default(),
             published,
             pulls_diagnostics: !initialized["capabilities"]["diagnosticProvider"].is_null(),
+            has_inlay_hints: !initialized["capabilities"]["inlayHintProvider"].is_null()
+                && initialized["capabilities"]["inlayHintProvider"] != false,
         })
     }
 
@@ -309,6 +324,36 @@ impl Client {
                 .insert(path.to_path_buf(), items);
         }
         Ok(())
+    }
+
+    /// The parameter names to show in the first `lines` lines of `path` (synced before): the
+    /// hints of kind parameter, the rest (types) are left out.
+    pub fn parameter_hints(&self, path: &Path, lines: u32) -> Result<Vec<ParameterHint>, Error> {
+        if !self.has_inlay_hints {
+            return Ok(Vec::new());
+        }
+        let result = self.connection.request(
+            "textDocument/inlayHint",
+            json!({
+                "textDocument": {"uri": path_to_uri(path)},
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": lines, "character": 0}},
+            }),
+            REQUEST_TIMEOUT,
+        )?;
+        let hints: Vec<InlayHint> = serde_json::from_value(result).unwrap_or_default();
+        Ok(hints
+            .into_iter()
+            .filter(|hint| hint.kind == Some(InlayHintKind::PARAMETER))
+            .map(|hint| ParameterHint {
+                position: hint.position,
+                label: match hint.label {
+                    InlayHintLabel::String(label) => label,
+                    InlayHintLabel::LabelParts(parts) => {
+                        parts.into_iter().map(|part| part.value).collect()
+                    }
+                },
+            })
+            .collect())
     }
 
     /// What the server last published about `path`: empty until it says something.
@@ -532,7 +577,7 @@ mod tests {
                     continue;
                 };
                 let result = if method == "initialize" {
-                    json!({"capabilities": {"diagnosticProvider": {}}})
+                    json!({"capabilities": {"diagnosticProvider": {}, "inlayHintProvider": true}})
                 } else {
                     answer(method)
                 };
@@ -620,6 +665,28 @@ mod tests {
             wire.wait_for(3)[2]["params"]["textDocument"]["uri"],
             "file:///w/a.ts"
         );
+        drop(client);
+    }
+
+    #[test]
+    fn parameter_hints_keep_only_parameter_names_and_join_label_parts() {
+        let (connection, wire, server) = connect(|_, _| {});
+        let _server = serve(wire.clone(), server, |method| {
+            assert_eq!(method, "textDocument/inlayHint");
+            json!([
+                {"position": {"line": 2, "character": 2}, "kind": 2,
+                 "label": [{"value": "id"}, {"value": ":"}]},
+                {"position": {"line": 3, "character": 4}, "kind": 2, "label": "name:"},
+                {"position": {"line": 3, "character": 9}, "kind": 1, "label": ": string"},
+            ])
+        });
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        let found = client.parameter_hints(Path::new("/w/a.ts"), 10).unwrap();
+        let shown: Vec<_> = found
+            .iter()
+            .map(|h| (h.position.line, h.position.character, h.label.as_str()))
+            .collect();
+        assert_eq!(shown, [(2, 2, "id:"), (3, 4, "name:")]);
         drop(client);
     }
 

@@ -14,7 +14,9 @@ use std::{
 
 use gpui_kit::*;
 use zide_git::{BlameLine, LineChange};
-use zide_lsp::{Diagnostic, DiagnosticSeverity, NumberOrString, char_column, uri_to_path};
+use zide_lsp::{
+    Diagnostic, DiagnosticSeverity, NumberOrString, ParameterHint, char_column, uri_to_path,
+};
 use zide_stubs::{StubKind, StubNode, extract_nodes, language_for_path as stub_language};
 use zide_syntax::{
     Class, FoldRegion, LanguageId, Span, fold_regions, highlight, language_for_path,
@@ -60,6 +62,17 @@ pub type HoverMove = Rc<dyn Fn(Option<(usize, Point<Pixels>)>, &mut App)>;
 /// Called with the line and window position of a click on the text.
 pub type TextClick = Rc<dyn Fn(usize, Point<Pixels>, &mut App)>;
 
+/// Per line, the parameter name hints to show: the column they go before and their text.
+type LineHints = HashMap<usize, Vec<(usize, String)>>;
+
+/// Parameter names a language server gave for the text as of `revision`, as char offsets.
+struct HintSet {
+    revision: Revision,
+    /// The text they were given for, to follow the edits made since.
+    text: Arc<String>,
+    hints: Vec<(usize, String)>,
+}
+
 /// Per line, the diagnostics to underline and their display bytes.
 type Squiggles = HashMap<usize, Vec<(usize, Range<usize>)>>;
 
@@ -79,12 +92,24 @@ struct Line {
     /// Display byte of each `char` of the line (and of its end), when that is not the identity
     /// (tabs, multi-byte characters).
     cols: Option<Vec<usize>>,
+    /// Parameter name hints shown in the line: where each was put (a display byte of the line
+    /// without hints) and how many bytes it takes, in order.
+    inserts: Vec<(usize, usize)>,
     /// How many indent bands the line has, each `step` columns wide.
     level: usize,
     step: usize,
 }
 
 impl Line {
+    /// Where the display byte `without_hints` of the line without hints is once they are in.
+    fn with_hints(&self, without_hints: usize) -> usize {
+        let before = self
+            .inserts
+            .iter()
+            .take_while(|(at, _)| *at <= without_hints);
+        without_hints + before.map(|(_, size)| size).sum::<usize>()
+    }
+
     fn display_byte(&self, column: usize) -> usize {
         match &self.cols {
             Some(cols) => cols[column.min(cols.len() - 1)],
@@ -250,6 +275,8 @@ pub struct Viewer {
     /// The errors of `diagnostics` to underline, by line: the diagnostic and its display bytes.
     squiggles: Arc<Squiggles>,
     hover: Option<Hover>,
+    /// The parameter names shown before arguments.
+    hints: Option<HintSet>,
     /// Where the editor was drawn last, to turn a mouse position into a line and column.
     editor_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The two ends of the pair under the caret (char ranges), for the revision and caret
@@ -311,6 +338,7 @@ impl Viewer {
             diagnostics: Arc::default(),
             squiggles: Arc::default(),
             hover: None,
+            hints: None,
             editor_bounds: Rc::default(),
             changes: Arc::default(),
             pair: RefCell::new(None),
@@ -322,6 +350,61 @@ impl Viewer {
     /// Records who last changed each line of the file on disk (`None`: git has no answer).
     pub fn set_blame(&mut self, blame: Option<Vec<BlameLine>>) {
         self.blame = blame.map(Arc::new);
+    }
+
+    /// Records the parameter names a language server gave for the text as of `revision`.
+    /// Dropped when the text has changed meanwhile (the next answer is for the newer text).
+    /// True when what is shown changed.
+    pub fn set_hints(&mut self, hints: Vec<ParameterHint>, revision: Revision) -> bool {
+        if revision != self.buffer.revision() {
+            return false;
+        }
+        let mut offsets: Vec<(usize, String)> = hints
+            .into_iter()
+            .filter(|hint| (hint.position.line as usize) < self.buffer.line_count())
+            .map(|hint| {
+                let line = hint.position.line as usize;
+                let column = char_column(&self.buffer.line(line), hint.position.character);
+                let at = self.buffer.line_start(line) + column.min(self.buffer.line_len(line));
+                (at, hint.label)
+            })
+            .collect();
+        offsets.sort_by_key(|(at, _)| *at);
+        let before = self.hints_by_line();
+        self.hints = Some(HintSet {
+            revision,
+            text: Arc::new(self.buffer.text()),
+            hints: offsets,
+        });
+        if self.hints_by_line() == before {
+            return false;
+        }
+        self.rebuild();
+        true
+    }
+
+    /// The hints to show, by line. Hints given for older text move with the edits made since
+    /// (as one edit: what was typed between the text they were given for and now).
+    fn hints_by_line(&self) -> LineHints {
+        let mut by_line = LineHints::new();
+        let Some(set) = &self.hints else {
+            return by_line;
+        };
+        let current;
+        let hints = if set.revision == self.buffer.revision() {
+            &set.hints
+        } else {
+            current = follow_edit(&set.text, &self.buffer.text(), &set.hints);
+            &current
+        };
+        for (at, label) in hints {
+            let position = self.buffer.position_of(*at);
+            by_line
+                .entry(position.line)
+                .or_default()
+                .push((position.column, label.clone()));
+        }
+        by_line
     }
 
     /// Records what the language server reports about the file. True when it is not what was
@@ -1400,7 +1483,8 @@ impl Viewer {
             .language
             .map(|language| highlight(language, &self.buffer.text()))
             .unwrap_or_default();
-        self.lines = Arc::new(build_lines(&self.buffer, &spans));
+        let hints = self.hints_by_line();
+        self.lines = Arc::new(build_lines(&self.buffer, &spans, &hints));
         self.folds = match self.language {
             Some(language) if self.editable => fold_regions(language, &self.buffer.text()),
             _ => Vec::new(),
@@ -1454,7 +1538,11 @@ impl Viewer {
             .chars()
             .next()
             .map_or(byte, |c| byte + c.len_utf8());
-        (position.line, map[byte]..map[end].max(map[byte] + 1))
+        let start = self
+            .lines
+            .get(position.line)
+            .map_or(map[byte], |line| line.with_hints(map[byte]));
+        (position.line, start..start + (map[end] - map[byte]).max(1))
     }
 
     /// The declarations around the cursor, outermost first.
@@ -1851,6 +1939,128 @@ fn restyle(
     out
 }
 
+/// A line with hints in it: its text, colors, byte of each character and where hints are.
+struct Injected {
+    text: String,
+    colors: Vec<(Range<usize>, HighlightStyle)>,
+    cols: Vec<usize>,
+    inserts: Vec<(usize, usize)>,
+}
+
+/// The line `text` with each hint put before the character at its column, with the same
+/// treatment of everything that is measured in display bytes: the `colors` are split around the
+/// hints and moved, and the byte of every character (`cols`) is where it ends up. Returns
+/// those and where hints were put.
+fn inject_hints(
+    raw: &str,
+    map: &[usize],
+    text: String,
+    colors: Vec<(Range<usize>, HighlightStyle)>,
+    hints: &[(usize, String)],
+) -> Injected {
+    // the name, then a space that is not part of the chip
+    let inserts: Vec<(usize, String)> = hints
+        .iter()
+        .map(|(column, label)| {
+            let byte = raw
+                .char_indices()
+                .nth(*column)
+                .map_or(raw.len(), |(b, _)| b);
+            (map[byte], format!("{label} "))
+        })
+        .collect();
+    let total = |below: &dyn Fn(usize) -> bool| -> usize {
+        inserts
+            .iter()
+            .filter(|(at, _)| below(*at))
+            .map(|(_, shown)| shown.len())
+            .sum()
+    };
+    // a character at a hint is after it, an end at a hint is before it
+    let start_of = |at: usize| at + total(&|hint| hint <= at);
+    let end_of = |at: usize| at + total(&|hint| hint < at);
+
+    let mut shown = String::with_capacity(text.len() + total(&|_| true));
+    let mut copied = 0;
+    for (at, hint) in &inserts {
+        shown.push_str(&text[copied..*at]);
+        shown.push_str(hint);
+        copied = *at;
+    }
+    shown.push_str(&text[copied..]);
+
+    let mut moved = Vec::with_capacity(colors.len() + inserts.len());
+    for (span, style) in colors {
+        let mut from = span.start;
+        let inside: BTreeSet<usize> = inserts
+            .iter()
+            .map(|(at, _)| *at)
+            .filter(|at| *at > span.start && *at < span.end)
+            .collect();
+        for at in inside {
+            moved.push((start_of(from)..end_of(at), style));
+            from = at;
+        }
+        if from < span.end {
+            moved.push((start_of(from)..end_of(span.end), style));
+        }
+    }
+    let chip = HighlightStyle {
+        color: Some(rgb(theme::HINT_TEXT).into()),
+        background_color: Some(rgb(theme::HINT_BG).into()),
+        ..Default::default()
+    };
+    let mut put = 0;
+    for (at, hint) in &inserts {
+        let start = at + put;
+        moved.push((start..start + hint.len() - 1, chip)); // not the space after it
+        put += hint.len();
+    }
+    moved.sort_by_key(|(span, _)| span.start);
+
+    let cols = raw
+        .char_indices()
+        .map(|(byte, _)| start_of(map[byte]))
+        .chain(std::iter::once(start_of(map[raw.len()])))
+        .collect();
+    let sizes = inserts.iter().map(|(at, hint)| (*at, hint.len())).collect();
+    Injected {
+        text: shown,
+        colors: moved,
+        cols,
+        inserts: sizes,
+    }
+}
+
+/// Where char offsets of `old` are in `new`, taking the difference as one edit: what lies
+/// between their common start and common end. Offsets inside that are dropped.
+fn follow_edit(old: &str, new: &str, hints: &[(usize, String)]) -> Vec<(usize, String)> {
+    let (old, new): (Vec<char>, Vec<char>) = (old.chars().collect(), new.chars().collect());
+    let start = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let room = old.len().min(new.len()) - start;
+    let end = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(room)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let old_end = old.len() - end;
+    hints
+        .iter()
+        .filter_map(|(at, label)| {
+            let moved = if *at <= start {
+                *at
+            } else if *at >= old_end {
+                *at + new.len() - old.len()
+            } else {
+                return None;
+            };
+            Some((moved, label.clone()))
+        })
+        .collect()
+}
+
 /// What the popup says first: `TS2554: Expected 8 arguments, but got 7`.
 fn headline(diagnostic: &Diagnostic) -> String {
     let code = match (&diagnostic.code, diagnostic.source.as_deref()) {
@@ -1906,7 +2116,7 @@ fn style(class: Class) -> HighlightStyle {
 }
 
 /// Splits the text into display lines (tabs expanded) with their colors, in line coordinates.
-fn build_lines(buffer: &Buffer, spans: &[Span]) -> Vec<Line> {
+fn build_lines(buffer: &Buffer, spans: &[Span], hints: &LineHints) -> Vec<Line> {
     let mut next_span = 0;
     let mut lines: Vec<Line> = (0..buffer.line_count())
         .map(|index| {
@@ -1933,12 +2143,20 @@ fn build_lines(buffer: &Buffer, spans: &[Span]) -> Vec<Line> {
                         .chain(std::iter::once(map[raw.len()]))
                         .collect()
                 });
+            let (text, colors, cols, inserts) = match hints.get(&index) {
+                Some(hints) => {
+                    let line = inject_hints(&raw, &map, text, colors, hints);
+                    (line.text, line.colors, Some(line.cols), line.inserts)
+                }
+                None => (text, colors, cols, Vec::new()),
+            };
             Line {
                 start: buffer.line_start(index),
                 chars: buffer.line_len(index),
                 text,
                 colors,
                 cols,
+                inserts,
                 level: 0,
                 step: 1,
             }
@@ -2079,7 +2297,7 @@ mod tests {
             range: 0..10,
             class: Class::Comment,
         }];
-        let lines = build_lines(&buffer, &spans);
+        let lines = build_lines(&buffer, &spans, &LineHints::new());
         assert_eq!(lines[0].colors[0].0, 0..4);
         assert_eq!(lines[1].colors[0].0, 0..5);
         assert!(lines[1].colors.len() == 1);
@@ -2402,6 +2620,74 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    fn hint(line: u32, character: u32, label: &str) -> ParameterHint {
+        ParameterHint {
+            position: zide_lsp::Position::new(line, character),
+            label: label.into(),
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn parameter_names_are_part_of_the_line_shown_and_everything_measured_in_it_follows() {
+        let (dir, file) = temp_file("hints", "f(a, bb);\n\tg(c);\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let revision = viewer.revision();
+        assert!(viewer.set_hints(
+            vec![hint(0, 2, "x:"), hint(0, 5, "yy:"), hint(1, 3, "z:")],
+            revision
+        ));
+        assert!(!viewer.set_hints(
+            vec![hint(0, 2, "x:"), hint(0, 5, "yy:"), hint(1, 3, "z:")],
+            revision
+        )); // the same
+        assert_eq!(viewer.lines[0].text, "f(x: a, yy: bb);");
+        assert_eq!(viewer.lines[1].text, "    g(z: c);"); // the tab is 4 cells
+        let chips: Vec<_> = viewer.lines[0]
+            .colors
+            .iter()
+            .map(|(r, _)| r.clone())
+            .collect();
+        assert_eq!(chips, [2..4, 8..11]); // the names, not the space after them
+        // the characters are where they end up: `a`, the second `b`, `)` and the end of the line
+        assert_eq!(viewer.lines[0].display_byte(2), 5);
+        assert_eq!(viewer.lines[0].display_byte(5), 12);
+        assert_eq!(viewer.lines[0].display_byte(8), 15);
+        assert_eq!(viewer.lines[0].display_byte(9), 16);
+        // the caret is on the character, not on the hint before it
+        viewer.vim.set_cursor(&viewer.buffer, 5); // `b`
+        let (_, cell) = viewer.cursor_cell();
+        assert_eq!(cell, 12..13);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn hints_for_older_text_are_dropped_and_hints_follow_the_edits_since() {
+        let (dir, file) = temp_file("hints-edit", "f(a);\ng(b);\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let revision = viewer.revision();
+        viewer.set_hints(vec![hint(0, 2, "x:"), hint(1, 2, "y:")], revision);
+        type_keys(&mut viewer, "Onew");
+        viewer.handle_key(Key::Esc); // a line above: both hints go one line down
+        assert_eq!(viewer.lines[1].text, "f(x: a);");
+        assert_eq!(viewer.lines[2].text, "g(y: b);");
+        assert!(!viewer.set_hints(vec![hint(0, 2, "stale:")], revision)); // for the old text
+        assert_eq!(viewer.lines[1].text, "f(x: a);");
+        assert_eq!(
+            follow_edit("f(a, b)", "f(a, b, c)", &[(2, "x".into()), (5, "y".into())]),
+            [(2, "x".to_string()), (5, "y".to_string())]
+        );
+        // an edit that rewrites the place of a hint removes it; the start of the edit keeps it
+        assert_eq!(
+            follow_edit(
+                "f(abc, b)",
+                "f(zz, b)",
+                &[(2, "x".into()), (3, "w".into()), (7, "y".into())]
+            ),
+            [(2, "x".to_string()), (6, "y".to_string())]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[::core::prelude::v1::test]
     fn errors_are_underlined_where_the_server_put_them() {
         let (dir, file) = temp_file("squiggles", "let a = 1;\n\tlet b = c;\n");
@@ -2553,6 +2839,7 @@ mod tests {
             text,
             colors: Vec::new(),
             cols: None,
+            inserts: Vec::new(),
             level: 0,
             step: 1,
         }

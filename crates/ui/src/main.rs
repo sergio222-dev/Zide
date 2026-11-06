@@ -858,6 +858,7 @@ impl Workspace {
         let opened = self.diagnosed.as_ref().map(|(file, _)| file) != Some(&current.0);
         self.diagnosed = Some(current.clone());
         let text = viewer.text();
+        let lines = text.lines().count() as u32 + 1;
         if opened {
             self.apply_diagnostics(cx); // what the server already said about this file
         }
@@ -877,15 +878,28 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     client.sync(&path, language, &text)?;
-                    client.pull_diagnostics(&path)
+                    client.pull_diagnostics(&path)?;
+                    // a hint that fails to come is not worth losing the server for
+                    let hints = client.parameter_hints(&path, lines).unwrap_or_default();
+                    Ok::<_, LspError>(hints)
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if matches!(outcome, Err(LspError::Closed | LspError::Io(_))) {
-                    this.lsp.remove(spec.name);
-                    this.diagnosed = None; // a new server has not been sent the file
-                } else {
-                    this.apply_diagnostics(cx); // what a server that does not publish answered
+                match outcome {
+                    Err(LspError::Closed | LspError::Io(_)) => {
+                        this.lsp.remove(spec.name);
+                        this.diagnosed = None; // a new server has not been sent the file
+                    }
+                    Err(_) => {}
+                    Ok(hints) => {
+                        // what a server that does not publish answered
+                        this.apply_diagnostics(cx);
+                        if let Some(viewer) = this.viewer.as_mut().filter(|v| v.path() == current.0)
+                            && viewer.set_hints(hints, current.1)
+                        {
+                            cx.notify();
+                        }
+                    }
                 }
             })
             .ok();
