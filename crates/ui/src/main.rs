@@ -408,6 +408,9 @@ impl Workspace {
         };
         workspace.rescan(cx);
         workspace.check_for_update(false, cx);
+        if let Some(size) = session::font_size(&workspace.root) {
+            workspace.font_size = size.clamp(viewer::MIN_FONT_SIZE, viewer::MAX_FONT_SIZE);
+        }
         if let Some(last) = session::last_file(&workspace.root) {
             workspace.open_file(&last, None, cx);
         }
@@ -1411,6 +1414,7 @@ impl Workspace {
         self.font_size =
             (self.font_size + step).clamp(viewer::MIN_FONT_SIZE, viewer::MAX_FONT_SIZE);
         viewer.set_font_size(self.font_size);
+        session::remember_font_size(&self.root, self.font_size);
         cx.notify();
     }
 
