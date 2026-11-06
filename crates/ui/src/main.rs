@@ -2378,25 +2378,32 @@ fn main() {
             KeyBinding::new("alt-c", ToggleCase, Some("Workspace")),
             KeyBinding::new("alt-w", ToggleWord, Some("Workspace")),
         ]);
-        gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
-            let workspace = cx.new(|cx| Workspace::new(root, cx));
-            workspace.update(cx, |this, cx| {
-                this._activation =
-                    Some(cx.observe_window_activation(window, |this, window, cx| {
-                        if !window.is_window_active() {
-                            this.autosave();
-                            cx.notify();
-                        }
-                    }));
-            });
-            let saver = workspace.downgrade();
-            window.on_window_should_close(cx, move |_, cx| {
-                saver.update(cx, |this, _| this.autosave()).ok();
-                true
-            });
-            workspace.read(cx).focus.clone().focus(window, cx);
-            workspace
-        })
+        gpui_kit::open_window(
+            WindowOptions {
+                app_id: Some("zide".into()),
+                ..Default::default()
+            },
+            cx,
+            move |window, cx| {
+                let workspace = cx.new(|cx| Workspace::new(root, cx));
+                workspace.update(cx, |this, cx| {
+                    this._activation =
+                        Some(cx.observe_window_activation(window, |this, window, cx| {
+                            if !window.is_window_active() {
+                                this.autosave();
+                                cx.notify();
+                            }
+                        }));
+                });
+                let saver = workspace.downgrade();
+                window.on_window_should_close(cx, move |_, cx| {
+                    saver.update(cx, |this, _| this.autosave()).ok();
+                    true
+                });
+                workspace.read(cx).focus.clone().focus(window, cx);
+                workspace
+            },
+        )
         .expect("failed to open window");
         cx.activate(true);
     });

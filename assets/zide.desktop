@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Zide
+Comment=Keyboard-driven code editor with Vim motions
+Exec=zide %f
+Icon=zide
+Terminal=false
+Categories=Development;TextEditor;
+StartupWMClass=zide
