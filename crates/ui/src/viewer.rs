@@ -591,13 +591,21 @@ impl Viewer {
         });
     }
 
-    /// The blame of the cursor's line, in gray after the code. Only while the buffer is what is
-    /// on disk: after an edit the lines no longer match what git saw.
+    /// The blame of the cursor's line, in gray after the code. A line that differs from the last
+    /// commit is ours and uncommitted, whether or not it was saved. For the others, only while
+    /// the buffer is what is on disk: after an edit the lines no longer match what git saw.
     fn blame_label(&self) -> Option<String> {
+        let line = self.cursor_line();
+        if matches!(
+            self.changes.get(&line),
+            Some(LineChange::Added | LineChange::Modified)
+        ) {
+            return Some(zide_git::UNCOMMITTED_LABEL.into());
+        }
         if self.is_dirty() {
             return None;
         }
-        Some(self.blame.as_ref()?.get(self.cursor_line())?.label())
+        Some(self.blame.as_ref()?.get(line)?.label())
     }
 
     /// Both ends of the bracket, JSX tag or Python block under the caret (the character before
@@ -2818,6 +2826,28 @@ mod tests {
         assert_eq!(viewer.blame_label(), None); // edited: the lines no longer match
         assert!(viewer.save());
         assert_eq!(viewer.blame_label(), None); // saved: waits for the new blame
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_edited_line_is_blamed_on_us_as_uncommitted() {
+        let (dir, file) = temp_file("blame-edit", "one\ntwo\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.set_head(Some("one\ntwo\n".into()));
+        assert_eq!(viewer.blame_label(), None); // same as the commit, blame not answered yet
+        type_keys(&mut viewer, "jx");
+        assert_eq!(
+            viewer.blame_label().as_deref(),
+            Some(zide_git::UNCOMMITTED_LABEL)
+        ); // edited, not saved
+        type_keys(&mut viewer, "k");
+        assert_eq!(viewer.blame_label(), None); // an untouched line has no blame while dirty
+        type_keys(&mut viewer, "j");
+        assert!(viewer.save());
+        assert_eq!(
+            viewer.blame_label().as_deref(),
+            Some(zide_git::UNCOMMITTED_LABEL)
+        ); // saved but still not committed
         fs::remove_dir_all(dir).unwrap();
     }
 

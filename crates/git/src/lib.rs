@@ -99,13 +99,16 @@ pub struct BlameLine {
     pub committed: bool,
 }
 
+/// What the gutter says of a line that is not in any commit.
+pub const UNCOMMITTED_LABEL: &str = "You, Today \u{2022} Uncommitted changes";
+
 impl BlameLine {
     /// `Molina, 8/21/26, 10:12 PM • added list and ready card creator`: the author's last name
     /// (or the whole name when it is one word), the date and the time in the author's own
     /// time zone, then the commit's summary.
     pub fn label(&self) -> String {
         if !self.committed {
-            return "Not committed yet".into();
+            return UNCOMMITTED_LABEL.into();
         }
         let name = self.author.split_whitespace().next_back().unwrap_or("");
         let local = self.time + i64::from(self.tz_minutes) * 60;
@@ -234,7 +237,7 @@ mod tests {
     fn an_uncommitted_line_says_so() {
         let mut line = line("Not Committed Yet", 0, 0);
         line.committed = false;
-        assert_eq!(line.label(), "Not committed yet");
+        assert_eq!(line.label(), UNCOMMITTED_LABEL);
     }
 
     #[test]
@@ -287,7 +290,7 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert!(lines[0].label().starts_with("Molina, "));
         assert!(lines[0].label().ends_with("• first commit"));
-        assert_eq!(lines[2].label(), "Not committed yet");
+        assert_eq!(lines[2].label(), UNCOMMITTED_LABEL);
         assert!(blame(&dir, "missing.txt").is_none());
         fs::remove_dir_all(&dir).unwrap();
     }
