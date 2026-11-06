@@ -16,7 +16,9 @@ use std::{
 
 mod file_icon;
 mod indent;
+mod markdown;
 mod meter;
+mod nav;
 mod projects;
 mod rows;
 mod session;
@@ -63,6 +65,9 @@ actions!(
         FindInFiles,
         RecentFiles,
         ToggleProjectTree,
+        ToggleMarkdownPreview,
+        NavigateBack,
+        NavigateForward,
         FindUsages,
         ReformatCode,
         ExtendSelection,
@@ -91,6 +96,8 @@ const UPDATE_REPO: &str = "sergio222-dev/Zide";
 const MAX_FILE_RESULTS: usize = 200;
 const MAX_SYMBOL_RESULTS: usize = 200;
 const MAX_RECENT: usize = 50;
+/// Height of a row of the project tree, in pixels.
+const TREE_ROW_HEIGHT: f32 = 22.;
 const MAX_TEXT_RESULTS: usize = 1000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,6 +161,27 @@ fn action_registry() -> Vec<ActionDef> {
             action: Some(Box::new(ToggleProjectTree)),
             closes_popup: true,
             run: |ws, _, cx| ws.toggle_tree(cx),
+        },
+        ActionDef {
+            name: "Toggle Markdown Preview",
+            synonyms: &["markdown", "md", "render"],
+            action: Some(Box::new(ToggleMarkdownPreview)),
+            closes_popup: true,
+            run: |ws, _, cx| ws.toggle_md_preview(cx),
+        },
+        ActionDef {
+            name: "Navigate Back",
+            synonyms: &["previous location", "go back", "history"],
+            action: Some(Box::new(NavigateBack)),
+            closes_popup: true,
+            run: |ws, _, cx| ws.navigate(true, cx),
+        },
+        ActionDef {
+            name: "Navigate Forward",
+            synonyms: &["next location", "go forward", "history"],
+            action: Some(Box::new(NavigateForward)),
+            closes_popup: true,
+            run: |ws, _, cx| ws.navigate(false, cx),
         },
         ActionDef {
             name: "Recent Files",
@@ -316,6 +344,16 @@ enum LspState {
     Unavailable(String),
 }
 
+/// What the Markdown preview shows and where it was last scrolled to.
+struct MdPreview {
+    state: Entity<markdown::TextViewState>,
+    /// The file and revision whose text `state` holds.
+    path: String,
+    revision: Revision,
+    /// The editor's first visible line when the preview was last scrolled to follow it.
+    synced_top: Option<usize>,
+}
+
 struct Workspace {
     focus: FocusHandle,
     /// Editor font size, changed with Ctrl+wheel and shared by every file.
@@ -327,6 +365,11 @@ struct Workspace {
     /// The project tree on the left.
     tree: Tree,
     tree_visible: bool,
+    /// The rendered Markdown beside the editor (Ctrl+Shift+M), for `.md` files.
+    md_preview: bool,
+    md: Option<MdPreview>,
+    /// Where the cursor was before each jump, for the mouse's back and forward buttons.
+    nav: nav::NavHistory,
     /// Keys go to the tree instead of the editor.
     tree_focused: bool,
     /// A `g` was typed in the tree (`gg` goes to the top).
@@ -413,6 +456,9 @@ impl Workspace {
             meter: meter::FrameMeter::from_env(),
             tree: Tree::new(),
             tree_visible: false,
+            md_preview: false,
+            md: None,
+            nav: nav::NavHistory::default(),
             tree_focused: false,
             tree_g: false,
             highlight_requested: None,
@@ -1361,6 +1407,91 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Ctrl+Shift+M: shows or hides the rendered Markdown beside the editor.
+    fn toggle_md_preview(&mut self, cx: &mut Context<Self>) {
+        self.md_preview = !self.md_preview;
+        cx.notify();
+    }
+
+    /// The preview of the open file, when it is Markdown and the preview is on. The text goes
+    /// from the buffer to the preview only when its revision changed, and the preview follows
+    /// the editor's scroll.
+    fn markdown_preview(&mut self, cx: &mut Context<Self>) -> Option<markdown::TextView> {
+        let viewer = self
+            .viewer
+            .as_ref()
+            .filter(|v| markdown::is_markdown(v.path()))?;
+        if !self.md_preview {
+            return None;
+        }
+        let (path, revision) = (viewer.path(), viewer.revision());
+        let md = match &mut self.md {
+            Some(md) => {
+                if md.path != path || md.revision != revision {
+                    let text = viewer.text();
+                    md.state.update(cx, |state, cx| state.set_text(&text, cx));
+                    md.path = path.to_string();
+                    md.revision = revision;
+                    md.synced_top = None;
+                }
+                md
+            }
+            None => self.md.insert(MdPreview {
+                state: cx.new(|cx| markdown::TextViewState::markdown(&viewer.text(), cx)),
+                path: path.to_string(),
+                revision,
+                synced_top: None,
+            }),
+        };
+        if let Some((top, bottom)) = viewer.visible_lines()
+            && md.synced_top != Some(top)
+        {
+            // Revealing only scrolls as far as needed to show the line: going down, that is the
+            // line at the bottom edge, so aim at the editor's last line to keep both aligned.
+            let down = md.synced_top.is_some_and(|previous| top > previous);
+            let lines: Vec<usize> = if down {
+                (top..=bottom).rev().collect()
+            } else {
+                (top..=bottom).collect()
+            };
+            md.synced_top = Some(top);
+            for range in lines
+                .into_iter()
+                .filter_map(|line| viewer.line_source_range(line))
+            {
+                if md
+                    .state
+                    .update(cx, |state, cx| state.reveal_range(range, cx).is_ok())
+                {
+                    break;
+                }
+            }
+        }
+        let state = md.state.clone();
+        let workspace = cx.entity();
+        Some(markdown::preview(
+            &state,
+            self.root.clone(),
+            path.to_string(),
+            move |path, cx| {
+                workspace.update(cx, |this, cx| this.open_link(&path, cx));
+            },
+        ))
+    }
+
+    /// A click on a link of the Markdown preview: opens the project file it names, if any.
+    fn open_link(&mut self, path: &str, cx: &mut Context<Self>) {
+        let known = self
+            .index
+            .as_ref()
+            .is_some_and(|index| index.paths().iter().any(|p| p == path));
+        if known {
+            self.open_file(path, None, cx);
+            self.tree_focused = false;
+            cx.notify();
+        }
+    }
+
     /// Ctrl+H / Ctrl+L: moves the focus to the project tree (showing it if hidden) or back to
     /// the editor.
     fn focus_tree(&mut self, tree: bool, cx: &mut Context<Self>) {
@@ -1393,6 +1524,10 @@ impl Workspace {
                 self.tree.collapse();
                 TreeOutcome::None
             }
+            (_, Some(Key::Ctrl(c @ ('d' | 'u')))) => {
+                self.tree.move_half_page(self.tree_visible_rows(), c == 'd');
+                TreeOutcome::None
+            }
             (_, Some(Key::Enter)) => self.tree.activate(),
             (_, Some(Key::Char('G'))) => {
                 self.tree.select_last();
@@ -1413,6 +1548,17 @@ impl Workspace {
             _ => TreeOutcome::None,
         };
         self.apply_tree_outcome(outcome, cx);
+    }
+
+    /// How many tree rows fit on screen, as of the last layout.
+    fn tree_visible_rows(&self) -> usize {
+        self.tree_scroll
+            .0
+            .borrow()
+            .last_item_size
+            .map_or(0, |size| {
+                (f32::from(size.item.height) / TREE_ROW_HEIGHT) as usize
+            })
     }
 
     fn apply_tree_outcome(&mut self, outcome: TreeOutcome, cx: &mut Context<Self>) {
@@ -1441,7 +1587,7 @@ impl Workspace {
                     };
                     let line = div()
                         .id(("tree-row", index))
-                        .h(px(22.))
+                        .h(px(TREE_ROW_HEIGHT))
                         .flex()
                         .items_center()
                         .gap_1()
@@ -1599,6 +1745,69 @@ impl Workspace {
     /// Shows `path`, parking the open file with its cursor and undo history. A parked file
     /// comes back as it was, unless it changed on disk in the meantime.
     fn open_file(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
+        // opening the file already shown is no jump, unless it goes to a line
+        if self
+            .viewer
+            .as_ref()
+            .is_some_and(|viewer| viewer.path() != path || line.is_some())
+        {
+            self.record_jump();
+        }
+        self.show_file(path, line, cx);
+    }
+
+    /// The place of the cursor in the open file.
+    fn current_place(&self) -> Option<nav::Place> {
+        let viewer = self.viewer.as_ref()?;
+        let (line, column) = viewer.cursor_spot();
+        Some(nav::Place {
+            path: viewer.path().to_string(),
+            line,
+            column,
+        })
+    }
+
+    /// The cursor is about to jump: Back will return to where it is now.
+    fn record_jump(&mut self) {
+        if let Some(place) = self.current_place() {
+            self.nav.record(place);
+        }
+    }
+
+    /// The mouse's back and forward buttons: moves the cursor to the previous or next place of
+    /// the history, opening its file if needed. Places in files that no longer exist are passed.
+    fn navigate(&mut self, back: bool, cx: &mut Context<Self>) {
+        if self.popup.is_some() {
+            return;
+        }
+        let Some(current) = self.current_place() else {
+            return;
+        };
+        loop {
+            let step = if back {
+                self.nav.back(current.clone())
+            } else {
+                self.nav.forward(current.clone())
+            };
+            let Some(place) = step else {
+                return;
+            };
+            if place.path != current.path && !self.root.join(&place.path).is_file() {
+                continue;
+            }
+            if place.path != current.path {
+                self.show_file(&place.path, None, cx);
+            }
+            if let Some(viewer) = &mut self.viewer {
+                viewer.go_to_spot(place.line, place.column);
+            }
+            cx.notify();
+            return;
+        }
+    }
+
+    /// Shows `path` without touching the navigation history.
+    fn show_file(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
         self.autosave(cx);
         self.warm_server(path, cx);
         // every way of opening a file (popup, tree) counts as a recent one
@@ -2017,6 +2226,7 @@ impl Workspace {
         self.request_highlights(cx);
         self.request_diagnostics(cx);
 
+        let preview = self.markdown_preview(cx);
         let mut root = div()
             .id("workspace")
             .size_full()
@@ -2063,6 +2273,19 @@ impl Workspace {
                 }),
             )
             .on_action(cx.listener(|this, _: &ToggleProjectTree, _, cx| this.toggle_tree(cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleMarkdownPreview, _, cx| this.toggle_md_preview(cx)),
+            )
+            .on_action(cx.listener(|this, _: &NavigateBack, _, cx| this.navigate(true, cx)))
+            .on_action(cx.listener(|this, _: &NavigateForward, _, cx| this.navigate(false, cx)))
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _: &MouseDownEvent, _, cx| this.navigate(true, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _: &MouseDownEvent, _, cx| this.navigate(false, cx)),
+            )
             .on_action(cx.listener(|this, _: &FindUsages, window, cx| this.find_usages(window, cx)))
             .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
             .on_action(cx.listener(|this, _: &FocusTree, _, cx| this.focus_tree(true, cx)))
@@ -2163,7 +2386,17 @@ impl Workspace {
                         None => div().flex_1().p_4().text_color(rgb(theme::DIM)).child(
                             "Press Space twice to open the popup. Alt+1 shows the project tree.",
                         ),
-                    }),
+                    })
+                    .children(preview.map(|view| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .p_4()
+                            .border_l_1()
+                            .border_color(rgb(theme::BORDER))
+                            .child(view)
+                    })),
             );
 
         let Some(popup) = &self.popup else {
@@ -2705,6 +2938,9 @@ fn main() {
             KeyBinding::new("ctrl-shift-f", FindInFiles, Some("Workspace")),
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
+            KeyBinding::new("ctrl-alt-left", NavigateBack, Some("Workspace")),
+            KeyBinding::new("ctrl-alt-right", NavigateForward, Some("Workspace")),
             KeyBinding::new("alt-f7", FindUsages, Some("Workspace")),
             KeyBinding::new("ctrl-alt-l", ReformatCode, Some("Workspace")),
             KeyBinding::new("ctrl-h", FocusTree, Some("Workspace")),

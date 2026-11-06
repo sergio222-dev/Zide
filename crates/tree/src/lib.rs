@@ -131,6 +131,13 @@ impl Tree {
         );
     }
 
+    /// Ctrl+D / Ctrl+U: moves the selection half of `visible` rows (at least one), stopping at
+    /// the ends.
+    pub fn move_half_page(&mut self, visible: usize, down: bool) {
+        let half = (visible / 2).max(1) as isize;
+        self.move_by(if down { half } else { -half });
+    }
+
     pub fn select_first(&mut self) {
         self.select(0);
     }

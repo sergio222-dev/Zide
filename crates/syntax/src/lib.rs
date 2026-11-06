@@ -27,6 +27,14 @@ pub enum Class {
     Punctuation,
     Tag,
     Attribute,
+    /// Markdown: a heading's text.
+    Heading,
+    Emphasis,
+    Strong,
+    /// Markdown: a link's destination.
+    Link,
+    /// Markdown: the characters that structure the text (`#`, `-`, `>`, `1.`, `---`).
+    Marker,
 }
 
 /// A run of bytes of one class. Runs are sorted and never overlap.
@@ -42,9 +50,26 @@ struct Grammar {
     query: String,
     /// `query` compiled, the first time it is needed (compiling takes milliseconds).
     compiled: OnceLock<Option<Query>>,
+    /// A second grammar for the parts of the text the first one leaves as opaque `inline`
+    /// nodes (Markdown's emphasis, code spans and links).
+    inline: Option<InlineGrammar>,
+}
+
+struct InlineGrammar {
+    language: Language,
+    query: String,
+    compiled: OnceLock<Option<Query>>,
 }
 
 impl Grammar {
+    fn compiled_query(&self) -> Option<&Query> {
+        self.compiled
+            .get_or_init(|| Query::new(&self.language, &self.query).ok())
+            .as_ref()
+    }
+}
+
+impl InlineGrammar {
     fn compiled_query(&self) -> Option<&Query> {
         self.compiled
             .get_or_init(|| Query::new(&self.language, &self.query).ok())
@@ -65,36 +90,53 @@ fn grammars() -> &'static [Grammar] {
                 language: tree_sitter_rust::LANGUAGE.into(),
                 query: tree_sitter_rust::HIGHLIGHTS_QUERY.to_string(),
                 compiled: OnceLock::new(),
+                inline: None,
             },
             Grammar {
                 extensions: &["js", "mjs", "cjs", "jsx"],
                 language: tree_sitter_javascript::LANGUAGE.into(),
                 query: format!("{js}\n{jsx}"),
                 compiled: OnceLock::new(),
+                inline: None,
             },
             Grammar {
                 extensions: &["ts", "mts", "cts"],
                 language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 query: format!("{js}\n{ts}"),
                 compiled: OnceLock::new(),
+                inline: None,
             },
             Grammar {
                 extensions: &["go"],
                 language: tree_sitter_go::LANGUAGE.into(),
                 query: generic_first(tree_sitter_go::HIGHLIGHTS_QUERY, "(identifier) @variable"),
                 compiled: OnceLock::new(),
+                inline: None,
             },
             Grammar {
                 extensions: &["py", "pyi"],
                 language: tree_sitter_python::LANGUAGE.into(),
                 query: tree_sitter_python::HIGHLIGHTS_QUERY.to_string(),
                 compiled: OnceLock::new(),
+                inline: None,
+            },
+            Grammar {
+                extensions: &["md", "markdown"],
+                language: tree_sitter_md::LANGUAGE.into(),
+                query: markdown_query(tree_sitter_md::HIGHLIGHT_QUERY_BLOCK),
+                compiled: OnceLock::new(),
+                inline: Some(InlineGrammar {
+                    language: tree_sitter_md::INLINE_LANGUAGE.into(),
+                    query: markdown_query(tree_sitter_md::HIGHLIGHT_QUERY_INLINE),
+                    compiled: OnceLock::new(),
+                }),
             },
             Grammar {
                 extensions: &["tsx"],
                 language: tree_sitter_typescript::LANGUAGE_TSX.into(),
                 query: format!("{js}\n{ts}\n{jsx}"),
                 compiled: OnceLock::new(),
+                inline: None,
             },
         ]
     })
@@ -103,6 +145,12 @@ fn grammars() -> &'static [Grammar] {
 pub use fold::{FoldKind, FoldRegion, fold_regions};
 pub use pair::{is_pair_candidate, matching_pair};
 pub use select::extend_selection;
+
+/// The Markdown queries color their structural characters as `punctuation.special`, which
+/// JavaScript and Python also use for something else: give them a class of their own.
+fn markdown_query(query: &str) -> String {
+    query.replace("@punctuation.special", "@markup.marker")
+}
 
 /// Moves the catch-all pattern `generic` to the front. Here the last pattern wins, as in
 /// Neovim; some grammars order theirs the other way round (first wins) and would paint every
@@ -204,37 +252,23 @@ fn highlight_tree(grammar: &Grammar, tree: &Tree, source: &str) -> Vec<Span> {
         return Vec::new();
     };
 
-    let classes: Vec<Option<Class>> = query
-        .capture_names()
-        .iter()
-        .map(|name| class_of(name))
-        .collect();
-
     // paint byte by byte: the pattern that comes last in the query wins, like in Neovim
     let mut painted: Vec<(usize, u8)> = vec![(0, 0); source.len()];
     let mut ids: Vec<Class> = Vec::new();
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
-    while let Some(m) = matches.next() {
-        for capture in m.captures {
-            let Some(class) = classes[capture.index as usize] else {
-                continue;
-            };
-            let id = match ids.iter().position(|&c| c == class) {
-                Some(i) => i,
-                None => {
-                    ids.push(class);
-                    ids.len() - 1
-                }
-            } as u8
-                + 1;
-            let range = capture.node.start_byte()..capture.node.end_byte();
-            for cell in &mut painted[range] {
-                if m.pattern_index >= cell.0 {
-                    *cell = (m.pattern_index, id);
-                }
-            }
-        }
+    paint(&mut painted, &mut ids, query, tree, source, 0);
+    // the inline patterns come after every block one, so they win where they overlap
+    if let Some(inline) = &grammar.inline
+        && let Some(inline_query) = inline.compiled_query()
+        && let Some(inline_tree) = parse_inline(inline, tree, source)
+    {
+        paint(
+            &mut painted,
+            &mut ids,
+            inline_query,
+            &inline_tree,
+            source,
+            query.pattern_count(),
+        );
     }
 
     let mut spans: Vec<Span> = Vec::new();
@@ -254,7 +288,84 @@ fn highlight_tree(grammar: &Grammar, tree: &Tree, source: &str) -> Vec<Span> {
     spans
 }
 
+/// Paints the captures of `query` over `tree` into `painted`; the patterns of this query rank
+/// from `first_pattern` on.
+fn paint(
+    painted: &mut [(usize, u8)],
+    ids: &mut Vec<Class>,
+    query: &Query,
+    tree: &Tree,
+    source: &str,
+    first_pattern: usize,
+) {
+    let classes: Vec<Option<Class>> = query
+        .capture_names()
+        .iter()
+        .map(|name| class_of(name))
+        .collect();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
+    while let Some(m) = matches.next() {
+        let pattern = first_pattern + m.pattern_index;
+        for capture in m.captures {
+            let Some(class) = classes[capture.index as usize] else {
+                continue;
+            };
+            let id = match ids.iter().position(|&c| c == class) {
+                Some(i) => i,
+                None => {
+                    ids.push(class);
+                    ids.len() - 1
+                }
+            } as u8
+                + 1;
+            let range = capture.node.start_byte()..capture.node.end_byte();
+            for cell in &mut painted[range] {
+                if pattern >= cell.0 {
+                    *cell = (pattern, id);
+                }
+            }
+        }
+    }
+}
+
+/// The inline grammar's tree over the `inline` nodes of the block `tree`, which it parses
+/// together as if they were one text.
+fn parse_inline(inline: &InlineGrammar, tree: &Tree, source: &str) -> Option<Tree> {
+    let mut ranges = Vec::new();
+    let mut cursor = tree.walk();
+    loop {
+        let node = cursor.node();
+        if node.kind() == "inline" {
+            ranges.push(node.range());
+        } else if cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                if ranges.is_empty() {
+                    return None;
+                }
+                let mut parser = Parser::new();
+                parser.set_language(&inline.language).ok()?;
+                parser.set_included_ranges(&ranges).ok()?;
+                return parser.parse(source, None);
+            }
+        }
+    }
+}
+
 fn class_of(capture: &str) -> Option<Class> {
+    match capture {
+        "text.title" => return Some(Class::Heading),
+        "text.emphasis" => return Some(Class::Emphasis),
+        "text.strong" => return Some(Class::Strong),
+        "text.uri" => return Some(Class::Link),
+        "text.reference" => return Some(Class::Function),
+        "text.literal" => return Some(Class::String),
+        "markup.marker" => return Some(Class::Marker),
+        _ => {}
+    }
     let head = capture.split('.').next()?;
     Some(match head {
         "keyword" | "conditional" | "repeat" | "include" | "storage" => Class::Keyword,
@@ -312,6 +423,81 @@ mod tests {
         assert!(found.contains(&("\"hi\"".into(), Class::String)));
         assert!(found.contains(&("# done".into(), Class::Comment)));
         assert!(language_for_path("stubs.pyi").is_some());
+    }
+
+    #[test]
+    fn markdown_blocks_are_colored() {
+        let found = classes(
+            "README.md",
+            "# Title\n\n- item\n> quote\n\n```rust\nlet x = 1;\n```\n",
+        );
+        assert!(found.contains(&("#".into(), Class::Marker)), "{found:?}");
+        assert!(
+            found.contains(&("Title".into(), Class::Heading)),
+            "{found:?}"
+        );
+        assert!(found.contains(&("- ".into(), Class::Marker)), "{found:?}");
+        assert!(found.contains(&("> ".into(), Class::Marker)), "{found:?}");
+        assert!(
+            found
+                .iter()
+                .any(|(t, c)| t.contains("let x = 1;") && *c == Class::String),
+            "{found:?}"
+        );
+        assert!(language_for_path("notes.markdown").is_some());
+    }
+
+    #[test]
+    fn markdown_inline_text_is_colored_over_its_block() {
+        let found = classes(
+            "a.md",
+            "Some **bold**, *soft*, `code` and [a link](http://x.io).\n\n## Mixed `code` head\n",
+        );
+        assert!(
+            found.contains(&("**bold**".into(), Class::Strong)),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&("*soft*".into(), Class::Emphasis)),
+            "{found:?}"
+        );
+        assert!(found.contains(&("code".into(), Class::String)), "{found:?}");
+        assert!(
+            found.contains(&("a link".into(), Class::Function)),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&("http://x.io".into(), Class::Link)),
+            "{found:?}"
+        );
+        // inside a heading, the inline pattern wins over the heading's color
+        assert!(
+            found.contains(&("Mixed ".into(), Class::Heading)),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&(" head".into(), Class::Heading)),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_without_inline_text_still_highlights() {
+        let found = classes("a.md", "---\n");
+        assert!(
+            found
+                .iter()
+                .any(|(t, c)| t.starts_with("---") && *c == Class::Marker),
+            "{found:?}"
+        );
+        assert!(highlight(language_for_path("a.md").unwrap(), "").is_empty());
+    }
+
+    #[test]
+    fn markdown_markers_do_not_recolor_other_languages() {
+        // JavaScript also uses `punctuation.special`; it keeps its class
+        let found = classes("a.js", "const s = `a${b}`;");
+        assert!(!found.iter().any(|(_, c)| *c == Class::Marker), "{found:?}");
     }
 
     #[test]

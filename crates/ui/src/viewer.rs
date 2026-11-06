@@ -718,6 +718,22 @@ impl Viewer {
         )
     }
 
+    /// The cursor's 0-based line and column.
+    pub fn cursor_spot(&self) -> (usize, usize) {
+        let at = self.buffer.position_of(self.vim.cursor());
+        (at.line, at.column)
+    }
+
+    /// Puts the cursor on the 0-based `line` and `column` (both clamped) and centers it.
+    pub fn go_to_spot(&mut self, line: usize, column: usize) {
+        let line = line.min(self.lines.len() - 1);
+        let offset = self.buffer.offset_of(Position { line, column });
+        self.vim.set_cursor(&self.buffer, offset);
+        self.unfold_hiding(line);
+        self.scroll
+            .scroll_to_item(self.rows.row_of(line), ScrollStrategy::Center);
+    }
+
     /// Puts the cursor on 1-based `line` and brings it into view.
     pub fn go_to_line(&mut self, line: u32) {
         let row = (line as usize).saturating_sub(1).min(self.lines.len() - 1);
@@ -796,6 +812,31 @@ impl Viewer {
         // top of the view
         self.scroll
             .scroll_to_item_strict(self.rows.row_of(top), ScrollStrategy::Top);
+    }
+
+    /// The first and last lines on screen as of the last layout, if there was one.
+    pub fn visible_lines(&self) -> Option<(usize, usize)> {
+        let (top, rows) = self.view_metrics()?;
+        let last = self.lines.len().saturating_sub(1);
+        Some((
+            self.rows.line(top).min(last),
+            self.rows.line(top + rows).min(last),
+        ))
+    }
+
+    /// The bytes of `line` without its indentation and line break, or `None` when it is blank.
+    pub fn line_source_range(&self, line: usize) -> Option<std::ops::Range<usize>> {
+        if line >= self.buffer.line_count() {
+            return None;
+        }
+        let text = self.buffer.line(line);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let indent = text.chars().take_while(|c| c.is_whitespace()).count();
+        let start = self.buffer.line_start(line) + indent;
+        Some(self.buffer.byte_of(start)..self.buffer.byte_of(start + trimmed.chars().count()))
     }
 
     /// `(first visible row, visible rows)` as of the last layout, if there was one.
@@ -2215,20 +2256,34 @@ fn related_lines(diagnostic: &Diagnostic) -> Vec<String> {
 
 fn style(class: Class) -> HighlightStyle {
     let color = match class {
-        Class::Keyword => 0xc678dd,
+        Class::Keyword | Class::Marker => 0xc678dd,
         Class::String => 0x98c379,
-        Class::Number | Class::Constant => 0xd19a66,
+        Class::Number | Class::Constant | Class::Strong => 0xd19a66,
         Class::Comment => 0x7f848e,
         Class::Function => 0x61afef,
         Class::Type | Class::Tag => 0xe5c07b,
         Class::Property | Class::Attribute => 0xd19a66,
-        Class::Variable => 0xe06c75,
+        Class::Variable | Class::Heading => 0xe06c75,
         Class::Operator | Class::Punctuation => 0xabb2bf,
+        Class::Emphasis => 0xc678dd,
+        Class::Link => 0x56b6c2,
     };
-    HighlightStyle {
+    let mut style = HighlightStyle {
         color: Some(rgb(color).into()),
         ..Default::default()
+    };
+    match class {
+        Class::Heading | Class::Strong => style.font_weight = Some(FontWeight::BOLD),
+        Class::Emphasis => style.font_style = Some(FontStyle::Italic),
+        Class::Link => {
+            style.underline = Some(UnderlineStyle {
+                thickness: px(1.),
+                ..Default::default()
+            })
+        }
+        _ => {}
     }
+    style
 }
 
 /// Splits the text into display lines (tabs expanded) with their colors, in line coordinates.
@@ -2636,6 +2691,32 @@ mod tests {
         // the emoji is two UTF-16 units: column 2 is the `x`
         assert!(viewer.apply_format(revision, vec![edit_at(0, 2, 3, "y")]));
         assert_eq!(viewer.text(), "😀y\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn go_to_spot_puts_the_cursor_where_cursor_spot_said_and_clamps() {
+        let (dir, file) = temp_file("spot", "one\ntwo words\nthree\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.go_to_spot(1, 4);
+        assert_eq!(viewer.cursor_spot(), (1, 4));
+        viewer.go_to_spot(0, 99); // past the end of the line
+        assert_eq!(viewer.cursor_spot().0, 0);
+        viewer.go_to_spot(99, 0); // past the end of the file
+        assert!(viewer.cursor_spot().0 >= 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_line_source_range_skips_indentation_and_blank_lines() {
+        let (dir, file) = temp_file("line-range", "# T\n\n  é x  \nend");
+        let viewer = Viewer::open(&dir, &file);
+        assert_eq!(viewer.line_source_range(0), Some(0..3));
+        assert_eq!(viewer.line_source_range(1), None);
+        // two spaces of indent, then `é x` (4 bytes) without the trailing spaces
+        assert_eq!(viewer.line_source_range(2), Some(7..11));
+        assert_eq!(viewer.line_source_range(3), Some(14..17));
+        assert_eq!(viewer.line_source_range(9), None);
         fs::remove_dir_all(dir).unwrap();
     }
 
