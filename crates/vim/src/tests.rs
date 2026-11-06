@@ -143,6 +143,7 @@ fn yank_and_paste() {
     assert_eq!(run("a\nb\n", "ddp").0, "b\na\n");
     assert_eq!(run("foo bar", "ywP").0, "foo foo bar");
     assert_eq!(run("abc", "xp").0, "bac");
+
     assert_eq!(run("abc", "yl3p").0, "aaaabc");
 }
 
