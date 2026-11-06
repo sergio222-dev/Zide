@@ -300,6 +300,8 @@ enum LspState {
 
 struct Workspace {
     focus: FocusHandle,
+    /// Editor font size, changed with Ctrl+wheel and shared by every file.
+    font_size: f32,
     /// When the last Space was pressed in Normal mode: two in a row open the popup.
     last_space: Option<Instant>,
     /// The project tree on the left.
@@ -368,6 +370,7 @@ impl Workspace {
         let registry = action_registry();
         let mut workspace = Self {
             focus: cx.focus_handle(),
+            font_size: viewer::DEFAULT_FONT_SIZE,
             last_space: None,
             tree: Tree::new(),
             tree_visible: false,
@@ -1378,6 +1381,7 @@ impl Workspace {
         if let Some(line) = line {
             viewer.go_to_line(line);
         }
+        viewer.set_font_size(self.font_size);
         self.viewer = Some(viewer);
         session::remember_file(&self.root, path);
         self.tree.reveal(path);
@@ -1386,6 +1390,27 @@ impl Workspace {
         if self.find.is_some() {
             self.run_find(cx); // the panel stays open: search the new file
         }
+    }
+
+    /// Ctrl+wheel: a notch is a point of font size; a touchpad scrolls by pixels, so it
+    /// zooms in proportion.
+    fn zoom(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let dy = f32::from(event.delta.pixel_delta(window.line_height()).y);
+        if dy == 0. {
+            return;
+        }
+        let step = if event.delta.precise() {
+            dy / 40.
+        } else {
+            dy.signum()
+        };
+        let Some(viewer) = &mut self.viewer else {
+            return;
+        };
+        self.font_size =
+            (self.font_size + step).clamp(viewer::MIN_FONT_SIZE, viewer::MAX_FONT_SIZE);
+        viewer.set_font_size(self.font_size);
+        cx.notify();
     }
 
     fn run_selected_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1793,7 +1818,12 @@ impl Render for Workspace {
                             .h_full()
                             .text_color(rgb(theme::TEXT))
                             .children(self.find_panel(cx))
-                            .child(viewer.render()),
+                            .child(viewer.render())
+                            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
+                                if event.modifiers.control {
+                                    this.zoom(event, window, cx);
+                                }
+                            })),
                         None => div().flex_1().p_4().text_color(rgb(theme::DIM)).child(
                             "Press Space twice to open the popup. Alt+1 shows the project tree.",
                         ),

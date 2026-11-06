@@ -20,7 +20,11 @@ use crate::theme;
 /// Files larger than this are not opened.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 const TAB_WIDTH: usize = 4;
-const ROW_HEIGHT: f32 = 20.;
+/// Row height as a multiple of the font size (20px at the default 16px).
+const ROW_RATIO: f32 = 1.25;
+pub const DEFAULT_FONT_SIZE: f32 = 16.;
+pub const MIN_FONT_SIZE: f32 = 8.;
+pub const MAX_FONT_SIZE: f32 = 48.;
 /// Monospace families, in order of preference. GPUI does not resolve the generic `monospace`.
 const EDITOR_FONTS: &[&str] = &[
     "JetBrains Mono",
@@ -184,6 +188,9 @@ pub struct Viewer {
     anim: Option<ScrollAnim>,
     /// Advance of one monospace cell in pixels, measured on the first frame.
     cell_width: Option<f32>,
+    font_size: f32,
+    /// Scroll position (px) as of the last frame, before any wheel event of the next one.
+    settled_top: f32,
     font_family: SharedString,
     /// Declarations of the file as of `built_at`, for the breadcrumb.
     outline: Vec<StubNode>,
@@ -224,6 +231,8 @@ impl Viewer {
             z_pending: false,
             anim: None,
             cell_width: None,
+            font_size: DEFAULT_FONT_SIZE,
+            settled_top: 0.,
             font_family: EDITOR_FONTS[0].into(),
             outline: Vec::new(),
             root_name: root
@@ -286,8 +295,8 @@ impl Viewer {
     fn view_metrics(&self) -> Option<(usize, usize)> {
         let state = self.scroll.0.borrow();
         let viewport = f32::from(state.last_item_size?.item.height);
-        let top = (-f32::from(state.base_handle.offset().y) / ROW_HEIGHT).max(0.) as usize;
-        let rows = (viewport / ROW_HEIGHT) as usize;
+        let top = (-f32::from(state.base_handle.offset().y) / self.row_height()).max(0.) as usize;
+        let rows = (viewport / self.row_height()) as usize;
         Some((top, rows.max(1)))
     }
 
@@ -335,13 +344,33 @@ impl Viewer {
         Some((viewport, -f32::from(state.base_handle.offset().y)))
     }
 
+    fn row_height(&self) -> f32 {
+        self.font_size * ROW_RATIO
+    }
+
+    /// Changes the editor font size (clamped), keeping the first visible row where it was
+    /// at the last frame. A Ctrl+wheel zoom also reaches the list, which scrolls by it;
+    /// anchoring on the last frame takes that back, even when the size no longer changes.
+    pub fn set_font_size(&mut self, size: f32) {
+        let top_row = self.settled_top / self.row_height();
+        self.font_size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        let state = self.scroll.0.borrow();
+        let x = state.base_handle.offset().x;
+        state
+            .base_handle
+            .set_offset(point(x, px(-top_row * self.row_height())));
+        drop(state);
+        self.anim = None;
+        self.cell_width = None; // measured again with the new size on the next tick
+    }
+
     /// Glides the view so `top` (in pixels, clamped to the document) is its first row.
     /// Without a layout there is nothing to glide on: `fallback` scrolls instead.
     fn glide_to(&mut self, top: impl FnOnce(f32) -> f32, fallback: impl FnOnce(&Self)) {
         let Some((viewport, current)) = self.view_pixels() else {
             return fallback(self);
         };
-        let max = (self.buffer.line_count() as f32 * ROW_HEIGHT - viewport).max(0.);
+        let max = (self.buffer.line_count() as f32 * self.row_height() - viewport).max(0.);
         self.anim = Some(ScrollAnim {
             from: current,
             to: top(viewport).clamp(0., max),
@@ -351,9 +380,10 @@ impl Viewer {
 
     /// Advances the glide one frame; asks for another while it lasts.
     pub fn tick(&mut self, window: &mut Window) {
+        self.settled_top = -f32::from(self.scroll.0.borrow().base_handle.offset().y);
         if self.cell_width.is_none() {
             let text_system = window.text_system();
-            let size = window.text_style().font_size.to_pixels(window.rem_size());
+            let size = px(self.font_size);
             let installed = text_system.all_font_names();
             if let Some(family) = EDITOR_FONTS
                 .iter()
@@ -385,11 +415,12 @@ impl Viewer {
     /// `zt`, `zz`, `zb`: puts the cursor line at the top, middle or bottom of the view.
     fn place_cursor_line(&mut self, strategy: ScrollStrategy) {
         let line = self.buffer.position_of(self.vim.cursor()).line;
-        let y = line as f32 * ROW_HEIGHT;
+        let row = self.row_height();
+        let y = line as f32 * row;
         self.glide_to(
             |viewport| match strategy {
-                ScrollStrategy::Center => y - (viewport - ROW_HEIGHT) / 2.,
-                ScrollStrategy::Bottom => y + ROW_HEIGHT - viewport,
+                ScrollStrategy::Center => y - (viewport - row) / 2.,
+                ScrollStrategy::Bottom => y + row - viewport,
                 _ => y,
             },
             |this| this.scroll.scroll_to_item_strict(line, strategy),
@@ -408,8 +439,8 @@ impl Viewer {
             line.saturating_sub(half)
         };
         self.vim.move_to_line(&self.buffer, line);
-        let shift = half as f32 * ROW_HEIGHT;
-        let top = top as f32 * ROW_HEIGHT;
+        let shift = half as f32 * self.row_height();
+        let top = top as f32 * self.row_height();
         self.glide_to(|_| if down { top + shift } else { top - shift }, |_| {});
     }
 
@@ -1011,6 +1042,8 @@ impl Viewer {
             .and_then(|i| matches.as_ref().map(|m| m[i].start));
         let word_matches = self.word_highlights();
         let cell_width = self.cell_width.unwrap_or(8.);
+        let row_height = self.row_height();
+        let scale = self.font_size / DEFAULT_FONT_SIZE;
         let list = uniform_list("viewer", lines.len(), move |range, _, _| {
             range
                 .map(|row| {
@@ -1049,11 +1082,11 @@ impl Viewer {
                     }
                     // The caret is drawn on the cell grid, so it is as wide on a space or
                     // a thin letter as on any other character.
+                    let gutter = (12. * digits as f32 + 16.) * scale;
                     let caret = (row == cursor_line).then(|| {
                         let column = text[..cursor_cell.start.min(text.len())].chars().count();
-                        let gutter = 12. * digits as f32 + 16.;
                         let left = px(gutter + column as f32 * cell_width);
-                        let caret = div().absolute().top_0().left(left).h(px(ROW_HEIGHT));
+                        let caret = div().absolute().top_0().left(left).h(px(row_height));
                         if insert {
                             caret.w(px(2.)).bg(rgb(theme::CARET_BAR)) // a bar, like a terminal's
                         } else {
@@ -1063,11 +1096,11 @@ impl Viewer {
                     div()
                         .relative()
                         .flex()
-                        .h(px(ROW_HEIGHT))
+                        .h(px(row_height))
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .w(px(12. * digits as f32 + 16.))
+                                .w(px(gutter))
                                 .pr_3()
                                 .text_right()
                                 .text_color(rgb(theme::DIM))
@@ -1093,6 +1126,7 @@ impl Viewer {
                 div()
                     .flex_1()
                     .font_family(self.font_family.clone())
+                    .text_size(px(self.font_size))
                     .whitespace_nowrap()
                     .child(list),
             )
@@ -1604,6 +1638,17 @@ mod tests {
             colors: Vec::new(),
             cols: None,
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_font_size_is_clamped_and_the_rows_follow_it() {
+        let (dir, name) = temp_file("zoom.txt", "a\nb\n");
+        let mut viewer = Viewer::open(&dir, &name);
+        assert_eq!(viewer.row_height(), 20.);
+        viewer.set_font_size(1000.);
+        assert_eq!(viewer.row_height(), MAX_FONT_SIZE * ROW_RATIO);
+        viewer.set_font_size(0.);
+        assert_eq!(viewer.row_height(), MIN_FONT_SIZE * ROW_RATIO);
     }
 
     #[::core::prelude::v1::test]
