@@ -593,11 +593,14 @@ impl Workspace {
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let asked = path.clone();
-            let (blame, head) = cx
+            let (blame, on_disk, head) = cx
                 .background_executor()
                 .spawn(async move {
+                    // the text git blames: the file on disk
+                    let on_disk = std::fs::read_to_string(root.join(&asked)).unwrap_or_default();
                     (
                         zide_git::blame(&root, &asked),
+                        on_disk,
                         zide_git::head_content(&root, &asked),
                     )
                 })
@@ -605,7 +608,7 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 // The viewer may have moved on to another file meanwhile.
                 if let Some(viewer) = this.viewer.as_mut().filter(|v| v.path() == path) {
-                    viewer.set_blame(blame);
+                    viewer.set_blame(blame, on_disk);
                     viewer.set_head(head);
                     cx.notify();
                 }

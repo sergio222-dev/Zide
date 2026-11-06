@@ -87,6 +87,33 @@ pub fn line_changes(old: &str, new: &str) -> HashMap<usize, LineChange> {
     changes
 }
 
+/// For each line of `new`, the line of `old` it is (`None` for a line that is not in `old`).
+/// A diff that takes too long to compute maps every line to `None`.
+pub fn line_map(old: &str, new: &str) -> Vec<Option<usize>> {
+    let mut map = vec![None; new.lines().count()];
+    if old == new {
+        map.iter_mut().enumerate().for_each(|(i, to)| *to = Some(i));
+        return map;
+    }
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Myers)
+        .timeout(Duration::from_millis(100))
+        .diff_lines(old, new);
+    for op in diff.ops() {
+        if let DiffOp::Equal {
+            old_index,
+            new_index,
+            len,
+        } = *op
+        {
+            for k in 0..len {
+                map[new_index + k] = Some(old_index + k);
+            }
+        }
+    }
+    map
+}
+
 /// Who last changed one line, as `git blame` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlameLine {
@@ -231,6 +258,13 @@ mod tests {
             line("Ana", midnight + 12 * 3600, 0).label(),
             "Ana, 8/22/26, 12:00 PM • added list"
         );
+    }
+
+    #[test]
+    fn a_line_map_follows_lines_through_insertions_and_edits() {
+        let map = line_map("a\nb\nc\n", "a\nnew\nb\nC\n");
+        assert_eq!(map, [Some(0), None, Some(1), None]);
+        assert_eq!(line_map("a\nb\n", "a\nb\n"), [Some(0), Some(1)]);
     }
 
     #[test]

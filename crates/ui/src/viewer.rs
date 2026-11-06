@@ -265,7 +265,10 @@ pub struct Viewer {
     /// Name of the project folder, first crumb of the breadcrumb.
     root_name: String,
     /// Who last changed each line of the file on disk, when git knows it.
-    blame: Option<Arc<Vec<BlameLine>>>,
+    /// Who changed each line of the file as git saw it, and that text.
+    blame: Option<Arc<(Vec<BlameLine>, String)>>,
+    /// For each line of the buffer, the line of that text it is (`None`: edited since).
+    blame_map: Arc<Vec<Option<usize>>>,
     /// The file as of the last commit, to mark what changed since.
     head: Option<Arc<String>>,
     /// The lines that differ from `head`, as of the current text.
@@ -334,6 +337,7 @@ impl Viewer {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             blame: None,
+            blame_map: Arc::default(),
             head: None,
             diagnostics: Arc::default(),
             squiggles: Arc::default(),
@@ -347,9 +351,18 @@ impl Viewer {
         viewer
     }
 
-    /// Records who last changed each line of the file on disk (`None`: git has no answer).
-    pub fn set_blame(&mut self, blame: Option<Vec<BlameLine>>) {
-        self.blame = blame.map(Arc::new);
+    /// Records who last changed each line of the file as it was on disk (`text`), `None` when
+    /// git has no answer. Edits made since are followed by diffing the buffer with `text`.
+    pub fn set_blame(&mut self, blame: Option<Vec<BlameLine>>, text: String) {
+        self.blame = blame.map(|lines| Arc::new((lines, text)));
+        self.refresh_blame_map();
+    }
+
+    fn refresh_blame_map(&mut self) {
+        self.blame_map = Arc::new(match &self.blame {
+            Some(blame) => zide_git::line_map(&blame.1, &self.buffer.text()),
+            None => Vec::new(),
+        });
     }
 
     /// Records the parameter names a language server gave for the text as of `revision`.
@@ -591,21 +604,22 @@ impl Viewer {
         });
     }
 
-    /// The blame of the cursor's line, in gray after the code. A line that differs from the last
-    /// commit is ours and uncommitted, whether or not it was saved. For the others, only while
-    /// the buffer is what is on disk: after an edit the lines no longer match what git saw.
+    /// The blame of the cursor's line, in gray after the code. After an edit the blame of the
+    /// lines that did not change still holds; a line that did is ours and uncommitted.
     fn blame_label(&self) -> Option<String> {
         let line = self.cursor_line();
-        if matches!(
-            self.changes.get(&line),
-            Some(LineChange::Added | LineChange::Modified)
-        ) {
-            return Some(zide_git::UNCOMMITTED_LABEL.into());
+        let Some(blame) = &self.blame else {
+            // git has not answered (or does not know the file): only the edits are known
+            return matches!(
+                self.changes.get(&line),
+                Some(LineChange::Added | LineChange::Modified)
+            )
+            .then(|| zide_git::UNCOMMITTED_LABEL.into());
+        };
+        match self.blame_map.get(line)? {
+            Some(old) => Some(blame.0.get(*old)?.label()),
+            None => Some(zide_git::UNCOMMITTED_LABEL.into()),
         }
-        if self.is_dirty() {
-            return None;
-        }
-        Some(self.blame.as_ref()?.get(line)?.label())
     }
 
     /// Both ends of the bracket, JSX tag or Python block under the caret (the character before
@@ -692,7 +706,6 @@ impl Viewer {
                 self.saved_at = self.buffer.revision();
                 self.disk = disk_stamp(&self.full_path);
                 self.notice = None;
-                self.blame = None;
                 true
             }
             Err(e) => {
@@ -1527,6 +1540,7 @@ impl Viewer {
         self.collapsed.retain(|line| starts.contains(line));
         self.rebuild_rows();
         self.refresh_changes();
+        self.refresh_blame_map();
         self.refresh_squiggles();
         self.outline = match stub_language(&self.path) {
             Some(language) if self.editable => extract_nodes(language, &self.buffer.text()),
@@ -2804,8 +2818,8 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn blame_shows_for_the_cursor_line_until_the_buffer_is_edited_or_saved() {
-        let (dir, file) = temp_file("blame", "one\ntwo\n");
+    fn blame_follows_the_lines_through_edits_and_saves() {
+        let (dir, file) = temp_file("blame", "one\ntwo\nthree\n");
         let mut viewer = Viewer::open(&dir, &file);
         assert_eq!(viewer.blame_label(), None); // git has not answered yet
         let entry = |summary: &str| BlameLine {
@@ -2815,39 +2829,49 @@ mod tests {
             summary: summary.into(),
             committed: true,
         };
-        viewer.set_blame(Some(vec![entry("first"), entry("second")]));
+        viewer.set_blame(
+            Some(vec![entry("first"), entry("second"), entry("third")]),
+            "one\ntwo\nthree\n".into(),
+        );
         assert_eq!(
             viewer.blame_label().as_deref(),
             Some("Molina, 1/1/70, 12:00 AM \u{2022} first")
         );
         type_keys(&mut viewer, "j");
         assert!(viewer.blame_label().unwrap().ends_with("second"));
+        // edit line two: it is ours and uncommitted, the others keep their blame
         type_keys(&mut viewer, "x");
-        assert_eq!(viewer.blame_label(), None); // edited: the lines no longer match
+        assert_eq!(
+            viewer.blame_label().as_deref(),
+            Some(zide_git::UNCOMMITTED_LABEL)
+        );
+        type_keys(&mut viewer, "k");
+        assert!(viewer.blame_label().unwrap().ends_with("first"));
+        type_keys(&mut viewer, "jj");
+        assert!(viewer.blame_label().unwrap().ends_with("third"));
+        // a line inserted above shifts the rest: "third" is still blamed on its commit
+        type_keys(&mut viewer, "ggOnew");
+        viewer.handle_key(Key::Esc);
+        type_keys(&mut viewer, "G");
+        assert!(viewer.blame_label().unwrap().ends_with("third"));
         assert!(viewer.save());
-        assert_eq!(viewer.blame_label(), None); // saved: waits for the new blame
+        assert!(viewer.blame_label().unwrap().ends_with("third")); // saved: holds until git answers
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[::core::prelude::v1::test]
-    fn an_edited_line_is_blamed_on_us_as_uncommitted() {
+    fn without_a_blame_an_edited_line_is_still_ours_and_uncommitted() {
         let (dir, file) = temp_file("blame-edit", "one\ntwo\n");
         let mut viewer = Viewer::open(&dir, &file);
         viewer.set_head(Some("one\ntwo\n".into()));
-        assert_eq!(viewer.blame_label(), None); // same as the commit, blame not answered yet
+        assert_eq!(viewer.blame_label(), None);
         type_keys(&mut viewer, "jx");
         assert_eq!(
             viewer.blame_label().as_deref(),
             Some(zide_git::UNCOMMITTED_LABEL)
-        ); // edited, not saved
+        );
         type_keys(&mut viewer, "k");
-        assert_eq!(viewer.blame_label(), None); // an untouched line has no blame while dirty
-        type_keys(&mut viewer, "j");
-        assert!(viewer.save());
-        assert_eq!(
-            viewer.blame_label().as_deref(),
-            Some(zide_git::UNCOMMITTED_LABEL)
-        ); // saved but still not committed
+        assert_eq!(viewer.blame_label(), None);
         fs::remove_dir_all(dir).unwrap();
     }
 
