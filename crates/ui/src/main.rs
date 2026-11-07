@@ -208,6 +208,22 @@ fn action_registry() -> Vec<ActionDef> {
             run: |ws, window, cx| ws.toggle_claude(window, cx),
         },
         ActionDef {
+            name: "Claude: Resume Session",
+            synonyms: &["claude", "history", "sessions", "continue", "resume"],
+            action: None,
+            closes_popup: true,
+            state: None,
+            run: |ws, window, cx| ws.claude_history(window, cx),
+        },
+        ActionDef {
+            name: "Claude: New Chat",
+            synonyms: &["claude", "new", "clear", "session"],
+            action: None,
+            closes_popup: true,
+            state: None,
+            run: |ws, window, cx| ws.claude_new(window, cx),
+        },
+        ActionDef {
             name: "Toggle Markdown Preview",
             synonyms: &["markdown", "md", "render"],
             action: Some(Box::new(ToggleMarkdownPreview)),
@@ -2906,7 +2922,7 @@ impl Workspace {
                 cx.notify();
             }))
             .child(if self.claude_open {
-                self.claude_view(cx)
+                self.claude_view(window, cx)
             } else {
                 div()
                     .flex()
