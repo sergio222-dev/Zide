@@ -31,6 +31,7 @@ mod session;
 mod statusbar;
 mod sticky;
 mod theme;
+mod tree_ops;
 mod usages;
 mod viewer;
 mod welcome;
@@ -500,6 +501,10 @@ struct Workspace {
     commit: Option<commit::CommitPanel>,
     commit_open: bool,
     /// What git says of each changed file, for the colors of the project tree.
+    /// The entry the tree copied (`y`), for `p`.
+    tree_clipboard: Option<String>,
+    /// A path the next scan selects in the tree (the one just moved or pasted).
+    tree_reveal: Option<String>,
     git_status: Arc<std::collections::HashMap<String, zide_git::ChangeKind>>,
     /// Chats started from now on run `claude` with none of the user's configuration, which
     /// makes a test turn cheap; see `zide_claude::Options::minimal`.
@@ -653,6 +658,8 @@ impl Workspace {
             claude_open: false,
             commit: None,
             commit_open: false,
+            tree_clipboard: None,
+            tree_reveal: None,
             git_status: Arc::default(),
             branch: None,
             branches: None,
@@ -738,6 +745,9 @@ impl Workspace {
                 this.tree.set_entries(&paths, &dirs);
                 if let Some(viewer) = &this.viewer {
                     this.tree.reveal(viewer.path()); // the file restored at startup
+                }
+                if let Some(path) = this.tree_reveal.take() {
+                    this.tree.reveal(&path);
                 }
                 this.replace_index(FileIndex::new(paths));
                 this._watcher = watcher.ok();
@@ -1774,7 +1784,7 @@ impl Workspace {
     }
 
     /// Keys while the tree has the focus: Vim motions, arrows and Enter.
-    fn tree_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn tree_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         use zide_vim::Key;
         let pending_g = std::mem::take(&mut self.tree_g);
         let outcome = match (event.keystroke.key.as_str(), vim_key(event)) {
@@ -1810,6 +1820,22 @@ impl Workspace {
             }
             (_, Some(Key::Esc)) => {
                 self.tree_focused = false;
+                TreeOutcome::None
+            }
+            (_, Some(Key::Char('m'))) => {
+                self.tree_move(window, cx);
+                TreeOutcome::None
+            }
+            (_, Some(Key::Char('d'))) => {
+                self.tree_delete(window, cx);
+                TreeOutcome::None
+            }
+            (_, Some(Key::Char('y'))) => {
+                self.tree_copy(cx);
+                TreeOutcome::None
+            }
+            (_, Some(Key::Char('p'))) => {
+                self.tree_paste(cx);
                 TreeOutcome::None
             }
             _ => TreeOutcome::None,
@@ -2007,7 +2033,7 @@ impl Workspace {
         }
         self.last_space = None;
         if in_tree {
-            self.tree_key(event, cx);
+            self.tree_key(event, window, cx);
             cx.stop_propagation();
             return;
         }
@@ -3056,6 +3082,9 @@ impl Workspace {
                 }
             }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if window.has_active_dialog(cx) {
+                    return; // typing in a dialog is not for the editor or the tree
+                }
                 if this.branches.is_some() {
                     return this.branches_key(event, window, cx);
                 }
