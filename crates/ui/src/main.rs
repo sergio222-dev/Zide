@@ -1320,10 +1320,15 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Shows `notification`, in place of the last one this view showed: they do not pile up.
     fn notify(&self, notification: Notification, cx: &mut Context<Self>) {
+        struct WorkspaceNote;
         self.window
             .update(cx, |_, window, cx| {
-                window.push_notification(notification.placement(Anchor::BottomRight), cx)
+                let notification = notification
+                    .id::<WorkspaceNote>()
+                    .placement(Anchor::BottomRight);
+                window.push_notification(notification, cx)
             })
             .ok();
     }
@@ -1848,7 +1853,7 @@ impl Workspace {
                 TreeOutcome::None
             }
             (_, Some(Key::Char('y'))) => {
-                self.tree_copy(cx);
+                self.tree_copy();
                 TreeOutcome::None
             }
             (_, Some(Key::Char('p'))) => {

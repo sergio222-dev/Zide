@@ -193,7 +193,6 @@ impl Workspace {
                 match result {
                     Ok(()) => {
                         this.tree_reveal = path.rsplit_once('/').map(|(parent, _)| parent.into());
-                        this.notify(Notification::success(format!("Deleted '{path}'")), cx);
                     }
                     Err(why) => this.notify(Notification::error(why).title("Could not delete"), cx),
                 }
@@ -207,11 +206,10 @@ impl Workspace {
     }
 
     /// `y`: remembers the selected entry to paste.
-    pub(crate) fn tree_copy(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn tree_copy(&mut self) {
         let Some((path, _)) = self.selected_entry() else {
             return;
         };
-        self.notify(Notification::info(format!("Copied '{path}'")), cx);
         self.tree_clipboard = Some(path);
     }
 
@@ -237,10 +235,7 @@ impl Workspace {
                 .await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok(copy) => {
-                        this.notify(Notification::success(format!("Pasted '{copy}'")), cx);
-                        this.tree_reveal = Some(copy);
-                    }
+                    Ok(copy) => this.tree_reveal = Some(copy),
                     Err(why) => this.notify(Notification::error(why).title("Could not paste"), cx),
                 }
                 this.rescan(cx);
