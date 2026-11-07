@@ -3,6 +3,7 @@
 //! its events into UI state and draws the history and the input box.
 
 mod asks;
+mod gauges;
 mod images;
 mod menu;
 mod options;
@@ -16,8 +17,8 @@ use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::*;
 use zide_claude::history::{self, SessionInfo};
 use zide_claude::{
-    Block, Defaults, Event, Options, Overall, Permission, Resolution, Session, Status, Transcript,
-    Value,
+    Block, Defaults, Event, Limits, Options, Overall, Permission, Resolution, Session, Status,
+    Transcript, Value,
 };
 
 use crate::markdown::{TextView, TextViewState};
@@ -32,6 +33,8 @@ pub struct Chats {
     commands: Vec<String>,
     /// What `claude` uses for the project when no model or effort is picked.
     defaults: Defaults,
+    /// The account's usage limits as the last turn of any chat reported them.
+    limits: Option<Limits>,
     /// The list of earlier conversations, while it is open.
     sessions: Option<sessions::Sessions>,
 }
@@ -49,6 +52,7 @@ impl Chats {
             next_id: 0,
             commands,
             defaults,
+            limits: None,
             sessions: None,
         };
         chats.add(window, cx);
@@ -419,6 +423,11 @@ impl Workspace {
             chats.commands = commands.clone();
             crate::session::remember_claude_commands(&self.root, commands);
         }
+        if let Event::Limits(limits) = &event
+            && let Some(chats) = &mut self.claude
+        {
+            chats.limits = Some(*limits);
+        }
         // a closed chat has no one to tell
         let Some(chat) = self
             .claude
@@ -678,6 +687,10 @@ impl Workspace {
         let menu = self.menu_view(cx);
         let images = self.images_view(cx);
         let panel = self.claude_panel(chats, cx);
+        let limits = chats.limits;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
         let ended = chat.status() == Status::Inactive && !chat.is_empty();
         let main = div()
             .relative()
@@ -703,7 +716,6 @@ impl Workspace {
                             .text_color(rgb(theme::STRONG))
                             .child(chat.title.clone().unwrap_or_else(|| "New chat".to_owned())),
                     )
-                    .children(self.dropdowns_view())
                     .child(
                         Button::new("claude-history-open")
                             .ghost()
@@ -763,6 +775,15 @@ impl Workspace {
                                     .py_2()
                                     .children(images)
                                     .child(Textarea::new(&chat.input)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_4()
+                                    .children(self.dropdowns_view())
+                                    .child(gauges::view(&chat.transcript, limits.as_ref(), now)),
                             )
                             .child(
                                 div()
