@@ -16,6 +16,7 @@ use std::{
 
 mod branches;
 mod chat;
+mod commit;
 mod definition;
 mod file_icon;
 mod indent;
@@ -75,6 +76,7 @@ actions!(
         RecentFiles,
         ToggleProjectTree,
         ToggleClaudeChat,
+        ToggleCommitPanel,
         ToggleMarkdownPreview,
         NavigateBack,
         NavigateForward,
@@ -198,6 +200,14 @@ fn action_registry() -> Vec<ActionDef> {
             closes_popup: true,
             state: None,
             run: |ws, window, cx| ws.toggle_tree(window, cx),
+        },
+        ActionDef {
+            name: "Toggle Commit Panel",
+            synonyms: &["commit", "git", "changes", "stage"],
+            action: Some(Box::new(ToggleCommitPanel)),
+            closes_popup: true,
+            state: None,
+            run: |ws, window, cx| ws.toggle_commit(window, cx),
         },
         ActionDef {
             name: "Toggle Claude Chat",
@@ -484,6 +494,8 @@ struct Workspace {
     /// Whether a supported `claude` is installed, once known.
     claude_installed: bool,
     claude_open: bool,
+    commit: Option<commit::CommitPanel>,
+    commit_open: bool,
     /// Chats started from now on run `claude` with none of the user's configuration, which
     /// makes a test turn cheap; see `zide_claude::Options::minimal`.
     claude_bare: bool,
@@ -633,6 +645,8 @@ impl Workspace {
             claude_installed: false,
             claude_bare: false,
             claude_open: false,
+            commit: None,
+            commit_open: false,
             branch: None,
             branches: None,
             md_preview: false,
@@ -2328,6 +2342,7 @@ impl Workspace {
                 let (result, status) = outcome;
                 match result {
                     Ok(()) => {
+                        this.commit_finished(true, cx);
                         this.branch = status;
                         this.rescan(cx);
                         if let Some(done) = done {
@@ -2335,7 +2350,10 @@ impl Workspace {
                         }
                         cx.notify();
                     }
-                    Err(why) => this.notify(Notification::error(why).title(failure), cx),
+                    Err(why) => {
+                        this.commit_finished(false, cx);
+                        this.notify(Notification::error(why).title(failure), cx)
+                    }
                 }
             })
             .ok();
@@ -2904,6 +2922,11 @@ impl Workspace {
                 cx.listener(|this, _: &ToggleProjectTree, window, cx| this.toggle_tree(window, cx)),
             )
             .on_action(
+                cx.listener(|this, _: &ToggleCommitPanel, window, cx| {
+                    this.toggle_commit(window, cx)
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &ToggleClaudeChat, window, cx| {
                     this.toggle_claude(window, cx)
                 }),
@@ -2954,7 +2977,7 @@ impl Workspace {
                 }
                 let Some(popup) = &mut this.popup else {
                     // the chat's keys are seen earlier, by the interceptor
-                    if !this.claude_open {
+                    if !this.claude_open && !this.commit_focused(window, cx) {
                         this.editor_key(event, window, cx);
                     }
                     return;
@@ -2980,6 +3003,9 @@ impl Workspace {
                     .min_h_0()
                     .w_full()
                     .children(self.tree_visible.then(|| self.project_tree(cx)))
+                    .children(
+                        (self.commit_open && self.commit.is_some()).then(|| self.commit_view(cx)),
+                    )
                     .child(match &self.viewer {
                         Some(viewer) => div()
                             .flex()
@@ -3933,7 +3959,8 @@ fn main() {
             KeyBinding::new("ctrl-shift-~", SwitchBranch, Some("Workspace")),
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
-            KeyBinding::new("alt-2", ToggleClaudeChat, Some("Workspace")),
+            KeyBinding::new("alt-2", ToggleCommitPanel, Some("Workspace")),
+            KeyBinding::new("alt-3", ToggleClaudeChat, Some("Workspace")),
             KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
             KeyBinding::new("ctrl-alt-left", NavigateBack, Some("Workspace")),
             KeyBinding::new("ctrl-alt-right", NavigateForward, Some("Workspace")),

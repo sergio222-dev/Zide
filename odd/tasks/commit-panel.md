@@ -10,9 +10,10 @@ Objective: left side panel to review changed files, tick them and commit (or com
 - S6 (assumed): Commit commits only ticked files; Push never forced.
 
 ## Tasks
-- T1 (S3,S6) zide_git: changed files (status), commit selected paths, amend — inline — pending
-- T2 (S2-S5) ui/commit.rs panel state + render — inline — pending
-- T3 (S1) wire Alt+2 / Alt+3, action, command list entry, docs — inline — pending
+- T1 (S3,S6) zide_git: changed files (status), commit selected paths, amend — inline — done (3ba3a00)
+- T2 (S2-S5) ui/commit.rs panel state + render — inline — done
+- T3 (S1) Alt+2 / Alt+3, action, Actions-list entry, README — inline — done
 
 ## Log
 L1 (2026-11-07): "mejor no, haremos una integracion de un panel lateral para commitear, ejemplo [Image #11] moveremos el chat a alt+3 y con alt+2 abriremos este panel"
+L2 (2026-11-07): cargo clippy clean; zide-git 21 tests, zide-ui 156 tests pass; app runs 8s without panic. Not observed: the panel on screen, Alt+2/Alt+3, a real commit from the UI (needs a person at the keyboard).

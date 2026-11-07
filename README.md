@@ -124,6 +124,7 @@ line says a new release is available.
 | `Alt+F7` | Find Usages |
 | `gd` / `Ctrl+B` | Go to Definition |
 | `Alt+1` | Toggle project tree |
+| `Alt+2` | Commit panel: tick files, write a message, **Commit** or **Commit and Push…** (`Amend` folds them into the last commit) |
 | `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Navigate back / forward (also the mouse's back and forward buttons) |
 | `Ctrl+Shift+M` | Toggle Markdown preview (`.md` files) |
 | `Ctrl+H` / `Ctrl+L` | Focus tree / editor |
@@ -133,7 +134,7 @@ line says a new release is available.
 | `Ctrl+Alt+L` | Reformat code |
 | `Alt+C` / `Alt+W` / `Alt+R` | Toggle case / whole word / regex in the find panel |
 
-In the Claude chat (`Alt+2` toggles it): `Alt+Up` / `Alt+Down` switch between open chats,
+In the Claude chat (`Alt+3` toggles it): `Alt+Up` / `Alt+Down` switch between open chats,
 `Alt+I` focuses the message input, `Alt+H` opens (or closes) the list of earlier conversations, `Esc` interrupts a running turn (or closes the chat when idle),
 `Ctrl+V` pastes an image, and `/` and `@` open the command and file menus. Earlier conversations
 are also listed by **Claude: Resume Session** in Find Action (`Ctrl+Shift+A`).

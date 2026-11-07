@@ -1,4 +1,4 @@
-//! The Claude Code chat: a full-screen view (Alt+2) over one live `claude` session. The
+//! The Claude Code chat: a full-screen view (Alt+3) over one live `claude` session. The
 //! conversation itself is `zide_claude::Transcript`; this module owns the process, turns
 //! its events into UI state and draws the history and the input box.
 
