@@ -281,6 +281,23 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let key = keystroke.key.as_str();
+        let modifiers = &keystroke.modifiers;
+        if modifiers.alt && !modifiers.control && !modifiers.shift {
+            match key {
+                "up" | "down" => {
+                    let step = if key == "down" { 1 } else { -1 };
+                    self.claude_cycle(step, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "i" => {
+                    self.focus_active_chat(window, cx);
+                    cx.stop_propagation();
+                    return cx.notify();
+                }
+                _ => {}
+            }
+        }
         if key == "v" && keystroke.modifiers.secondary(cx) && self.claude_paste_image(cx) {
             cx.stop_propagation();
             return cx.notify();
@@ -472,6 +489,16 @@ impl Workspace {
         }
         self.focus_active_chat(window, cx);
         cx.notify();
+    }
+
+    /// Shows the next (or previous) chat, wrapping around at the ends.
+    fn claude_cycle(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chats) = &self.claude else {
+            return;
+        };
+        let count = chats.list.len() as isize;
+        let index = (chats.active as isize + step).rem_euclid(count) as usize;
+        self.claude_activate(index, window, cx);
     }
 
     fn claude_activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
