@@ -1666,12 +1666,6 @@ impl Workspace {
             popup.selected = 0;
         }
         self.search_again(cx);
-        // like IntelliJ: the first row is the open file, so Enter goes back to the one before
-        if let (Tab::Recent, Some(popup)) = (tab, &mut self.popup)
-            && popup.query.is_empty()
-        {
-            popup.select(1.min(popup.len().saturating_sub(1)));
-        }
     }
 
     /// Flips a text option from the Actions tab: shows the Text tab and clears the query typed
@@ -1956,7 +1950,11 @@ impl Workspace {
                         })
                         .collect(),
                 );
-                popup.select(0);
+                // like IntelliJ: the first row is the open file, so Enter goes back to the one
+                // before. Decided here, not in `show_tab`, because background work (indexing)
+                // searches again later and would reset the selection to the first row.
+                let keep = if query.trim().is_empty() { 1 } else { 0 };
+                popup.select(keep.min(popup.len().saturating_sub(1)));
                 cx.notify();
             }
             Tab::Files => {
