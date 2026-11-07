@@ -249,10 +249,10 @@ fn join(path: &str, name: &str) -> String {
 
 fn kind_color(kind: ChangeKind) -> u32 {
     match kind {
-        ChangeKind::Added => theme::CHANGE_ADDED,
+        // a file git does not track yet is a new file: green like the added ones
+        ChangeKind::Added | ChangeKind::Untracked => theme::OK,
         ChangeKind::Modified | ChangeKind::Renamed => theme::ICON_CODE,
         ChangeKind::Deleted => theme::CHANGE_REMOVED,
-        ChangeKind::Untracked => theme::ICON_FOLDER,
         ChangeKind::Conflicted => theme::ERROR,
     }
 }
