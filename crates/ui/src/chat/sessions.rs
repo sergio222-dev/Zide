@@ -79,8 +79,10 @@ impl Workspace {
             },
         );
         input.update(cx, |state, cx| state.focus(window, cx));
-        let Some(chat) = &mut self.claude else { return };
-        chat.sessions = Some(Sessions {
+        let Some(chats) = &mut self.claude else {
+            return;
+        };
+        chats.sessions = Some(Sessions {
             input,
             commands: cx.new(|cx| CommandState::new(window, cx)),
             list: None,
@@ -108,9 +110,14 @@ impl Workspace {
     }
 
     pub(super) fn close_claude_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chat) = &mut self.claude else { return };
-        chat.sessions = None;
-        chat.input.update(cx, |state, cx| state.focus(window, cx));
+        let Some(chats) = &mut self.claude else {
+            return;
+        };
+        chats.sessions = None;
+        chats
+            .active()
+            .input
+            .update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
     }
 
@@ -138,9 +145,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
-        let chat = self.claude.as_mut()?;
-        let current = chat.transcript.session_id().map(str::to_owned);
-        let sessions = chat.sessions.as_mut()?;
+        let chats = self.claude.as_mut()?;
+        let current = chats.active().transcript.session_id().map(str::to_owned);
+        let sessions = chats.sessions.as_mut()?;
         let found = sessions.matching(cx).len();
         sessions.selected = sessions.selected.min(found.saturating_sub(1));
         let (state, selected) = (sessions.commands.clone(), sessions.selected);

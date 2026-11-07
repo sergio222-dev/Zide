@@ -3,6 +3,7 @@
 
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::*;
+use zide_claude::Overall;
 use zide_git::BranchStatus;
 
 use crate::{theme, viewer::ViewerStatus};
@@ -28,11 +29,24 @@ pub fn branch_label(branch: &BranchStatus) -> (String, u32) {
     }
 }
 
-/// `on_branch` runs when the branch name is clicked.
+/// The dot of the Claude indicator: gray without a process, orange while any chat thinks,
+/// green when none does and one waits.
+pub fn claude_color(overall: Overall) -> u32 {
+    match overall {
+        Overall::Off => theme::DIM,
+        Overall::Working => theme::WORKING,
+        Overall::Waiting => theme::OK,
+    }
+}
+
+/// `on_branch` runs when the branch name is clicked; `claude` is `None` when Claude is not
+/// installed, and `on_claude` runs when its indicator is clicked.
 pub fn render(
     status: Option<ViewerStatus>,
     branch: Option<&BranchStatus>,
     on_branch: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    claude: Option<Overall>,
+    on_claude: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> StatusBar {
     let mut bar = StatusBar::new()
         .bg(rgb(theme::BACKGROUND))
@@ -40,6 +54,19 @@ pub fn render(
         .text_color(rgb(theme::MUTED));
     if let Some(notice) = status.as_ref().and_then(|s| s.notice.clone()) {
         bar = bar.left(notice);
+    }
+    if let Some(overall) = claude {
+        bar = bar.right(
+            div()
+                .id("claude")
+                .flex()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .on_click(on_claude)
+                .child(div().size_2().rounded_full().bg(rgb(claude_color(overall))))
+                .child("Claude"),
+        );
     }
     if let Some(branch) = branch {
         let (label, color) = branch_label(branch);

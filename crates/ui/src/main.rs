@@ -469,7 +469,9 @@ struct Workspace {
     tree: Tree,
     tree_visible: bool,
     /// The Claude chat, created the first time it is opened, and whether it fills the editor area.
-    claude: Option<chat::Chat>,
+    claude: Option<chat::Chats>,
+    /// Whether a supported `claude` is installed, once known.
+    claude_installed: bool,
     claude_open: bool,
     /// The checked-out branch and how far it is from its upstream, `None` outside a repository.
     branch: Option<zide_git::BranchStatus>,
@@ -525,6 +527,19 @@ impl Workspace {
     fn new(root: PathBuf, window: &Window, cx: &mut Context<Self>) -> Self {
         // file-system changes arrive on a watcher thread; a foreground task reacts to them
         let (changes_tx, changes_rx) = async_channel::unbounded::<Change>();
+        // asking `claude` for its version starts a process: not on the UI thread
+        cx.spawn(async move |this, cx| {
+            let version = cx
+                .background_executor()
+                .spawn(async { zide_claude::installed() })
+                .await;
+            this.update(cx, |this, cx| {
+                this.claude_installed = version.is_some_and(zide_claude::Version::is_supported);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         // the branch moves with commits, checkouts and fetches, none of which the watcher reports
         let git_root = root.clone();
         cx.spawn(async move |this, cx| {
@@ -587,6 +602,7 @@ impl Workspace {
             tree: Tree::new(),
             tree_visible: false,
             claude: None,
+            claude_installed: false,
             claude_open: false,
             branch: None,
             branches: None,
@@ -3001,6 +3017,12 @@ impl Workspace {
                 self.viewer.as_ref().map(Viewer::status),
                 self.branch.as_ref(),
                 cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
+                self.claude_installed.then(|| {
+                    self.claude
+                        .as_ref()
+                        .map_or(zide_claude::Overall::Off, chat::Chats::overall)
+                }),
+                cx.listener(|this, _, window, cx| this.toggle_claude(window, cx)),
             ));
         if let Some(branches) = &self.branches {
             root = root.child(branches::render(branches, cx));

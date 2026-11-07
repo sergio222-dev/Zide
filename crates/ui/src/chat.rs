@@ -11,7 +11,8 @@ use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::*;
 use zide_claude::history::{self, SessionInfo};
 use zide_claude::{
-    Block, Event, Options, Permission, Resolution, Session, Status, ToolCall, Transcript, Value,
+    Block, Event, Options, Overall, Permission, Resolution, Session, Status, ToolCall, Transcript,
+    Value,
 };
 
 use crate::markdown::{TextView, TextViewState};
@@ -21,7 +22,56 @@ use crate::{Workspace, theme};
 const NO_QUESTIONS: &str =
     "This chat cannot show multiple-choice questions yet. Ask in plain text instead.";
 
+/// The conversations that are open, one of them showing.
+pub struct Chats {
+    list: Vec<Chat>,
+    active: usize,
+    next_id: u64,
+    /// The list of earlier conversations, while it is open.
+    sessions: Option<sessions::Sessions>,
+}
+
+impl Chats {
+    fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Chats {
+        let mut chats = Chats {
+            list: Vec::new(),
+            active: 0,
+            next_id: 0,
+            sessions: None,
+        };
+        chats.add(window, cx);
+        chats
+    }
+
+    /// Opens an empty conversation and shows it.
+    fn add(&mut self, window: &mut Window, cx: &mut Context<Workspace>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.list.push(Chat::new(id, window, cx));
+        self.active = self.list.len() - 1;
+    }
+
+    fn active(&self) -> &Chat {
+        &self.list[self.active]
+    }
+
+    fn active_mut(&mut self) -> &mut Chat {
+        &mut self.list[self.active]
+    }
+
+    fn find(&mut self, id: u64) -> Option<&mut Chat> {
+        self.list.iter_mut().find(|chat| chat.id == id)
+    }
+
+    /// How the chats stand together, for the status bar.
+    pub fn overall(&self) -> Overall {
+        Overall::of(self.list.iter().map(|chat| chat.transcript.status()))
+    }
+}
+
 pub struct Chat {
+    /// Names the chat for the events of its process; ids are never reused.
+    id: u64,
     transcript: Transcript,
     /// `None` until the first message, and again once the process has exited.
     session: Option<Session>,
@@ -33,15 +83,11 @@ pub struct Chat {
     notice: Option<String>,
     /// The name of the conversation: the stored session's title, or the first thing said.
     title: Option<String>,
-    /// Which session the events on screen belong to; the one before a switch is ignored.
-    generation: u64,
-    /// The list of earlier conversations, while it is open.
-    sessions: Option<sessions::Sessions>,
     _submit: Subscription,
 }
 
 impl Chat {
-    fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Chat {
+    fn new(id: u64, window: &mut Window, cx: &mut Context<Workspace>) -> Chat {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
@@ -53,14 +99,15 @@ impl Chat {
         let submit = cx.subscribe_in(
             &input,
             window,
-            |this: &mut Workspace, input, event: &InputEvent, window, cx| {
+            move |this: &mut Workspace, input, event: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { shift: false, .. } = event {
                     let text = input.read(cx).value().to_string();
-                    this.claude_send(text, window, cx);
+                    this.claude_send(id, text, window, cx);
                 }
             },
         );
         Chat {
+            id,
             transcript: Transcript::new(),
             session: None,
             input,
@@ -68,8 +115,6 @@ impl Chat {
             scroll: ScrollHandle::new(),
             notice: None,
             title: None,
-            generation: 0,
-            sessions: None,
             _submit: submit,
         }
     }
@@ -86,14 +131,9 @@ impl Chat {
         self.scroll.max_offset().y + self.scroll.offset().y < px(8.)
     }
 
-    /// Drops the running session and what was on screen, for another conversation.
-    fn reset(&mut self) {
-        self.generation += 1;
-        self.session = None;
-        self.markdown.clear();
-        self.notice = None;
-        self.title = None;
-        self.transcript = Transcript::new();
+    /// Whether nothing was said here: a stored conversation can take its place.
+    fn is_empty(&self) -> bool {
+        self.session.is_none() && self.transcript.blocks().is_empty()
     }
 
     /// Gives every assistant text block its Markdown, after a stored conversation is loaded.
@@ -130,14 +170,19 @@ impl Workspace {
             return cx.notify();
         }
         if self.claude.is_none() {
-            self.claude = Some(Chat::new(window, cx));
+            self.claude = Some(Chats::new(window, cx));
         }
         self.claude_open = true;
-        if let Some(chat) = &self.claude {
+        self.focus_active_chat(window, cx);
+        cx.notify();
+    }
+
+    fn focus_active_chat(&self, window: &mut Window, cx: &mut App) {
+        if let Some(chats) = &self.claude {
+            let chat = chats.active();
             chat.input.update(cx, |state, cx| state.focus(window, cx));
             chat.scroll.scroll_to_bottom();
         }
-        cx.notify();
     }
 
     /// Keys while the chat is showing. The input box handles its own typing.
@@ -161,9 +206,13 @@ impl Workspace {
         if key != "escape" {
             return;
         }
-        let busy = self.claude.as_ref().is_some_and(Chat::busy);
+        let busy = self.claude.as_ref().is_some_and(|c| c.active().busy());
         if busy {
-            if let Some(session) = self.claude.as_mut().and_then(|c| c.session.as_mut()) {
+            if let Some(session) = self
+                .claude
+                .as_mut()
+                .and_then(|c| c.active_mut().session.as_mut())
+            {
                 let _ = session.interrupt();
             }
         } else {
@@ -172,21 +221,25 @@ impl Workspace {
         cx.stop_propagation();
     }
 
-    fn claude_send(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn claude_send(&mut self, id: u64, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let text = text.trim().to_owned();
-        let Some(chat) = &self.claude else { return };
+        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
+            return;
+        };
         if text.is_empty() || chat.busy() {
             return;
         }
         if chat.session.is_none()
-            && let Err(error) = self.start_claude(cx)
+            && let Err(error) = self.start_claude(id, cx)
         {
-            if let Some(chat) = &mut self.claude {
+            if let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) {
                 chat.notice = Some(format!("Could not start `claude`: {error}"));
             }
             return cx.notify();
         }
-        let Some(chat) = &mut self.claude else { return };
+        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
+            return;
+        };
         let sent = chat.session.as_mut().map(|session| session.send(&text));
         match sent {
             Some(Ok(())) => {
@@ -213,9 +266,9 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Starts `claude` in the project, continuing the conversation if one was running before.
-    fn start_claude(&mut self, cx: &mut Context<Self>) -> std::io::Result<()> {
-        let Some(chat) = &mut self.claude else {
+    /// Starts `claude` for a chat, continuing its conversation if one was running before.
+    fn start_claude(&mut self, id: u64, cx: &mut Context<Self>) -> std::io::Result<()> {
+        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
             return Ok(());
         };
         let resume = chat.transcript.session_id().map(str::to_owned);
@@ -225,7 +278,6 @@ impl Workspace {
         };
         let (session, events) = Session::spawn(&self.root, options)?;
         chat.session = Some(session);
-        let generation = chat.generation;
 
         // The session reports on a std channel; a thread forwards it to the UI's executor.
         let (forward, incoming) = async_channel::unbounded::<Event>();
@@ -239,7 +291,7 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             while let Ok(event) = incoming.recv().await {
                 if this
-                    .update(cx, |this, cx| this.claude_event(generation, event, cx))
+                    .update(cx, |this, cx| this.claude_event(id, event, cx))
                     .is_err()
                 {
                     break;
@@ -250,8 +302,9 @@ impl Workspace {
         Ok(())
     }
 
-    fn claude_event(&mut self, generation: u64, event: Event, cx: &mut Context<Self>) {
-        let Some(chat) = self.claude.as_mut().filter(|c| c.generation == generation) else {
+    fn claude_event(&mut self, id: u64, event: Event, cx: &mut Context<Self>) {
+        // a closed chat has no one to tell
+        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
             return;
         };
         let follow = chat.at_bottom();
@@ -276,38 +329,77 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Starts an empty conversation. What was running stops.
+    /// Opens an empty conversation next to the others.
     pub(crate) fn claude_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.claude_open {
             self.toggle_claude(window, cx);
         }
-        if let Some(chat) = &mut self.claude {
-            chat.reset();
-            chat.input.update(cx, |state, cx| state.focus(window, cx));
+        if let Some(chats) = &mut self.claude {
+            chats.add(window, cx);
         }
+        self.focus_active_chat(window, cx);
         cx.notify();
     }
 
-    /// Shows a stored conversation; the next message continues it with `--resume`.
+    fn claude_activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(chats) = self.claude.as_mut().filter(|c| index < c.list.len()) {
+            chats.active = index;
+        }
+        self.focus_active_chat(window, cx);
+        cx.notify();
+    }
+
+    /// Closes a chat; its process, if any, stops. The last one is replaced by an empty chat.
+    fn claude_close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chats) = &mut self.claude else {
+            return;
+        };
+        let Some(index) = chats.list.iter().position(|chat| chat.id == id) else {
+            return;
+        };
+        chats.list.remove(index);
+        if chats.list.is_empty() {
+            chats.add(window, cx);
+        } else if index < chats.active || chats.active >= chats.list.len() {
+            chats.active = chats.active.saturating_sub(1);
+        }
+        self.focus_active_chat(window, cx);
+        cx.notify();
+    }
+
+    /// Shows a stored conversation: the chat that already has it, else an empty chat. The next
+    /// message continues it with `--resume`; nothing runs until then.
     pub(super) fn claude_resume(
         &mut self,
         session: SessionInfo,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(chat) = &mut self.claude else { return };
-        chat.reset();
+        let Some(chats) = &mut self.claude else {
+            return;
+        };
+        if let Some(index) = chats
+            .list
+            .iter()
+            .position(|chat| chat.transcript.session_id() == Some(session.id.as_str()))
+        {
+            return self.claude_activate(index, window, cx);
+        }
+        if !chats.active().is_empty() {
+            chats.add(window, cx);
+        }
+        let chat = chats.active_mut();
         chat.title = Some(session.title.clone());
-        let generation = chat.generation;
+        let id = chat.id;
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
-            let id = session.id.clone();
+            let stored = session.id.clone();
             let loaded = cx
                 .background_executor()
-                .spawn(async move { history::load(&root, &id) })
+                .spawn(async move { history::load(&root, &stored) })
                 .await;
             this.update(cx, |this, cx| {
-                let Some(chat) = this.claude.as_mut().filter(|c| c.generation == generation) else {
+                let Some(chat) = this.claude.as_mut().and_then(|c| c.find(id)) else {
                     return;
                 };
                 match loaded {
@@ -325,11 +417,14 @@ impl Workspace {
             .ok();
         })
         .detach();
+        self.focus_active_chat(window, cx);
         cx.notify();
     }
 
-    fn claude_decide(&mut self, request_id: &str, allow: bool, cx: &mut Context<Self>) {
-        let Some(chat) = &mut self.claude else { return };
+    fn claude_decide(&mut self, id: u64, request_id: &str, allow: bool, cx: &mut Context<Self>) {
+        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
+            return;
+        };
         let input = chat
             .transcript
             .blocks()
@@ -357,12 +452,104 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The panel with the open chats and how each stands.
+    fn claude_panel(&self, chats: &Chats, cx: &mut Context<Self>) -> Div {
+        let rows =
+            chats
+                .list
+                .iter()
+                .enumerate()
+                .map(|(index, chat)| {
+                    let status = chat.transcript.status();
+                    let (color, label) = status_style(status);
+                    let id = chat.id;
+                    div()
+                        .id(SharedString::from(format!("chat-row-{id}")))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .cursor_pointer()
+                        .bg(rgb(if index == chats.active {
+                            theme::TREE_SELECTED
+                        } else {
+                            theme::BACKGROUND
+                        }))
+                        .hover(|row| row.bg(rgb(theme::TREE_SELECTED)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.claude_activate(index, window, cx)
+                        }))
+                        .child(div().flex_none().size_2().rounded_full().bg(rgb(color)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().truncate().text_color(rgb(theme::STRONG)).child(
+                                    chat.title.clone().unwrap_or_else(|| "New chat".to_owned()),
+                                ))
+                                .child(div().text_xs().text_color(rgb(color)).child(label)),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("chat-close-{id}")))
+                                .flex_none()
+                                .px_1()
+                                .text_color(rgb(theme::DIM))
+                                .hover(|close| close.text_color(rgb(theme::STRONG)))
+                                .child("×")
+                                // on mouse down so the row under it never sees a click
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.claude_close(id, window, cx)
+                                    }),
+                                ),
+                        )
+                })
+                .collect::<Vec<_>>();
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(240.))
+            .h_full()
+            .border_r_1()
+            .border_color(rgb(theme::BORDER))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(theme::BORDER))
+                    .child(div().text_color(rgb(theme::MUTED)).child("Chats"))
+                    .child(
+                        Button::new("claude-new").ghost().label("New").on_click(
+                            cx.listener(|this, _, window, cx| this.claude_new(window, cx)),
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("claude-chats")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+    }
+
     /// The chat, filling the area where the editor would be.
     pub(crate) fn claude_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let popup = self.sessions_view(window, cx);
-        let Some(chat) = &self.claude else {
+        let Some(chats) = &self.claude else {
             return div();
         };
+        let chat = chats.active();
         let blocks = chat
             .transcript
             .blocks()
@@ -370,15 +557,15 @@ impl Workspace {
             .enumerate()
             .map(|(i, block)| self.claude_block(chat, i, block, cx))
             .collect::<Vec<_>>();
-        let ended = chat.transcript.status() == Status::Inactive;
-        div()
+        let panel = self.claude_panel(chats, cx);
+        let ended = chat.transcript.status() == Status::Inactive && !chat.is_empty();
+        let main = div()
             .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .h_full()
-            .text_color(rgb(theme::TEXT))
             .child(
                 div()
                     .flex()
@@ -402,14 +589,6 @@ impl Workspace {
                             .label("History")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.claude_history(window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("claude-new")
-                            .ghost()
-                            .label("New chat")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.claude_new(window, cx)),
                             ),
                     ),
             )
@@ -436,7 +615,7 @@ impl Workspace {
                                 div()
                                     .text_sm()
                                     .text_color(rgb(theme::DIM))
-                                    .child("The session ended. Send a message to start it again.")
+                                    .child("Not running. Send a message to start it again.")
                             })),
                     ),
             )
@@ -470,7 +649,15 @@ impl Workspace {
                             ),
                     ),
             )
-            .children(popup)
+            .children(popup);
+        div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .text_color(rgb(theme::TEXT))
+            .child(panel)
+            .child(main)
     }
 
     fn claude_block(
@@ -501,7 +688,7 @@ impl Workspace {
                 .child(text.clone())
                 .into_any_element(),
             Block::Tool(call) => tool_line(call).into_any_element(),
-            Block::Permission(permission) => self.permission_card(index, permission, cx),
+            Block::Permission(permission) => self.permission_card(chat.id, index, permission, cx),
             // Questions are denied on arrival until the chat can show them.
             Block::Question(_) => div()
                 .text_sm()
@@ -522,6 +709,7 @@ impl Workspace {
 
     fn permission_card(
         &self,
+        chat_id: u64,
         index: usize,
         permission: &Permission,
         cx: &mut Context<Self>,
@@ -550,14 +738,14 @@ impl Workspace {
                                 .primary()
                                 .label("Allow")
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.claude_decide(&allow_id, true, cx)
+                                    this.claude_decide(chat_id, &allow_id, true, cx)
                                 })),
                         )
                         .child(
                             Button::new(SharedString::from(format!("deny-{index}")))
                                 .label("Deny")
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.claude_decide(&deny_id, false, cx)
+                                    this.claude_decide(chat_id, &deny_id, false, cx)
                                 })),
                         ),
                 )
@@ -621,6 +809,16 @@ fn summary(input: &Value) -> String {
         }
     }
     String::new()
+}
+
+/// The color and the words a chat's state is shown with.
+fn status_style(status: Status) -> (u32, &'static str) {
+    match status {
+        Status::Inactive => (theme::DIM, "Not running"),
+        Status::Idle => (theme::OK, "Ready"),
+        Status::Working => (theme::WORKING, "Working"),
+        Status::NeedsUser => (theme::NEEDS_USER, "Needs you"),
+    }
 }
 
 fn footer(transcript: &Transcript) -> String {

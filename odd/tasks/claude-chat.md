@@ -16,6 +16,8 @@ S9. Slash menu: "una lista de comandos o skills como hace hoy claude code con la
 S10. File mentions: "agregar archivos como con el @".
 S11. Images: "agregar imagenes (ctrl+v)".
 S12. Output formatting, after the above: "el formateo de la salida de la respuesta de claude usando gpui-kit en las tablas tal vez, folding de la salida, etc."
+S14. Live chats panel: "un panel a un costado para mostrar las sessiones/agentes vivos que estan corriendo"; several chats at once, each with its own state (gray no process, green idle, orange working, blue needs the user). Closed stored sessions are not resumed until an input is sent: "si esta cerrada no se deberia retomar el proceso hasta que se envie un input".
+S15. Status bar: "los estados de la status bar ahora pasan a las sesiones y el status bara ahora es gris si no hay agentes corriendo, naranja con al menos 1 agente pensando y verde en idle (ningun agente pensando y al menos uno esperando respuesta)".
 S13. The status bar icon (phase 3) is postponed: "no vi el icono de claude, lo podemos dejar para mas adelante".
 
 ## Tasks
@@ -30,6 +32,7 @@ S13. The status bar icon (phase 3) is postponed: "no vi el icono de claude, lo p
 - [ ] T8 (S10) `@` file mentions (reuse the matcher/file index).
 - [ ] T9 (S11) Paste images with Ctrl+V.
 - [ ] T10 (S12) Output formatting: tables, folding of long output and tool results, tool cards and diffs, the AskUserQuestion UI.
+- [x] T12 (S14, S15) Live chats: `Chats` list in the UI (id per chat replaces the generation), left panel with a state dot per chat, aggregate status bar indicator (`zide_claude::overall`). Closing a chat drops its `Session` (kills the process); stored sessions open without a process until a message is sent. Not observed by a person: the panel, the dot colors, the status bar indicator.
 - [ ] T11 (S13) Status bar icon and the four colors (postponed).
 
 Route declaration: all inline. No Writer trigger: one coherent unit in one crate, each task depends on the previous API.
@@ -44,3 +47,4 @@ L6 (2026-11-07) Verification: `cargo build -p zide-ui`, `cargo clippy -p zide-ui
 L7 (2026-11-07) User: "para los test no se podria usar claude --bare? para reducir el consumo/context". `--bare` only accepts ANTHROPIC_API_KEY/apiKeyHelper (the user logs in with claude.ai OAuth), so it cannot work here. Measured instead, same prompt and fixture dir: full config = cache_creation 143,638 + cache_read 143,466 tokens, $0.59; with `--setting-sources "" --strict-mcp-config --disable-slash-commands --tools Read` = 2,214 + 5,411 tokens, $0.0106 (about 55x cheaper). Gotcha: `--tools` is variadic and swallows a trailing prompt argument. Added `Options::minimal`; the ignored live test uses it and passes in 3s (interrupt, parser and session verified against the real CLI).
 L8 (2026-11-07) After trying phase 2: "se ve bien, aunque no vi el icono de claude, lo podemos dejar para mas adelante, habria que agregar a la interfaz la lista de sesiones, las sessiones se podran continuar como hace --resume. a futuro agregar una lista de comandos o skills como hace hoy claude code con la barra /, y anotar tambien para hacer el agregar archivos como con el @, y por ultimo agregar imagenes (ctrl+v). Luego nos concentraremos en el formateo de la salida de la respuesta de claude usando gpui-kit en las tablas tal vez, folding de la salida, etc."
 L9 (2026-11-07) T6 verification: crate unit tests (8 for history) and a live test against the real CLI pass (minimal mode, ~4s, a cent): a session is listed, shown and resumed (the second process remembered the word from the first). UI: build, clippy, 127 ui tests (search and "ago" helpers) pass; the app starts. Not observed by a person: the header buttons, the overlay, picking a session. Known limit: the transcript is not virtualized, a very long session renders every block (T10).
+L10 (2026-11-07) User: "hacé el panel de chats vivos, si el panel necesita los estados deberiamos agregarlos, y cambiar como funciona la status bar, los estados de la status bar ahora pasan a las sesiones y el status bara ahora es gris si no hay agentes corriendo, naranja con al menos 1 agente pensando y verde en idle (ningun agente pensando y al menos uno esperando respuesta)". Assumption: a chat that needs the user counts as waiting (green) in the aggregate.
