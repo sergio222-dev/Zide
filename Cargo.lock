@@ -8801,6 +8801,7 @@ dependencies = [
  "async-channel",
  "dirs 6.0.0",
  "gpui-kit",
+ "zide-claude",
  "zide-core",
  "zide-git",
  "zide-index",

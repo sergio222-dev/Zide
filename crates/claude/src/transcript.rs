@@ -130,9 +130,11 @@ impl Transcript {
     }
 
     /// Records what the user sent, which the stream does not echo back, and opens the turn.
+    /// Sending means there is a live process, even when an earlier one had exited.
     pub fn user_message(&mut self, text: &str) {
         self.blocks.push(Block::User(text.to_owned()));
         self.turn_open = true;
+        self.alive = true;
     }
 
     /// Records the user's decision on a permission request or a question.
@@ -487,6 +489,14 @@ mod tests {
         t.apply(permission("r1"));
         t.apply(Event::Exit);
         assert_eq!(t.status(), Status::Inactive);
+    }
+
+    #[test]
+    fn a_new_message_after_exit_revives_the_status() {
+        let mut t = Transcript::new();
+        t.apply(Event::Exit);
+        t.user_message("again");
+        assert_eq!(t.status(), Status::Working);
     }
 
     #[test]

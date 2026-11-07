@@ -15,6 +15,7 @@ use std::{
 };
 
 mod branches;
+mod chat;
 mod definition;
 mod file_icon;
 mod indent;
@@ -73,6 +74,7 @@ actions!(
         FindInFiles,
         RecentFiles,
         ToggleProjectTree,
+        ToggleClaudeChat,
         ToggleMarkdownPreview,
         NavigateBack,
         NavigateForward,
@@ -196,6 +198,14 @@ fn action_registry() -> Vec<ActionDef> {
             closes_popup: true,
             state: None,
             run: |ws, _, cx| ws.toggle_tree(cx),
+        },
+        ActionDef {
+            name: "Toggle Claude Chat",
+            synonyms: &["claude", "ai", "assistant", "chat"],
+            action: Some(Box::new(ToggleClaudeChat)),
+            closes_popup: true,
+            state: None,
+            run: |ws, window, cx| ws.toggle_claude(window, cx),
         },
         ActionDef {
             name: "Toggle Markdown Preview",
@@ -442,6 +452,9 @@ struct Workspace {
     /// The project tree on the left.
     tree: Tree,
     tree_visible: bool,
+    /// The Claude chat, created the first time it is opened, and whether it fills the editor area.
+    claude: Option<chat::Chat>,
+    claude_open: bool,
     /// The checked-out branch and how far it is from its upstream, `None` outside a repository.
     branch: Option<zide_git::BranchStatus>,
     /// The branch switcher, while it is open.
@@ -557,6 +570,8 @@ impl Workspace {
             meter: meter::FrameMeter::from_env(),
             tree: Tree::new(),
             tree_visible: false,
+            claude: None,
+            claude_open: false,
             branch: None,
             branches: None,
             md_preview: false,
@@ -2822,6 +2837,11 @@ impl Workspace {
             )
             .on_action(cx.listener(|this, _: &ToggleProjectTree, _, cx| this.toggle_tree(cx)))
             .on_action(
+                cx.listener(|this, _: &ToggleClaudeChat, window, cx| {
+                    this.toggle_claude(window, cx)
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &ToggleMarkdownPreview, _, cx| this.toggle_md_preview(cx)),
             )
             .on_action(cx.listener(|this, _: &NavigateBack, _, cx| this.navigate(true, cx)))
@@ -2866,7 +2886,11 @@ impl Workspace {
                     return this.branches_key(event, window, cx);
                 }
                 let Some(popup) = &mut this.popup else {
-                    this.editor_key(event, window, cx);
+                    if this.claude_open {
+                        this.claude_key(event, window, cx);
+                    } else {
+                        this.editor_key(event, window, cx);
+                    }
                     return;
                 };
                 match event.keystroke.key.as_str() {
@@ -2881,7 +2905,9 @@ impl Workspace {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(
+            .child(if self.claude_open {
+                self.claude_view(cx)
+            } else {
                 div()
                     .flex()
                     .flex_1()
@@ -2953,8 +2979,8 @@ impl Workspace {
                             .border_l_1()
                             .border_color(rgb(theme::BORDER))
                             .child(view)
-                    })),
-            )
+                    }))
+            })
             .child(statusbar::render(
                 self.viewer.as_ref().map(Viewer::status),
                 self.branch.as_ref(),
@@ -3835,6 +3861,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-~", SwitchBranch, Some("Workspace")),
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
+            KeyBinding::new("alt-2", ToggleClaudeChat, Some("Workspace")),
             KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
             KeyBinding::new("ctrl-alt-left", NavigateBack, Some("Workspace")),
             KeyBinding::new("ctrl-alt-right", NavigateForward, Some("Workspace")),
