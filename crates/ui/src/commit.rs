@@ -282,9 +282,12 @@ fn check_box(check: Check) -> Div {
 impl Workspace {
     /// Alt+2: opens the panel on the message; from the panel, closes it.
     pub(crate) fn toggle_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // the panel belongs to the editor: from the chat, Alt+2 goes back to it first (as Alt+1
+        // does for the tree)
         if self.claude_open {
-            self.toggle_claude(window, cx); // back to the editor first, as Alt+1 does
+            return self.toggle_claude(window, cx);
         }
+        self.autosave(cx); // what git is about to show is what is on disk
         let in_panel = self.commit_open && self.commit_focused(window, cx);
         if in_panel {
             self.commit_open = false;

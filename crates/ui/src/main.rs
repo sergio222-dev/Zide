@@ -1656,6 +1656,7 @@ impl Workspace {
         if self.claude_open {
             return self.toggle_claude(window, cx);
         }
+        self.autosave(cx);
         match (self.tree_visible, self.tree_focused) {
             (true, true) => {
                 self.tree_visible = false;
@@ -2418,6 +2419,7 @@ impl Workspace {
                 match result {
                     Ok(()) => {
                         this.commit_finished(true, cx);
+                        this.refresh_git(cx); // the gutter compares with the new HEAD
                         this.branch = status;
                         this.rescan(cx);
                         if let Some(done) = done {

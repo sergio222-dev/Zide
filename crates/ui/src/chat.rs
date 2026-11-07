@@ -250,6 +250,7 @@ impl Chat {
 
 impl Workspace {
     pub(crate) fn toggle_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.autosave(cx); // the chat may edit the files, and leaving the editor is a save
         if self.claude_open {
             self.claude_open = false;
             self.focus.focus(window, cx);
