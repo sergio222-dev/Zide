@@ -67,7 +67,7 @@ pub struct Session {
 impl Session {
     /// Starts `claude` in `cwd` (its config is looked up from there).
     pub fn spawn(cwd: &Path, options: Options) -> io::Result<(Session, Receiver<Event>)> {
-        let mut command = Command::new("claude");
+        let mut command = Command::new(crate::cli::program());
         command
             .args(["-p", "--verbose", "--include-partial-messages"])
             .args(["--input-format", "stream-json"])
