@@ -31,6 +31,8 @@ Only Linux x86_64 is published for now.
 - **Find Usages** (`Alt+F7`): semantic through a language server, text search as a fallback.
 - **Go to Definition** (`gd` or `Ctrl+B`): through a language server; without one it jumps by name in the
   symbol index and the status line says so.
+- **Status bar**: messages on the left; on the right the branch's state against its upstream (`↑` to push, `↓` to pull,
+  `Δ` when diverged), the branch name, the cursor position and the vim mode.
 - **Code folding** for blocks, declarations, imports and long comments, with gutter chevrons.
 - **Git blame** in gray after the cursor line: author's last name, date, time and commit summary.
 - **Matching pairs**: the caret on a bracket highlights its partner; on a JSX tag name, the other tag; on the `:` of a Python block, the block's last line.

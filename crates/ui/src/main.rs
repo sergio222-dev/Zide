@@ -23,6 +23,7 @@ mod nav;
 mod projects;
 mod rows;
 mod session;
+mod statusbar;
 mod sticky;
 mod theme;
 mod usages;
@@ -394,6 +395,8 @@ struct Workspace {
     /// The project tree on the left.
     tree: Tree,
     tree_visible: bool,
+    /// The checked-out branch and how far it is from its upstream, `None` outside a repository.
+    branch: Option<zide_git::BranchStatus>,
     /// The rendered Markdown beside the editor (Ctrl+Shift+M), for `.md` files.
     md_preview: bool,
     md: Option<MdPreview>,
@@ -444,6 +447,28 @@ impl Workspace {
     fn new(root: PathBuf, window: &Window, cx: &mut Context<Self>) -> Self {
         // file-system changes arrive on a watcher thread; a foreground task reacts to them
         let (changes_tx, changes_rx) = async_channel::unbounded::<Change>();
+        // the branch moves with commits, checkouts and fetches, none of which the watcher reports
+        let git_root = root.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                let root = git_root.clone();
+                let status = cx
+                    .background_executor()
+                    .spawn(async move { zide_git::branch_status(&root) })
+                    .await;
+                let updated = this.update(cx, |this, cx| {
+                    if this.branch != status {
+                        this.branch = status;
+                        cx.notify();
+                    }
+                });
+                if updated.is_err() {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             while let Ok(change) = changes_rx.recv().await {
                 let reacted = this.update(cx, |this, cx| match change {
@@ -482,6 +507,7 @@ impl Workspace {
             meter: meter::FrameMeter::from_env(),
             tree: Tree::new(),
             tree_visible: false,
+            branch: None,
             md_preview: false,
             md: None,
             nav: nav::NavHistory::default(),
@@ -2322,6 +2348,8 @@ impl Workspace {
         let preview = self.markdown_preview(cx);
         let mut root = div()
             .id("workspace")
+            .flex()
+            .flex_col()
             .size_full()
             .bg(rgb(theme::BACKGROUND))
             .key_context("Workspace")
@@ -2423,7 +2451,9 @@ impl Workspace {
             .child(
                 div()
                     .flex()
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
                     .children(self.tree_visible.then(|| self.project_tree(cx)))
                     .child(match &self.viewer {
                         Some(viewer) => div()
@@ -2491,7 +2521,11 @@ impl Workspace {
                             .border_color(rgb(theme::BORDER))
                             .child(view)
                     })),
-            );
+            )
+            .child(statusbar::render(
+                self.viewer.as_ref().map(Viewer::status),
+                self.branch.as_ref(),
+            ));
 
         let Some(popup) = &self.popup else {
             return root;
