@@ -29,6 +29,8 @@ Only Linux x86_64 is published for now.
   one popup. Go to File, Go to Symbol and Find Action have their own shortcuts.
 - **Find and replace** in the file (with regex, case and whole-word toggles) and Find in Files.
 - **Find Usages** (`Alt+F7`): semantic through a language server, text search as a fallback.
+- **Go to Definition** (`gd` or `Ctrl+B`): through a language server; without one it jumps by name in the
+  symbol index and the status line says so.
 - **Code folding** for blocks, declarations, imports and long comments, with gutter chevrons.
 - **Git blame** in gray after the cursor line: author's last name, date, time and commit summary.
 - **Matching pairs**: the caret on a bracket highlights its partner; on a JSX tag name, the other tag; on the `:` of a Python block, the block's last line.
@@ -108,6 +110,7 @@ line says a new release is available.
 | `F3` / `Shift+F3` | Next / previous match |
 | `Ctrl+Shift+F` | Find in Files |
 | `Alt+F7` | Find Usages |
+| `gd` / `Ctrl+B` | Go to Definition |
 | `Alt+1` | Toggle project tree |
 | `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Navigate back / forward (also the mouse's back and forward buttons) |
 | `Ctrl+Shift+M` | Toggle Markdown preview (`.md` files) |

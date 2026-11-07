@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod definition;
 mod file_icon;
 mod indent;
 mod markdown;
@@ -72,6 +73,7 @@ actions!(
         NavigateBack,
         NavigateForward,
         FindUsages,
+        GoToDefinition,
         ReformatCode,
         ExtendSelection,
         FocusTree,
@@ -152,6 +154,13 @@ fn action_registry() -> Vec<ActionDef> {
             action: Some(Box::new(ReformatCode)),
             closes_popup: true,
             run: |ws, _, cx| ws.reformat(cx),
+        },
+        ActionDef {
+            name: "Go to Definition",
+            synonyms: &["declaration", "gd", "jump to definition", "goto definition"],
+            action: Some(Box::new(GoToDefinition)),
+            closes_popup: true,
+            run: |ws, _, cx| ws.go_to_definition(cx),
         },
         ActionDef {
             name: "Find Usages",
@@ -1301,6 +1310,118 @@ impl Workspace {
         }
     }
 
+    /// `gd` / Ctrl+B: jumps to the definition of the word under the cursor. The language server
+    /// answers when it can; otherwise the symbol index does, by name, and the status line says so.
+    fn go_to_definition(&mut self, cx: &mut Context<Self>) {
+        let (Some(viewer), Some(index)) = (&self.viewer, self.index.clone()) else {
+            return;
+        };
+        let Some(word) = viewer.word_at_cursor() else {
+            return self.set_notice(
+                "go to definition: no identifier under the cursor".into(),
+                cx,
+            );
+        };
+        let Some((spec, language)) = server_for(viewer.path()) else {
+            let why = "there is no language server for this file".to_string();
+            return self.definition_by_name(&word, &why, cx);
+        };
+        let client = match self.lsp.get(spec.name) {
+            Some(LspState::Ready(client)) => client.clone(),
+            Some(LspState::Unavailable(why)) => {
+                let why = why.clone();
+                return self.definition_by_name(&word, &why, cx);
+            }
+            Some(LspState::Starting) | None => {
+                let path = viewer.path().to_string();
+                self.warm_server(&path, cx);
+                let why = format!("{} is starting", spec.command);
+                return self.definition_by_name(&word, &why, cx);
+            }
+        };
+        let label = client.label().to_string();
+        let (line, character) = viewer.lsp_position();
+        let text = viewer.text();
+        let path = self.root.join(viewer.path());
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    client.sync(&path, language, &text)?;
+                    let found = client.definition(&path, line, character)?;
+                    Ok::<_, LspError>(definition::in_project(&root, &index, &found))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                // a dead server is started anew by the next request
+                if matches!(outcome, Err(LspError::Closed | LspError::Io(_))) {
+                    this.lsp.remove(spec.name);
+                }
+                match outcome {
+                    Ok(targets) if !targets.is_empty() => this.jump_to(&targets, None, cx),
+                    Ok(_) => {
+                        let why = format!("{label} found no definition in the project");
+                        this.definition_by_name(&word, &why, cx);
+                    }
+                    Err(e) => this.definition_by_name(&word, &e.to_string(), cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The fallback of Go to Definition: the declarations of the symbol index named `word`.
+    /// `why` is what kept the language server from answering.
+    fn definition_by_name(&mut self, word: &str, why: &str, cx: &mut Context<Self>) {
+        let (Some(index), Some(symbols), Some(viewer)) =
+            (self.index.clone(), self.symbols.clone(), &self.viewer)
+        else {
+            let note = format!("go to definition: {why} · the symbol index is not ready yet");
+            return self.set_notice(note, cx);
+        };
+        let targets = definition::by_name(&self.root, &index, &symbols, word, viewer.path());
+        if targets.is_empty() {
+            let note = format!(
+                "go to definition: {why} · no declaration named `{word}` in the symbol index"
+            );
+            return self.set_notice(note, cx);
+        }
+        let via = format!("{why} · jumped by name in the symbol index, which may be approximate");
+        self.jump_to(&targets, Some(via), cx);
+    }
+
+    /// Moves the cursor to the first of `targets`, recording where it was for Back. `fallback`
+    /// says why the language server did not answer, when it did not.
+    fn jump_to(
+        &mut self,
+        targets: &[definition::Target],
+        fallback: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = targets.first() else {
+            return;
+        };
+        self.record_jump();
+        if self.viewer.as_ref().is_none_or(|v| v.path() != target.path) {
+            self.show_file(&target.path, None, cx);
+        }
+        let mut note = fallback.map(|why| format!("go to definition: {why}"));
+        if targets.len() > 1 {
+            let several = format!("{} definitions, showing the first", targets.len());
+            note = Some(match note {
+                Some(note) => format!("{note} · {several}"),
+                None => several,
+            });
+        }
+        if let Some(viewer) = &mut self.viewer {
+            viewer.go_to_spot(target.line, target.column);
+            viewer.set_notice(note);
+        }
+        cx.notify();
+    }
+
     fn open_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.is_none() {
             self.open_popup(window, cx);
@@ -1648,6 +1769,9 @@ impl Workspace {
         }
         if effect == Effect::OpenFind {
             self.open_find(false, window, cx);
+        }
+        if effect == Effect::GoToDefinition {
+            self.go_to_definition(cx);
         }
         cx.stop_propagation();
         cx.notify();
@@ -2258,6 +2382,7 @@ impl Workspace {
                 cx.listener(|this, _: &MouseDownEvent, _, cx| this.navigate(false, cx)),
             )
             .on_action(cx.listener(|this, _: &FindUsages, window, cx| this.find_usages(window, cx)))
+            .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
             .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
             .on_action(cx.listener(|this, _: &FocusTree, _, cx| this.focus_tree(true, cx)))
             .on_action(cx.listener(|this, _: &FocusEditor, _, cx| this.focus_tree(false, cx)))
@@ -3229,6 +3354,7 @@ fn main() {
             KeyBinding::new("ctrl-alt-left", NavigateBack, Some("Workspace")),
             KeyBinding::new("ctrl-alt-right", NavigateForward, Some("Workspace")),
             KeyBinding::new("alt-f7", FindUsages, Some("Workspace")),
+            KeyBinding::new("ctrl-b", GoToDefinition, Some("Workspace")),
             KeyBinding::new("ctrl-alt-l", ReformatCode, Some("Workspace")),
             KeyBinding::new("ctrl-h", FocusTree, Some("Workspace")),
             KeyBinding::new("ctrl-l", FocusEditor, Some("Workspace")),

@@ -2,7 +2,9 @@
 
 Zide does not ship language servers. It starts the one of the language of the file you open
 (in the background, once per project) and uses it for semantic features such as Find Usages
-(`Alt+F7`). Without a server those features fall back to text search, and the popup says why.
+(`Alt+F7`) and Go to Definition (`gd`, `Ctrl+B`). Without a server Find Usages falls back to text
+search, and the popup says why; Go to Definition falls back to the symbol index (declarations with
+the same name, which may be approximate), and the status line says why.
 
 Zide looks for each server in this order:
 
