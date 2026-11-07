@@ -290,6 +290,15 @@ impl Workspace {
                     cx.stop_propagation();
                     return;
                 }
+                "h" => {
+                    if self.claude.as_ref().is_some_and(|c| c.sessions.is_some()) {
+                        self.close_claude_history(window, cx);
+                    } else {
+                        self.claude_history(window, cx);
+                    }
+                    cx.stop_propagation();
+                    return cx.notify();
+                }
                 "i" => {
                     self.focus_active_chat(window, cx);
                     cx.stop_propagation();
