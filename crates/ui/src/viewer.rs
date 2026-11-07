@@ -719,10 +719,9 @@ impl Viewer {
             None
         };
         let at = before.into_iter().chain([caret]).find(|&at| {
+            // past the end (an empty file, the caret after the last character) there is no char
             self.buffer
-                .slice(at..at + 1)
-                .chars()
-                .next()
+                .char_at(at)
                 .is_some_and(|c| zide_syntax::is_pair_candidate(language, c))
         })?;
         let text = self.buffer.text();
@@ -2580,6 +2579,25 @@ mod tests {
         for c in keys.chars() {
             viewer.handle_key(Key::Char(c));
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_empty_file_has_no_bracket_pair_and_does_not_panic() {
+        let (dir, name) = temp_file_as("empty", "a.rs", "");
+        let viewer = Viewer::open(&dir, &name);
+        assert!(viewer.find_pair(0, false).is_none());
+        assert!(viewer.find_pair(0, true).is_none());
+        let _ = viewer.pair_highlights();
+        assert!(viewer.word_highlights().is_empty());
+        let (txt_dir, txt) = temp_file_as("empty-txt", "a.txt", "");
+        let plain = Viewer::open(&txt_dir, &txt);
+        let _ = (plain.pair_highlights(), plain.word_highlights());
+        let _ = fs::remove_dir_all(txt_dir);
+        // the caret may also sit at the very end of a file with text
+        let (dir, name) = temp_file_as("no-newline", "a.rs", "fn a() {}");
+        let viewer = Viewer::open(&dir, &name);
+        assert!(viewer.find_pair(9, false).is_none());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[::core::prelude::v1::test]
