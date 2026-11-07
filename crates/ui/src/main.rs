@@ -1758,10 +1758,12 @@ impl Workspace {
 
     /// Ctrl+H / Ctrl+L: moves the focus to the project tree (showing it if hidden) or back to
     /// the editor.
-    fn focus_tree(&mut self, tree: bool, cx: &mut Context<Self>) {
+    fn focus_tree(&mut self, tree: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.is_some() || (!tree && self.viewer.is_none()) {
             return;
         }
+        self.autosave(cx); // leaving a panel is a save
+        self.focus.focus(window, cx); // the commit message gives the keyboard back
         if tree {
             self.tree_visible = true;
             self.scroll_tree_to_selection();
@@ -3027,8 +3029,12 @@ impl Workspace {
                 cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
-            .on_action(cx.listener(|this, _: &FocusTree, _, cx| this.focus_tree(true, cx)))
-            .on_action(cx.listener(|this, _: &FocusEditor, _, cx| this.focus_tree(false, cx)))
+            .on_action(
+                cx.listener(|this, _: &FocusTree, window, cx| this.focus_tree(true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusEditor, window, cx| this.focus_tree(false, window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &ExtendSelection, _, cx| this.change_selection(true, cx)),
             )
