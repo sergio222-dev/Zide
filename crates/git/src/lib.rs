@@ -955,3 +955,186 @@ mod change_tests {
         assert_eq!(changes("a\n", ""), [(0, LineChange::Removed)]);
     }
 }
+
+/// How a file differs from the last commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    /// Not tracked by git yet.
+    Untracked,
+    /// Both sides changed it and the merge is not resolved.
+    Conflicted,
+}
+
+/// A file with changes to commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChange {
+    /// Relative to the repository root, with `/` separators.
+    pub path: String,
+    /// Where a renamed file came from: committing the rename needs both paths.
+    pub from: Option<String>,
+    pub kind: ChangeKind,
+}
+
+/// The files that differ from the last commit, staged or not, untracked ones included, sorted by
+/// path. Empty when git is missing or `root` is not a repository.
+pub fn changes(root: &Path) -> Vec<FileChange> {
+    let Ok(output) = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let mut changes = parse_changes(&String::from_utf8_lossy(&output.stdout));
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    changes
+}
+
+/// Reads `git status --porcelain=v1 -z`: `XY path\0`, and for renames and copies `\0from` after.
+fn parse_changes(output: &str) -> Vec<FileChange> {
+    let mut entries = output.split('\0');
+    let mut changes = Vec::new();
+    while let Some(entry) = entries.next() {
+        let (Some(code), Some(path)) = (entry.get(..2), entry.get(3..)) else {
+            continue;
+        };
+        let mut chars = code.chars();
+        let (x, y) = (chars.next().unwrap_or(' '), chars.next().unwrap_or(' '));
+        let renamed = matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C');
+        let from = renamed
+            .then(|| entries.next().map(str::to_string))
+            .flatten();
+        let kind = match (x, y) {
+            ('?', '?') => ChangeKind::Untracked,
+            ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D') => ChangeKind::Conflicted,
+            _ if renamed => ChangeKind::Renamed,
+            ('A', _) => ChangeKind::Added,
+            ('D', _) | (_, 'D') => ChangeKind::Deleted,
+            _ => ChangeKind::Modified,
+        };
+        changes.push(FileChange {
+            path: path.to_string(),
+            from,
+            kind,
+        });
+    }
+    changes
+}
+
+/// Commits `paths` (and nothing else, whatever else is staged) with `message`. `amend` folds them
+/// into the last commit; an empty message then keeps that commit's.
+pub fn commit(root: &Path, paths: &[String], message: &str, amend: bool) -> Result<(), String> {
+    let message = message.trim();
+    if paths.is_empty() && !amend {
+        return Err("There is nothing selected to commit".into());
+    }
+    if message.is_empty() && !amend {
+        return Err("The commit message is empty".into());
+    }
+    if !paths.is_empty() {
+        let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
+        add.extend(paths.iter().map(String::as_str));
+        run(root, &add, false)?;
+    }
+    let mut commit = vec!["--literal-pathspecs", "commit", "-q"];
+    if amend {
+        commit.push("--amend");
+    }
+    if message.is_empty() {
+        commit.push("--no-edit");
+    } else {
+        commit.extend(["-m", message]);
+    }
+    if !paths.is_empty() {
+        commit.push("--");
+        commit.extend(paths.iter().map(String::as_str));
+    }
+    run(root, &commit, false).map(drop)
+}
+
+#[cfg(test)]
+mod commit_tests {
+    use super::*;
+    use std::fs;
+
+    fn repo(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zide-git-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.name", "Sergio Molina"],
+            vec!["config", "user.email", "s@example.com"],
+        ] {
+            run(&dir, &args, false).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn status_lists_every_kind_of_change_and_the_rename_origin() {
+        let output = " M a.rs\0A  b.rs\0 D c.rs\0R  new.rs\0old.rs\0?? dir/u.rs\0UU m.rs\0";
+        let changes = parse_changes(output);
+        let kinds: Vec<_> = changes.iter().map(|c| (c.path.as_str(), c.kind)).collect();
+        assert_eq!(
+            kinds,
+            [
+                ("a.rs", ChangeKind::Modified),
+                ("b.rs", ChangeKind::Added),
+                ("c.rs", ChangeKind::Deleted),
+                ("new.rs", ChangeKind::Renamed),
+                ("dir/u.rs", ChangeKind::Untracked),
+                ("m.rs", ChangeKind::Conflicted),
+            ]
+        );
+        assert_eq!(changes[3].from.as_deref(), Some("old.rs"));
+        assert!(parse_changes("").is_empty());
+    }
+
+    #[test]
+    fn commit_takes_only_the_selected_files_and_refuses_empty_input() {
+        let dir = repo("commit");
+        fs::write(dir.join("keep.txt"), "1").unwrap();
+        run(&dir, &["add", "keep.txt"], false).unwrap();
+        run(&dir, &["commit", "-q", "-m", "base"], false).unwrap();
+        fs::write(dir.join("keep.txt"), "2").unwrap(); // modified, not selected
+        run(&dir, &["add", "keep.txt"], false).unwrap(); // even staged
+        fs::write(dir.join("new.txt"), "n").unwrap(); // untracked, selected
+
+        assert!(commit(&dir, &[], "msg", false).is_err());
+        assert!(commit(&dir, &["new.txt".into()], "  ", false).is_err());
+        commit(&dir, &["new.txt".into()], "add new", false).unwrap();
+
+        let left = changes(&dir);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].path, "keep.txt");
+        assert_eq!(
+            run(&dir, &["log", "-1", "--format=%s"], false).unwrap(),
+            "add new"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn amend_folds_files_in_and_an_empty_message_keeps_the_old_one() {
+        let dir = repo("amend");
+        fs::write(dir.join("a.txt"), "1").unwrap();
+        commit(&dir, &["a.txt".into()], "first", false).unwrap();
+        fs::write(dir.join("b.txt"), "b").unwrap();
+        commit(&dir, &["b.txt".into()], "", true).unwrap();
+        assert_eq!(run(&dir, &["log", "--format=%s"], false).unwrap(), "first");
+        assert_eq!(
+            run(&dir, &["show", "--name-only", "--format="], false).unwrap(),
+            "a.txt\nb.txt"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
