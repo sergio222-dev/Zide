@@ -19,6 +19,7 @@ mod chat;
 mod commit;
 mod definition;
 mod file_icon;
+mod fileops;
 mod indent;
 mod markdown;
 mod meter;
