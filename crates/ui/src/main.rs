@@ -83,6 +83,7 @@ actions!(
         RevealOpenFile,
         ToggleClaudeChat,
         ToggleCommitPanel,
+        CommitNow,
         ToggleMarkdownPreview,
         NavigateBack,
         NavigateForward,
@@ -3115,11 +3116,14 @@ impl Workspace {
             .on_action(
                 cx.listener(|this, _: &PreviousMethod, _, cx| this.jump_to_method(false, cx)),
             )
-            .on_action(cx.listener(|this, _: &SwitchTab, _, cx| {
+            .on_action(cx.listener(|this, _: &SwitchTab, window, cx| {
                 if this.popup.is_some() {
                     this.switch_tab(cx);
+                } else {
+                    this.commit_tab(window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &CommitNow, window, cx| this.commit_now(window, cx)))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if window.has_active_dialog(cx) {
                     // typing in a dialog is not for the editor or the tree; only the diff gives
@@ -4140,6 +4144,7 @@ fn main() {
             KeyBinding::new("alt-~", RevealOpenFile, Some("Workspace")),
             KeyBinding::new("alt-shift-~", RevealOpenFile, Some("Workspace")),
             KeyBinding::new("alt-2", ToggleCommitPanel, Some("Workspace")),
+            KeyBinding::new("alt-enter", CommitNow, Some("Workspace")),
             KeyBinding::new("alt-3", ToggleClaudeChat, Some("Workspace")),
             KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
             KeyBinding::new("ctrl-alt-left", NavigateBack, Some("Workspace")),

@@ -395,6 +395,34 @@ impl Workspace {
         }
     }
 
+    /// Tab on the list of files goes to the message.
+    pub(crate) fn commit_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.commit else {
+            return;
+        };
+        if self.commit_open && panel.list_focused {
+            panel.list_focused = false;
+            panel
+                .message
+                .update(cx, |state, cx| state.focus(window, cx));
+            cx.notify();
+        }
+    }
+
+    /// Alt+Enter, from the list or the message: commits what is ticked.
+    pub(crate) fn commit_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let in_panel = self.commit_open
+            && (self.commit_focused(window, cx)
+                || self.commit.as_ref().is_some_and(|panel| panel.list_focused));
+        let ready = self
+            .commit
+            .as_ref()
+            .is_some_and(|panel| !panel.busy && panel.changes.ticked() > 0 || panel.amend);
+        if in_panel && ready {
+            self.commit_selected(false, cx);
+        }
+    }
+
     /// Keys while the list of files has the keyboard: `j`/`k`, Space ticks, Enter opens the diff.
     pub(crate) fn commit_key(
         &mut self,
@@ -759,6 +787,13 @@ impl Workspace {
                                 push_button.update(cx, |this, cx| this.commit_selected(true, cx))
                             }),
                     ),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .text_xs()
+                    .text_color(rgb(theme::DIM))
+                    .child("Tab: message · Alt+Enter: commit · Esc: files"),
             )
     }
 }
