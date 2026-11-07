@@ -4229,7 +4229,10 @@ impl Render for Shell {
 /// notifications and the rest look like the popup they sit in instead of the library's own dark.
 /// These colors are only read by the components, never by Zide's own elements.
 fn apply_palette(cx: &mut App) {
-    let colors = &mut gpui_kit::component::Theme::global_mut(cx).colors;
+    let theme = gpui_kit::component::Theme::global_mut(cx);
+    // the bundled default (`.SystemUIFont`) showed no bold; naming the family finds its bold face
+    theme.font_family = "Noto Sans".into();
+    let colors = &mut theme.colors;
     // background and text
     colors.popover = rgb(theme::POPUP).into();
     colors.popover_foreground = rgb(theme::TEXT).into();

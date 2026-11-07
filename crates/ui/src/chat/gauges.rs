@@ -1,5 +1,5 @@
-//! What is left of the context and of the account's usage limits, as small bars beside the
-//! dropdowns under the input. The CLI does not say when it compacts the conversation by
+//! What is left of the context and of the account's usage limits, as bars in the panel the ring
+//! under the input opens. The CLI does not say when it compacts the conversation by
 //! itself, so the context bar shows how full the window is, not the distance to that point.
 
 use gpui_kit::component::progress::Progress;
@@ -9,7 +9,7 @@ use zide_claude::{Limits, Transcript, Window as Usage};
 use crate::theme;
 
 /// The bar and text colour for a share of 0 to 1 already spent.
-fn color(used: f64) -> u32 {
+pub(super) fn color(used: f64) -> u32 {
     if used >= 0.9 {
         theme::ERROR
     } else if used >= 0.7 {
@@ -39,51 +39,87 @@ fn resets_in(seconds: u64) -> String {
     }
 }
 
-fn gauge(id: &'static str, label: &str, used: f64, text: String) -> Div {
+/// A bar across the panel, with a line above that says what it measures.
+fn bar(id: &'static str, label: &str, right: String, used: f64) -> Div {
     let used = used.clamp(0.0, 1.0);
     div()
         .flex()
-        .items_center()
-        .gap_1p5()
-        .child(div().text_color(rgb(theme::DIM)).child(label.to_owned()))
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .child(div().text_color(rgb(theme::TEXT)).child(label.to_owned()))
+                .child(div().text_color(rgb(color(used))).child(right)),
+        )
         .child(
             Progress::new(id)
                 .value((used * 100.0) as f32)
                 .color(rgb(color(used)))
-                .w(px(64.))
-                .h(px(6.)),
+                .w_full()
+                .h(px(4.)),
         )
-        .child(div().text_color(rgb(color(used))).child(text))
 }
 
-/// The context bar, when the window is known, and a bar per usage window.
-pub(super) fn view(transcript: &Transcript, limits: Option<&Limits>, now: u64) -> Div {
-    let mut row = div().flex().items_center().gap_4().text_xs();
-    if let (Some(usage), Some(window)) = (transcript.usage(), transcript.context_window()) {
-        let used = usage.context_tokens as f64 / window as f64;
-        row = row.child(gauge(
+/// How full the context window is, 0 to 1, when the window is known.
+pub(super) fn context_share(transcript: &Transcript) -> Option<f64> {
+    let (usage, window) = (transcript.usage()?, transcript.context_window()?);
+    Some(usage.context_tokens as f64 / window as f64)
+}
+
+/// What the small ring under the input opens: the context window, then the plan's limits.
+pub(super) fn report(transcript: &Transcript, limits: Option<&Limits>, now: u64) -> Div {
+    let context = match (transcript.usage(), transcript.context_window()) {
+        (Some(usage), Some(window)) => bar(
             "claude-context",
-            "Context",
-            used,
+            "Context window",
             format!("{} / {}", tokens(usage.context_tokens), tokens(window)),
-        ));
-    }
+            usage.context_tokens as f64 / window as f64,
+        ),
+        _ => bar("claude-context", "Context window", "0".to_owned(), 0.0),
+    };
     let windows: [(&'static str, &str, Option<Usage>); 2] = [
-        ("claude-5h", "5h", limits.and_then(|l| l.five_hour)),
-        ("claude-7d", "7d", limits.and_then(|l| l.seven_day)),
+        (
+            "claude-5h",
+            "5-hour limit",
+            limits.and_then(|l| l.five_hour),
+        ),
+        (
+            "claude-7d",
+            "Weekly limit",
+            limits.and_then(|l| l.seven_day),
+        ),
     ];
-    for (id, label, window) in windows {
-        if let Some(window) = window {
-            let left = window.resets_at.saturating_sub(now);
-            row = row.child(gauge(
-                id,
-                label,
-                window.utilization,
-                format!("{:.0}% · {}", window.utilization * 100.0, resets_in(left)),
-            ));
-        }
-    }
-    row
+    let limits = windows.into_iter().filter_map(|(id, label, window)| {
+        let window = window?;
+        let left = window.resets_at.saturating_sub(now);
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(bar(
+                    id,
+                    label,
+                    format!("{:.0}%", window.utilization * 100.0),
+                    window.utilization,
+                ))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme::DIM))
+                        .child(format!("Resets {}", resets_in(left))),
+                ),
+        )
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .text_sm()
+        .child(context)
+        .children(limits)
 }
 
 #[cfg(test)]

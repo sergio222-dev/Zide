@@ -1,7 +1,7 @@
 //! Pictures in the message: Ctrl+V takes an image from the clipboard, a strip above the input
 //! shows what will be sent, and each one can be removed first.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use gpui_kit::*;
 use zide_claude::Image as Picture;
@@ -21,6 +21,42 @@ fn media_type(format: ImageFormat) -> Option<&'static str> {
         ImageFormat::Webp => Some("image/webp"),
         _ => None,
     }
+}
+
+/// The inverse of `media_type`, for the pictures read back from a stored conversation.
+fn format_of(media_type: &str) -> ImageFormat {
+    match media_type {
+        "image/jpeg" => ImageFormat::Jpeg,
+        "image/gif" => ImageFormat::Gif,
+        "image/webp" => ImageFormat::Webp,
+        _ => ImageFormat::Png,
+    }
+}
+
+/// The pictures of a stored conversation, numbered in the order they were sent, by the block of
+/// the message they came with; and how many there are, so new ones go on counting from there.
+pub(super) fn from_stored(
+    stored: Vec<(usize, Vec<Picture>)>,
+) -> (HashMap<usize, Vec<Numbered>>, u32) {
+    let mut number = 1;
+    let sent = stored
+        .into_iter()
+        .map(|(at, pictures)| {
+            let numbered = pictures
+                .into_iter()
+                .map(|picture| {
+                    let image = Image::from_bytes(format_of(picture.media_type), picture.bytes);
+                    number += 1;
+                    Numbered {
+                        number: number - 1,
+                        image: Arc::new(image),
+                    }
+                })
+                .collect();
+            (at, numbered)
+        })
+        .collect();
+    (sent, number)
 }
 
 /// A picture and the number it is shown as: `Image #3`.
@@ -45,34 +81,83 @@ impl Chat {
     }
 }
 
-/// The pictures of a sent message, under its text.
-pub(super) fn sent_view(sent: &[Numbered]) -> Div {
-    div()
-        .flex()
-        .flex_wrap()
-        .gap_2()
-        .children(sent.iter().map(|picture| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    img(picture.image.clone())
-                        .max_w(px(360.))
-                        .max_h(px(180.))
-                        .object_fit(ObjectFit::Contain)
-                        .rounded_md(),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(theme::DIM))
-                        .child(format!("Image #{}", picture.number)),
-                )
-        }))
-}
-
 impl Workspace {
+    /// The pictures of a sent message, under its text. Each takes a fixed box, so the history's
+    /// height does not change when the picture finishes loading, and a click opens it large.
+    pub(super) fn sent_view(&self, sent: &[Numbered], cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .children(sent.iter().enumerate().map(|(index, picture)| {
+                let image = picture.image.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("sent-image-{}", picture.number)))
+                            .w(px(240.))
+                            .h(px(160.))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.claude_preview(Some(image.clone()), cx)
+                            }))
+                            .child(
+                                img(picture.image.clone())
+                                    .size_full()
+                                    .object_fit(ObjectFit::Contain)
+                                    .rounded_md(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme::DIM))
+                            .child(format!("Image #{}", picture.number)),
+                    )
+                    .id(SharedString::from(format!(
+                        "sent-{index}-{}",
+                        picture.number
+                    )))
+            }))
+    }
+
+    /// Opens `image` large over the chat, or closes the preview.
+    pub(super) fn claude_preview(&mut self, image: Option<Arc<Image>>, cx: &mut Context<Self>) {
+        if let Some(chats) = &mut self.claude {
+            chats.preview = image;
+        }
+        cx.notify();
+    }
+
+    /// The picture being previewed, dimming the chat; a click or Esc closes it.
+    pub(super) fn preview_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let image = self.claude.as_ref()?.preview.clone()?;
+        Some(
+            div()
+                .id("image-preview")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_8()
+                .bg(rgba(0x000000d9))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.claude_preview(None, cx)))
+                .child(
+                    img(image)
+                        .max_w_full()
+                        .max_h_full()
+                        .object_fit(ObjectFit::Contain),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Takes the picture on the clipboard into the active chat. `false` when there is none (or
     /// the clipboard also holds text, which the input pastes itself), so the key goes on.
     pub(super) fn claude_paste_image(&mut self, cx: &mut Context<Self>) -> bool {
@@ -124,6 +209,7 @@ impl Workspace {
             return None;
         }
         let chips = chat.images.iter().enumerate().map(|(index, picture)| {
+            let image = picture.image.clone();
             div()
                 .flex()
                 .items_center()
@@ -133,7 +219,15 @@ impl Workspace {
                 .bg(rgb(theme::TREE_SELECTED))
                 .text_sm()
                 .text_color(rgb(theme::TEXT))
-                .child(format!("Image #{}", picture.number))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("image-open-{index}")))
+                        .cursor_pointer()
+                        .child(format!("Image #{}", picture.number))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.claude_preview(Some(image.clone()), cx)
+                        })),
+                )
                 .child(
                     div()
                         .id(SharedString::from(format!("image-remove-{index}")))

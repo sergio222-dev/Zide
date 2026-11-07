@@ -3,6 +3,7 @@
 //! its events into UI state and draws the history and the input box.
 
 mod asks;
+mod composer;
 mod gauges;
 mod images;
 mod menu;
@@ -14,8 +15,10 @@ mod tools;
 use std::collections::{HashMap, HashSet};
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::slider::SliderState;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use zide_claude::agents::{self, Agent, Kind};
 use zide_claude::history::{self, SessionInfo};
@@ -43,9 +46,25 @@ pub struct Chats {
     /// The live agents of the project (interactive and background), as `claude agents` last
     /// listed them.
     agents: Vec<Agent>,
+    /// The picture shown large over the chat, if any.
+    preview: Option<std::sync::Arc<Image>>,
 }
 
 impl Chats {
+    /// What `chat` is doing. A chat that only follows an agent running elsewhere has no process
+    /// here, so it shows the state `claude agents` reports for that agent.
+    fn status_of(&self, chat: &Chat) -> Status {
+        let followed = chat.tail && chat.session.is_none();
+        let agent = followed
+            .then(|| chat.transcript.session_id())
+            .flatten()
+            .and_then(|id| self.agents.iter().find(|agent| agent.session_id == id));
+        match agent {
+            Some(agent) => agent_status(agent),
+            None => chat.status(),
+        }
+    }
+
     fn new(
         commands: Vec<String>,
         defaults: Defaults,
@@ -61,6 +80,7 @@ impl Chats {
             limits: None,
             sessions: None,
             agents: Vec::new(),
+            preview: None,
         };
         chats.add(window, cx);
         chats
@@ -102,13 +122,12 @@ pub struct Chat {
     /// The model and effort picked, `None` for the default.
     model: Option<String>,
     effort: Option<String>,
-    model_select: options::Dropdown,
-    effort_select: options::Dropdown,
+    effort_slider: Entity<SliderState>,
     /// The running process was started in bare mode.
     bare: bool,
-    /// The dropdowns show something else than `model` and `effort`.
-    dropdowns_stale: bool,
-    _dropdowns: Vec<Subscription>,
+    /// The effort slider shows something else than `effort`.
+    options_stale: bool,
+    _slider: Subscription,
     /// `None` until the first message, and again once the process has exited.
     session: Option<Session>,
     input: Entity<TextareaState>,
@@ -148,14 +167,12 @@ pub struct Chat {
 
 impl Chat {
     fn new(id: u64, defaults: &Defaults, window: &mut Window, cx: &mut Context<Workspace>) -> Chat {
-        let (model_select, effort_select) = Chat::new_dropdowns(defaults, window, cx);
-        let dropdowns = Chat::dropdown_events(id, &model_select, &effort_select, window, cx);
+        let effort_slider = Chat::new_effort_slider(defaults, window, cx);
+        let slider = Chat::effort_events(id, &effort_slider, window, cx);
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
-                .placeholder(
-                    "Message Claude. Enter sends, Shift+Enter adds a line, Esc stops Claude.",
-                )
+                .placeholder("Describe a task or ask a question")
                 .submit_on_enter(true)
         });
         let submit = cx.subscribe_in(
@@ -185,11 +202,10 @@ impl Chat {
             run: 0,
             model: None,
             effort: None,
-            model_select,
-            effort_select,
-            dropdowns_stale: false,
+            effort_slider,
+            options_stale: false,
             bare: false,
-            _dropdowns: dropdowns,
+            _slider: slider,
             session: None,
             input,
             markdown: HashMap::new(),
@@ -348,7 +364,7 @@ impl Workspace {
                 .spawn(async move {
                     let stored: Vec<_> = followed
                         .into_iter()
-                        .map(|(id, session)| (id, history::load(&project, &session)))
+                        .map(|(id, session)| (id, history::load_with_images(&project, &session)))
                         .collect();
                     (agents::list(&root), stored)
                 })
@@ -366,7 +382,7 @@ impl Workspace {
                         continue;
                     };
                     // a message of ours started a process meanwhile: that one is the truth
-                    let Ok(transcript) = loaded else {
+                    let Ok((transcript, pictures)) = loaded else {
                         continue;
                     };
                     if chat.session.is_none()
@@ -374,6 +390,7 @@ impl Workspace {
                     {
                         let follow = chat.at_bottom();
                         chat.transcript = transcript;
+                        (chat.sent_images, chat.next_image) = images::from_stored(pictures);
                         chat.markdown.clear();
                         chat.rebuild_markdown(cx);
                         if follow {
@@ -481,6 +498,10 @@ impl Workspace {
     ) {
         let key = keystroke.key.as_str();
         let modifiers = &keystroke.modifiers;
+        if key == "escape" && self.claude.as_ref().is_some_and(|c| c.preview.is_some()) {
+            self.claude_preview(None, cx);
+            return cx.stop_propagation();
+        }
         if modifiers.alt && !modifiers.control && !modifiers.shift {
             match key {
                 "up" | "down" => {
@@ -551,35 +572,8 @@ impl Workspace {
         cx.stop_propagation();
     }
 
-    /// The button beside the input: Stop while Claude works (Esc presses it), else Send.
-    fn send_or_stop(&self, chat: &Chat, cx: &mut Context<Self>) -> Button {
-        let id = chat.id;
-        if chat.busy() {
-            Button::new("claude-stop")
-                .label("■ Stop")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.claude_interrupt();
-                    cx.notify();
-                }))
-        } else {
-            Button::new("claude-send")
-                .primary()
-                .label("Send")
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    let text = this
-                        .claude
-                        .as_mut()
-                        .and_then(|c| c.find(id))
-                        .map(|chat| chat.input.read(cx).value().to_string());
-                    if let Some(text) = text {
-                        this.claude_send(id, text, window, cx);
-                    }
-                }))
-        }
-    }
-
     /// Stops the turn in progress of the active chat. A message that waits starts right after.
-    fn claude_interrupt(&mut self) {
+    pub(super) fn claude_interrupt(&mut self) {
         if let Some(session) = self
             .claude
             .as_mut()
@@ -813,18 +807,19 @@ impl Workspace {
             let stored = session.id.clone();
             let loaded = cx
                 .background_executor()
-                .spawn(async move { history::load(&root, &stored) })
+                .spawn(async move { history::load_with_images(&root, &stored) })
                 .await;
             this.update(cx, |this, cx| {
                 let Some(chat) = this.claude.as_mut().and_then(|c| c.find(id)) else {
                     return;
                 };
                 match loaded {
-                    Ok(transcript) => {
+                    Ok((transcript, pictures)) => {
+                        (chat.sent_images, chat.next_image) = images::from_stored(pictures);
                         // continue with what the conversation was made with
                         chat.model = transcript.model().map(str::to_owned);
                         chat.effort = transcript.effort().map(str::to_owned);
-                        chat.dropdowns_stale = true;
+                        chat.options_stale = true;
                         chat.transcript = transcript;
                         chat.rebuild_markdown(cx);
                         chat.scroll.scroll_to_bottom();
@@ -887,7 +882,7 @@ impl Workspace {
                 .iter()
                 .enumerate()
                 .map(|(index, chat)| {
-                    let status = chat.status();
+                    let status = chats.status_of(chat);
                     let (color, label) = status_style(status);
                     let id = chat.id;
                     div()
@@ -950,18 +945,19 @@ impl Workspace {
                 .gap_2()
                 .px_3()
                 .py_2()
-                .cursor_pointer()
-                .bg(rgb(if shown {
-                    theme::TREE_SELECTED
-                } else {
-                    theme::BACKGROUND
-                }))
-                .hover(|row| row.bg(rgb(theme::TREE_SELECTED)))
-                .on_click(
-                    cx.listener(move |this, _, window, cx| {
-                        this.claude_open_agent(index, window, cx)
-                    }),
-                )
+                // a background agent takes no messages, so its row only reports its state
+                .when(!background, |row| {
+                    row.cursor_pointer()
+                        .bg(rgb(if shown {
+                            theme::TREE_SELECTED
+                        } else {
+                            theme::BACKGROUND
+                        }))
+                        .hover(|row| row.bg(rgb(theme::TREE_SELECTED)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.claude_open_agent(index, window, cx)
+                        }))
+                })
                 .child(div().flex_none().size_2().rounded_full().bg(rgb(color)))
                 .child(
                     div()
@@ -1069,7 +1065,7 @@ impl Workspace {
     pub(crate) fn claude_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         self.ensure_asks(window, cx);
         self.ensure_diffs(cx);
-        self.sync_dropdowns(window, cx);
+        self.sync_options(window, cx);
         let popup = self.sessions_view(window, cx);
         let Some(chats) = &self.claude else {
             return div();
@@ -1088,7 +1084,6 @@ impl Workspace {
         let menu = self.menu_view(cx);
         let images = self.images_view(cx);
         let panel = self.claude_panel(chats, cx);
-        let limits = chats.limits;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -1097,7 +1092,7 @@ impl Workspace {
             .iter()
             .filter(|agent| agent.kind == Kind::Background)
             .count();
-        let ended = chat.status() == Status::Inactive && !chat.is_empty();
+        let ended = chats.status_of(chat) == Status::Inactive && !chat.is_empty();
         // a running process keeps the mode it started with; any other starts with the toggle's
         let bare = if chat.session.is_some() {
             chat.bare
@@ -1181,68 +1176,19 @@ impl Workspace {
                     .border_t_1()
                     .border_color(rgb(theme::BORDER))
                     .p_2()
-                    .child(
-                        div()
-                            .max_w(px(900.))
-                            .mx_auto()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .children(menu)
-                            .child(
-                                div()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(rgb(theme::CONTROL_BORDER))
-                                    .bg(rgb(theme::POPUP))
-                                    .px_3()
-                                    .py_2()
-                                    .children(images)
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_end()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .child(Textarea::new(&chat.input)),
-                                            )
-                                            .child(self.send_or_stop(chat, cx)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_4()
-                                    .children(self.dropdowns_view())
-                                    .child(gauges::view(&chat.transcript, limits.as_ref(), now)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap_2()
-                                    .text_xs()
-                                    .text_color(rgb(theme::DIM))
-                                    .child(footer(
-                                        chat.status(),
-                                        &chat.transcript,
-                                        background_count,
-                                    ))
-                                    // loud on purpose: this chat is not running with the user's setup
-                                    .children(bare.then(|| {
-                                        div()
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(rgb(theme::ERROR))
-                                            .child("BARE MODE")
-                                    })),
-                            ),
-                    ),
+                    .child(self.composer(
+                        chat,
+                        chats,
+                        menu,
+                        images,
+                        bare,
+                        background_count,
+                        now,
+                        cx,
+                    )),
             )
-            .children(popup);
+            .children(popup)
+            .children(self.preview_view(cx));
         div()
             .flex()
             .flex_1()
@@ -1273,7 +1219,7 @@ impl Workspace {
                 .children(
                     chat.sent_images
                         .get(&index)
-                        .map(|sent| images::sent_view(sent)),
+                        .map(|sent| self.sent_view(sent, cx)),
                 )
                 .into_any_element(),
             Block::Text(text) if chat.report_md.contains_key(&(index, 0)) => {
@@ -1406,6 +1352,16 @@ fn agent_style(agent: &Agent) -> (u32, String) {
     }
 }
 
+/// The `Status` of an agent `claude` lists, so a chat that follows it reads like its row.
+fn agent_status(agent: &Agent) -> Status {
+    match (agent.status.as_str(), agent.state.as_deref()) {
+        (_, Some("blocked")) => Status::NeedsUser,
+        ("busy", _) => Status::Working,
+        ("idle", None) => Status::Idle,
+        _ => Status::Inactive,
+    }
+}
+
 fn capitalized(text: &str) -> String {
     let mut chars = text.chars();
     chars
@@ -1454,7 +1410,7 @@ fn thinking(status: Status) -> impl IntoElement {
         )
 }
 
-fn footer(status: Status, transcript: &Transcript, background: usize) -> String {
+pub(super) fn footer(status: Status, transcript: &Transcript, background: usize) -> String {
     let state = match status {
         Status::Inactive => "Not running",
         Status::Idle => "Ready",

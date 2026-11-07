@@ -10,9 +10,10 @@ use std::{
     time::SystemTime,
 };
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::Value;
 
-use crate::{event::Event, transcript::Transcript};
+use crate::{Image, event::Event, transcript::Transcript};
 
 /// A stored conversation, as the list shows it.
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +119,8 @@ fn user_text(record: &Value) -> Option<String> {
             .iter()
             .filter(|block| block["type"] == "text")
             .filter_map(|block| block["text"].as_str())
+            // the terminal app notes where it kept each pasted picture; the picture itself is shown
+            .filter(|text| !text.starts_with("[Image: source:"))
             .collect::<Vec<_>>()
             .join("\n"),
         _ => return None,
@@ -133,15 +136,30 @@ fn user_text(record: &Value) -> Option<String> {
     (!text.is_empty() && !NOISE.iter().any(|tag| text.starts_with(tag))).then(|| text.to_owned())
 }
 
+/// A stored conversation and the pictures sent in it, each with the index of the block (the
+/// user's message) it came with.
+pub type WithImages = (Transcript, Vec<(usize, Vec<Image>)>);
+
 /// The conversation `id` of `root`, rebuilt from its file. Ready to resume: a message
 /// sent next starts `claude --resume` on it.
 pub fn load(root: &Path, id: &str) -> io::Result<Transcript> {
+    load_with_images(root, id).map(|(transcript, _)| transcript)
+}
+
+/// Like `load`, plus the pictures of the user's messages, each with the index of the block
+/// (the user's message) it was sent with. The file keeps them whole, so nothing else is stored.
+pub fn load_with_images(root: &Path, id: &str) -> io::Result<WithImages> {
     let dir = project_dir(root).ok_or_else(|| io::Error::other("no home folder"))?;
-    load_from(&dir.join(format!("{id}.jsonl")), id)
+    read(&dir.join(format!("{id}.jsonl")), id)
 }
 
 pub fn load_from(path: &Path, id: &str) -> io::Result<Transcript> {
+    read(path, id).map(|(transcript, _)| transcript)
+}
+
+fn read(path: &Path, id: &str) -> io::Result<WithImages> {
     let mut transcript = Transcript::new();
+    let mut pictures = Vec::new();
     transcript.apply(Event::Init {
         session_id: id.to_owned(),
         commands: Vec::new(),
@@ -158,12 +176,43 @@ pub fn load_from(path: &Path, id: &str) -> io::Result<Transcript> {
             continue;
         }
         match record["type"].as_str() {
-            Some("user") => replay_user(&record, &mut transcript),
+            Some("user") => {
+                let at = transcript.blocks().len();
+                let images = images_of(&record);
+                if !images.is_empty() && user_text(&record).is_none() {
+                    transcript.push_user("");
+                }
+                replay_user(&record, &mut transcript);
+                if !images.is_empty() {
+                    pictures.push((at, images));
+                }
+            }
             Some("assistant") => replay_assistant(&record, &mut transcript),
             _ => {}
         }
     }
-    Ok(transcript)
+    Ok((transcript, pictures))
+}
+
+/// The pictures a `user` record carries, for the formats Claude takes.
+fn images_of(record: &Value) -> Vec<Image> {
+    record["message"]["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block["type"] == "image" && block["source"]["type"] == "base64")
+        .filter_map(|block| {
+            let media_type = match block["source"]["media_type"].as_str()? {
+                "image/png" => "image/png",
+                "image/jpeg" => "image/jpeg",
+                "image/gif" => "image/gif",
+                "image/webp" => "image/webp",
+                _ => return None,
+            };
+            let bytes = STANDARD.decode(block["source"]["data"].as_str()?).ok()?;
+            Some(Image { media_type, bytes })
+        })
+        .collect()
 }
 
 fn replay_user(record: &Value, transcript: &mut Transcript) {
@@ -359,6 +408,33 @@ mod tests {
             .unwrap();
         let ids: Vec<_> = list_in(&scratch.0).into_iter().map(|s| s.id).collect();
         assert_eq!(ids, ["new", "old"]);
+    }
+
+    #[test]
+    fn the_pictures_of_a_message_come_back_with_the_block_they_were_sent_with() {
+        let scratch = Scratch::new();
+        let path = scratch.write(
+            "pics.jsonl",
+            &[
+                USER,
+                ANSWER,
+                r#"{"type":"user","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}},{"type":"text","text":"mirá"},{"type":"text","text":"[Image: source: /tmp/a.png]"}]}}"#,
+                r#"{"type":"api-request-blob","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}}]}}"#,
+                r#"{"type":"user","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/bmp","data":"AQID"}}]}}"#,
+            ],
+        );
+        let (transcript, pictures) = read(&path, "s").unwrap();
+        assert!(matches!(&transcript.blocks()[2], Block::User(t) if t == "mirá"));
+        assert_eq!(
+            pictures,
+            vec![(
+                2,
+                vec![Image {
+                    media_type: "image/png",
+                    bytes: vec![1, 2, 3]
+                }]
+            )]
+        );
     }
 
     #[test]
