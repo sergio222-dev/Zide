@@ -704,6 +704,12 @@ impl Workspace {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let ended = chat.status() == Status::Inactive && !chat.is_empty();
+        // a running process keeps the mode it started with; any other starts with the toggle's
+        let bare = if chat.session.is_some() {
+            chat.bare
+        } else {
+            self.claude_bare
+        };
         let main = div()
             .relative()
             .flex()
@@ -817,7 +823,7 @@ impl Workspace {
                                     .text_color(rgb(theme::DIM))
                                     .child(footer(chat.status(), &chat.transcript))
                                     // loud on purpose: this chat is not running with the user's setup
-                                    .children(chat.bare.then(|| {
+                                    .children(bare.then(|| {
                                         div()
                                             .font_weight(FontWeight::BOLD)
                                             .text_color(rgb(theme::ERROR))
