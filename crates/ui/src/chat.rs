@@ -118,6 +118,8 @@ pub struct Chat {
     sent_images: HashMap<usize, Vec<images::Numbered>>,
     /// Tool cards the user opened or folded against their default, by tool call id.
     toggled: HashSet<String>,
+    /// The diff of each edit, by tool call id.
+    diffs: HashMap<String, tools::EditDiff>,
     /// The questionnaire of each question that waits for an answer, by request id.
     asks: asks::Asks,
     /// The highlighted entry of the `/` and `@` menu, among the matches.
@@ -182,6 +184,7 @@ impl Chat {
             shown: SHOWN_STEP,
             asks: HashMap::new(),
             toggled: HashSet::new(),
+            diffs: HashMap::new(),
             images: Vec::new(),
             next_image: 1,
             sent_images: HashMap::new(),
@@ -680,6 +683,7 @@ impl Workspace {
     /// The chat, filling the area where the editor would be.
     pub(crate) fn claude_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         self.ensure_asks(window, cx);
+        self.ensure_diffs(cx);
         self.sync_dropdowns(window, cx);
         let popup = self.sessions_view(window, cx);
         let Some(chats) = &self.claude else {

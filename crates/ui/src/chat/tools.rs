@@ -3,8 +3,9 @@
 //! Edits and writes start open, since the change is the point; the rest start folded.
 
 use gpui_kit::component::collapsible::Collapsible;
+use gpui_kit::component::diff::{Diff, DiffFile, DiffState};
 use gpui_kit::*;
-use zide_claude::{ToolCall, ToolOutput, Value};
+use zide_claude::{Block, ToolCall, ToolOutput, Value};
 
 use super::{Chat, summary};
 use crate::{Workspace, theme};
@@ -17,6 +18,61 @@ const OUTPUT_LINES: usize = 30;
 
 /// Lines of a written file shown.
 const WRITE_LINES: usize = 30;
+
+/// Rows the diff of an edit shows before it scrolls.
+const DIFF_ROWS: usize = 16;
+
+/// The diff of one edit, ready to draw.
+pub(super) struct EditDiff {
+    state: Entity<DiffState>,
+    /// How many rows it has, for its height.
+    rows: usize,
+}
+
+/// A unified patch for replacing `old` with `new` in the file `path`.
+fn unified(path: &str, old: &str, new: &str) -> String {
+    let terminated = |text: &str| {
+        if text.is_empty() || text.ends_with('\n') {
+            text.to_owned()
+        } else {
+            format!("{text}\n")
+        }
+    };
+    let (old, new) = (terminated(old), terminated(new));
+    similar::TextDiff::from_lines(old.as_str(), new.as_str())
+        .unified_diff()
+        .context_radius(3)
+        .header(&format!("a/{path}"), &format!("b/{path}"))
+        .to_string()
+}
+
+/// The patch an edit tool makes, `None` for any other tool or an edit that changes nothing.
+/// Line numbers count from the edited text, not from the file: Claude does not say where in the
+/// file it was.
+fn patch(name: &str, input: &Value) -> Option<String> {
+    let path = input["file_path"].as_str()?;
+    let patch = match name {
+        "Edit" => unified(
+            path,
+            input["old_string"].as_str()?,
+            input["new_string"].as_str()?,
+        ),
+        "MultiEdit" => input["edits"]
+            .as_array()?
+            .iter()
+            .filter_map(|edit| {
+                Some(unified(
+                    path,
+                    edit["old_string"].as_str()?,
+                    edit["new_string"].as_str()?,
+                ))
+            })
+            .collect(),
+        "Write" => unified(path, "", input["content"].as_str()?),
+        _ => return None,
+    };
+    patch.contains("\n@@").then_some(patch)
+}
 
 /// One line of a change.
 #[derive(Debug, PartialEq)]
@@ -147,6 +203,23 @@ pub(super) fn input_detail(name: &str, input: &Value) -> Option<Div> {
     }
 }
 
+/// The diff of an edit under its file name.
+fn edit_diff(input: &Value, edit: &EditDiff) -> Div {
+    let height = px(22.) * edit.rows.min(DIFF_ROWS) as f32 + px(8.);
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .children(file_label(input))
+        .child(
+            div().h(height).rounded_md().overflow_hidden().child(
+                Diff::new(&edit.state)
+                    .header_visible(false)
+                    .line_number(false),
+            ),
+        )
+}
+
 /// What came out of the tool, cut after `OUTPUT_LINES` lines.
 fn output_view(output: &ToolOutput) -> Option<Div> {
     if output.text.trim().is_empty() {
@@ -171,6 +244,42 @@ fn output_view(output: &ToolOutput) -> Option<Div> {
 }
 
 impl Workspace {
+    /// Gives each edit of the active chat its diff, once.
+    pub(super) fn ensure_diffs(&mut self, cx: &mut Context<Self>) {
+        let Some(chats) = &self.claude else { return };
+        let chat = chats.active();
+        let missing: Vec<(String, Vec<DiffFile>)> = chat
+            .transcript
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                Block::Tool(call) if !chat.diffs.contains_key(&call.id) => {
+                    let patch = patch(&call.name, &call.input)?;
+                    Some((call.id.clone(), DiffFile::parse(&patch).ok()?))
+                }
+                _ => None,
+            })
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let built: Vec<(String, EditDiff)> = missing
+            .into_iter()
+            .map(|(id, files)| {
+                // the changed lines, and about as many of context as a hunk has around them
+                let rows = files
+                    .iter()
+                    .map(|file| file.additions() + file.deletions() + 7)
+                    .sum();
+                let state = cx.new(|cx| DiffState::new(files, cx));
+                (id, EditDiff { state, rows })
+            })
+            .collect();
+        if let Some(chats) = &mut self.claude {
+            chats.active_mut().diffs.extend(built);
+        }
+    }
+
     pub(super) fn claude_toggle_tool(
         &mut self,
         chat_id: u64,
@@ -227,7 +336,10 @@ impl Workspace {
             .gap_2()
             .pl_5()
             .pt_1()
-            .children(input_detail(&call.name, &call.input))
+            .children(match chat.diffs.get(&call.id) {
+                Some(edit) => Some(edit_diff(&call.input, edit)),
+                None => input_detail(&call.name, &call.input),
+            })
             .children(call.output.as_ref().and_then(output_view));
         div().child(Collapsible::new().open(open).child(header).content(detail))
     }
@@ -235,7 +347,10 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{Change, clip, diff, starts_open};
+    use gpui_kit::component::diff::DiffFile;
+    use zide_claude::Value;
+
+    use super::{Change, clip, diff, patch, starts_open};
 
     fn removed(text: &str) -> Change {
         Change::Removed(text.to_owned())
@@ -280,5 +395,39 @@ mod tests {
         assert!(starts_open("Write"));
         assert!(!starts_open("Bash"));
         assert!(!starts_open("Read"));
+    }
+
+    fn json(text: &str) -> Value {
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn an_edit_becomes_a_patch_the_diff_component_reads() {
+        let input = json(
+            r#"{"file_path":"src/a.rs","old_string":"one\ntwo","new_string":"one\nthree\nfour"}"#,
+        );
+        let patch = patch("Edit", &input).unwrap();
+        let files = DiffFile::parse(&patch).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!((files[0].additions(), files[0].deletions()), (2, 1));
+    }
+
+    #[test]
+    fn a_write_is_all_additions_and_an_empty_change_has_no_patch() {
+        let write = json(r#"{"file_path":"new.txt","content":"a\nb"}"#);
+        let files = DiffFile::parse(&patch("Write", &write).unwrap()).unwrap();
+        assert_eq!((files[0].additions(), files[0].deletions()), (2, 0));
+        let same = json(r#"{"file_path":"a","old_string":"x","new_string":"x"}"#);
+        assert_eq!(patch("Edit", &same), None);
+        assert_eq!(patch("Bash", &json(r#"{"command":"ls"}"#)), None);
+    }
+
+    #[test]
+    fn a_multi_edit_has_a_file_per_edit() {
+        let input = json(
+            r#"{"file_path":"a","edits":[{"old_string":"a","new_string":"b"},{"old_string":"c","new_string":"d"}]}"#,
+        );
+        let files = DiffFile::parse(&patch("MultiEdit", &input).unwrap()).unwrap();
+        assert_eq!(files.len(), 2);
     }
 }
