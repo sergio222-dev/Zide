@@ -801,6 +801,40 @@ impl Viewer {
         !self.is_dirty() && disk_stamp(&self.full_path) != self.disk
     }
 
+    /// Reads the file again when it changed on disk and there is nothing of ours to lose,
+    /// keeping the caret where it was. With unsaved edits it only says so: the edits stay and
+    /// saving refuses. True when the text was replaced. The change goes through the buffer (not
+    /// a new viewer), so everything that follows revisions notices it, and undo can revert it.
+    pub fn reload(&mut self) -> bool {
+        if !self.editable || disk_stamp(&self.full_path) == self.disk {
+            return false;
+        }
+        if self.is_dirty() {
+            self.notice = Some("the file changed on disk".into());
+            return false;
+        }
+        let stamp = disk_stamp(&self.full_path);
+        let text = match fs::metadata(&self.full_path) {
+            Ok(m) if m.len() <= MAX_BYTES => fs::read_to_string(&self.full_path),
+            _ => return false, // gone, too large or not text: what is shown stays
+        };
+        let Ok(text) = text else {
+            return false;
+        };
+        self.disk = stamp;
+        if text == self.buffer.text() {
+            return false;
+        }
+        let at = self.buffer.position_of(self.vim.cursor());
+        self.buffer.edit(0..self.buffer.len(), &text);
+        self.buffer.commit();
+        self.saved_at = self.buffer.revision();
+        self.notice = None;
+        self.vim.set_cursor(&self.buffer, self.buffer.offset_of(at));
+        self.rebuild();
+        true
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.editable && self.buffer.revision() != self.saved_at
     }
@@ -3193,6 +3227,26 @@ mod tests {
         assert!(viewer.pinned_at(1).is_empty()); // the impl line is the top row itself
         assert_eq!(viewer.pinned_at(3), vec![1, 2]); // inside `a`, in the impl
         assert_eq!(viewer.pinned_at(6), vec![1]); // `b` fits in one line: not a scope
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn reload_takes_the_new_text_keeping_the_caret_unless_there_are_unsaved_edits() {
+        let (dir, file) = temp_file("reload", "one\ntwo\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "j");
+        assert!(!viewer.reload()); // unchanged on disk
+        fs::write(dir.join(&file), "zero\none\ntwo, longer\n").unwrap();
+        assert!(viewer.reload());
+        assert_eq!(viewer.text(), "zero\none\ntwo, longer\n");
+        assert!(!viewer.is_dirty() && !viewer.is_stale());
+        assert_eq!(viewer.cursor_spot().0, 1);
+        // unsaved edits win; the file is not touched and saving still refuses
+        type_keys(&mut viewer, "x");
+        fs::write(dir.join(&file), "other text entirely\n").unwrap();
+        assert!(!viewer.reload());
+        assert!(viewer.is_dirty() && viewer.notice.is_some());
+        assert_eq!(viewer.text(), "zero\nne\ntwo, longer\n");
         fs::remove_dir_all(dir).unwrap();
     }
 
