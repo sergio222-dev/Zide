@@ -20,6 +20,7 @@ mod file_icon;
 mod indent;
 mod markdown;
 mod meter;
+mod minimap;
 mod nav;
 mod projects;
 mod rows;

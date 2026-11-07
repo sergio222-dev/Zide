@@ -25,7 +25,7 @@ use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
 use crate::{
-    indent,
+    indent, minimap,
     rows::Rows,
     sticky::{MAX_STICKY, Scope, sticky_headers},
     theme,
@@ -334,6 +334,7 @@ pub struct Viewer {
     hints: Option<HintSet>,
     /// Where the editor was drawn last, to turn a mouse position into a line and column.
     editor_bounds: Rc<Cell<Bounds<Pixels>>>,
+    minimap_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The two ends of the pair under the caret (char ranges), for the revision and caret
     /// they were found at.
     pair: RefCell<Option<(PairKey, Pair)>>,
@@ -399,6 +400,7 @@ impl Viewer {
             hover: None,
             hints: None,
             editor_bounds: Rc::default(),
+            minimap_bounds: Rc::default(),
             changes: Arc::default(),
             pair: RefCell::new(None),
         };
@@ -1869,6 +1871,7 @@ impl Viewer {
                         .child(StyledText::new(shown.text.clone()).with_highlights(shown.styles()))
                 }))
         });
+        let minimap = self.minimap();
         let list = uniform_list("viewer", rows.len(), move |range, _, _| {
             range
                 .map(|row| {
@@ -2040,31 +2043,94 @@ impl Viewer {
             .child(self.breadcrumb())
             .child(
                 div()
-                    .id("editor")
-                    .cursor_text()
+                    .flex()
                     .flex_1()
-                    .relative()
-                    .font_family(self.font_family.clone())
-                    .text_size(px(self.font_size))
-                    .whitespace_nowrap()
-                    .on_hover(move |hovered, _, cx| {
-                        if !*hovered {
-                            leave(None, cx)
-                        }
-                    })
+                    .min_h_0()
                     .child(
-                        canvas(
-                            move |bounds, _, _| editor_bounds.set(bounds),
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
+                        div()
+                            .id("editor")
+                            .cursor_text()
+                            .flex_1()
+                            .relative()
+                            .font_family(self.font_family.clone())
+                            .text_size(px(self.font_size))
+                            .whitespace_nowrap()
+                            .on_hover(move |hovered, _, cx| {
+                                if !*hovered {
+                                    leave(None, cx)
+                                }
+                            })
+                            .child(
+                                canvas(
+                                    move |bounds, _, _| editor_bounds.set(bounds),
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .size_full(),
+                            )
+                            .child(list)
+                            .child(Scrollbar::new(&self.scroll))
+                            .children(sticky)
+                            .children(popup),
                     )
-                    .child(list)
-                    .child(Scrollbar::new(&self.scroll))
-                    .children(sticky)
-                    .children(popup),
+                    .child(minimap),
             )
+    }
+
+    /// The minimap of the file: its tokens, and the lines that changed, have errors or hold the
+    /// cursor painted across.
+    fn minimap(&self) -> impl IntoElement {
+        let lines = self.lines.clone();
+        let default: Hsla = rgb(theme::TEXT).into();
+        let rows = self.rows.clone();
+        let across = |color: u32, alpha: f32| Hsla {
+            a: alpha,
+            ..Hsla::from(rgb(color))
+        };
+        let last = lines.len().saturating_sub(1);
+        let mut marks: Vec<minimap::Mark> = self
+            .changes
+            .iter()
+            .map(|(line, change)| minimap::Mark {
+                row: rows.row_of((*line).min(last)),
+                color: match change {
+                    LineChange::Added => across(theme::CHANGE_ADDED, 0.7),
+                    LineChange::Modified => across(theme::CHANGE_MODIFIED, 0.7),
+                    LineChange::Removed | LineChange::RemovedBelow => {
+                        across(theme::CHANGE_REMOVED, 0.7)
+                    }
+                },
+            })
+            .collect();
+        marks.extend(self.squiggles.keys().map(|line| minimap::Mark {
+            row: rows.row_of((*line).min(last)),
+            color: across(theme::ERROR, 0.8),
+        }));
+        let (cursor_line, _) = self.cursor_cell();
+        marks.push(minimap::Mark {
+            row: rows.row_of(cursor_line.min(last)),
+            color: across(theme::MINIMAP_CURSOR, 0.9),
+        });
+        minimap::Minimap {
+            rows,
+            bars: Box::new(move |line| {
+                let Some(line) = lines.get(line) else {
+                    return Vec::new();
+                };
+                let colors: Vec<_> = line
+                    .styles()
+                    .into_iter()
+                    .map(|(range, style)| (range, style.color.unwrap_or(default)))
+                    .collect();
+                minimap::bars(&line.text, &colors, default)
+            }),
+            marks,
+            scroll: self.scroll.clone(),
+            row_height: self.row_height(),
+            editor: self.editor_bounds.clone(),
+            bounds: self.minimap_bounds.clone(),
+        }
+        .render()
     }
 }
 
