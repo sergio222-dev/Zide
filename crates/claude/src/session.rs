@@ -6,9 +6,39 @@ use std::{
     thread,
 };
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 
 use crate::event::{Event, parse_events};
+
+/// A picture sent along with a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image {
+    /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`: what Claude accepts.
+    pub media_type: &'static str,
+    pub bytes: Vec<u8>,
+}
+
+/// The stdin line for a user message: plain text, or blocks when there are pictures.
+fn user_message(text: &str, images: &[Image]) -> Value {
+    if images.is_empty() {
+        return json!({"type": "user", "message": {"role": "user", "content": text}});
+    }
+    let mut content: Vec<Value> = images
+        .iter()
+        .map(|image| {
+            json!({"type": "image", "source": {
+                "type": "base64",
+                "media_type": image.media_type,
+                "data": STANDARD.encode(&image.bytes),
+            }})
+        })
+        .collect();
+    if !text.is_empty() {
+        content.push(json!({"type": "text", "text": text}));
+    }
+    json!({"type": "user", "message": {"role": "user", "content": content}})
+}
 
 #[derive(Default)]
 pub struct Options<'a> {
@@ -76,8 +106,12 @@ impl Session {
     }
 
     pub fn send(&mut self, text: &str) -> io::Result<()> {
-        let message = json!({"type": "user", "message": {"role": "user", "content": text}});
-        self.write(&message)
+        self.send_with_images(text, &[])
+    }
+
+    /// Like `send`, with pictures the message talks about.
+    pub fn send_with_images(&mut self, text: &str, images: &[Image]) -> io::Result<()> {
+        self.write(&user_message(text, images))
     }
 
     /// Stops the turn in progress. The turn still ends with an `Event::Result` (its
@@ -135,5 +169,39 @@ impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{Image, user_message};
+
+    #[test]
+    fn text_alone_stays_a_plain_string() {
+        assert_eq!(
+            user_message("hi", &[]),
+            json!({"type": "user", "message": {"role": "user", "content": "hi"}})
+        );
+    }
+
+    #[test]
+    fn pictures_come_first_as_base64_blocks_and_the_text_last() {
+        let image = Image {
+            media_type: "image/png",
+            bytes: vec![1, 2, 3],
+        };
+        let message = user_message("what is it?", std::slice::from_ref(&image));
+        assert_eq!(
+            message["message"]["content"],
+            json!([
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AQID"}},
+                {"type": "text", "text": "what is it?"},
+            ])
+        );
+        // no text: only the picture
+        let bare = user_message("", &[image]);
+        assert_eq!(bare["message"]["content"].as_array().unwrap().len(), 1);
     }
 }

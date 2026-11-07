@@ -2,10 +2,11 @@
 //! conversation itself is `zide_claude::Transcript`; this module owns the process, turns
 //! its events into UI state and draws the history and the input box.
 
+mod images;
 mod menu;
 mod sessions;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -83,6 +84,8 @@ pub struct Chat {
     /// The rendered Markdown of each assistant text block, by block index.
     markdown: HashMap<usize, Entity<TextViewState>>,
     scroll: ScrollHandle,
+    /// Pictures pasted and not sent yet.
+    images: Vec<Arc<gpui_kit::Image>>,
     /// The highlighted entry of the `/` and `@` menu, among the matches.
     menu_selected: usize,
     /// Esc closed the menu; typing opens it again.
@@ -132,6 +135,7 @@ impl Chat {
             input,
             markdown: HashMap::new(),
             scroll: ScrollHandle::new(),
+            images: Vec::new(),
             menu_selected: 0,
             menu_dismissed: false,
             notice: None,
@@ -215,6 +219,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.key.as_str();
+        if key == "v" && event.keystroke.modifiers.secondary(cx) && self.claude_paste_image(cx) {
+            cx.stop_propagation();
+            return cx.notify();
+        }
         if let Some(sessions) = self.claude.as_mut().and_then(|c| c.sessions.as_mut()) {
             match key {
                 "down" => sessions.move_selection(1, cx),
@@ -266,7 +274,7 @@ impl Workspace {
         let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
             return;
         };
-        if text.is_empty() || chat.busy() {
+        if (text.is_empty() && chat.images.is_empty()) || chat.busy() {
             return;
         }
         if chat.session.is_none()
@@ -280,19 +288,26 @@ impl Workspace {
         let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
             return;
         };
-        let sent = chat.session.as_mut().map(|session| session.send(&text));
+        let pictures = chat.pictures();
+        let sent = chat
+            .session
+            .as_mut()
+            .map(|session| session.send_with_images(&text, &pictures));
         match sent {
             Some(Ok(())) => {
                 chat.notice = None;
+                let shown = images::shown(&text, pictures.len());
                 chat.title.get_or_insert_with(|| {
-                    text.lines()
+                    shown
+                        .lines()
                         .next()
                         .unwrap_or_default()
                         .chars()
                         .take(60)
                         .collect()
                 });
-                chat.transcript.user_message(&text);
+                chat.transcript.user_message(&shown);
+                chat.images.clear();
                 chat.input
                     .update(cx, |state, cx| state.set_value("", window, cx));
                 chat.scroll.scroll_to_bottom();
@@ -607,6 +622,7 @@ impl Workspace {
             .map(|(i, block)| self.claude_block(chat, i, block, cx))
             .collect::<Vec<_>>();
         let menu = self.menu_view(cx);
+        let images = self.images_view(cx);
         let panel = self.claude_panel(chats, cx);
         let ended = chat.transcript.status() == Status::Inactive && !chat.is_empty();
         let main = div()
@@ -681,6 +697,7 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .gap_1()
+                            .children(images)
                             .children(menu)
                             .child(
                                 div()
