@@ -17,6 +17,7 @@ fn main() -> io::Result<()> {
     let options = Options {
         resume: resume.as_deref(),
         permission_mode: permission_mode.as_deref(),
+        ..Options::default()
     };
     let (mut session, events) = Session::spawn(&cwd, options)?;
     let mut lines = io::stdin().lock().lines();

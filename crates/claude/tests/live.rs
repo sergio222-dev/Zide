@@ -6,10 +6,17 @@ use std::{env, time::Duration};
 use zide_claude::{Event, Options, Session};
 
 #[test]
-#[ignore = "runs the real claude and costs money"]
+#[ignore = "runs the real claude and spends tokens (about a cent)"]
 fn interrupt_ends_the_turn_and_keeps_the_session_usable() {
     let cwd = env::current_dir().unwrap();
-    let (mut session, events) = Session::spawn(&cwd, Options::default()).unwrap();
+    let (mut session, events) = Session::spawn(
+        &cwd,
+        Options {
+            minimal: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
     let wait = Duration::from_secs(120);
 
     session

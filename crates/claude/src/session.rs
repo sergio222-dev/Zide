@@ -16,6 +16,11 @@ pub struct Options<'a> {
     pub resume: Option<&'a str>,
     /// `claude --permission-mode`; `None` keeps whatever the user's settings say.
     pub permission_mode: Option<&'a str>,
+    /// Starts `claude` bare-bones: none of the user's settings, hooks, plugins, MCP servers
+    /// or skills, and only the `Read` tool. A turn then costs about 8k tokens instead of the
+    /// 140k a heavy setup adds (measured), which is what tests that spend real tokens want.
+    /// The login still works, unlike `claude --bare`, which only accepts an API key.
+    pub minimal: bool,
 }
 
 /// One long-lived `claude` process: messages go in, events come out, and the
@@ -40,6 +45,12 @@ impl Session {
         }
         if let Some(mode) = options.permission_mode {
             command.args(["--permission-mode", mode]);
+        }
+        if options.minimal {
+            command
+                .args(["--setting-sources", ""])
+                .args(["--strict-mcp-config", "--disable-slash-commands"])
+                .args(["--tools", "Read"]);
         }
         let mut child = command
             .current_dir(cwd)

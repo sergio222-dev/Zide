@@ -170,7 +170,7 @@ impl Workspace {
         let resume = chat.transcript.session_id().map(str::to_owned);
         let options = Options {
             resume: resume.as_deref(),
-            permission_mode: None,
+            ..Options::default()
         };
         let (session, events) = Session::spawn(&self.root, options)?;
         chat.session = Some(session);
