@@ -463,6 +463,30 @@ impl Client {
         })
     }
 
+    /// Where the symbol at `line`:`character` (0-based, UTF-16) is defined: none when the server
+    /// does not know it, several for overloads or re-exports.
+    pub fn definition(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<Location>, Error> {
+        // right after startup a server is still loading the project and would say "none"
+        self.busy.wait_idle(self.started, LOAD_TIMEOUT);
+        let result = self.connection.request(
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": path_to_uri(path)},
+                "position": {"line": line, "character": character},
+            }),
+            REQUEST_TIMEOUT,
+        )?;
+        parse_definition(result).map_err(|e| Error::Server {
+            code: 0,
+            message: format!("unexpected definition answer: {e}"),
+        })
+    }
+
     /// The edits that format the document at `path`, or only `range` of it. Positions in the
     /// edits are in the document as last synced.
     pub fn format(&self, path: &Path, range: Option<Range>) -> Result<Vec<TextEdit>, Error> {
@@ -503,12 +527,60 @@ impl Drop for Client {
     }
 }
 
+/// The locations of a `textDocument/definition` answer, which is a `Location`, a list of them,
+/// or a list of `LocationLink`s (whose selection range is the name, preferred over the whole body).
+fn parse_definition(result: Value) -> Result<Vec<Location>, serde_json::Error> {
+    use lsp_types::GotoDefinitionResponse as Answer;
+    if result.is_null() {
+        return Ok(Vec::new());
+    }
+    Ok(match serde_json::from_value::<Answer>(result)? {
+        Answer::Scalar(location) => vec![location],
+        Answer::Array(locations) => locations,
+        Answer::Link(links) => links
+            .into_iter()
+            .map(|link| Location {
+                uri: link.target_uri,
+                range: link.target_selection_range,
+            })
+            .collect(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
 
     use super::*;
     use crate::connection::testing::*;
+
+    #[test]
+    fn a_definition_answer_may_be_a_location_a_list_or_links() {
+        let range =
+            json!({"start": {"line": 3, "character": 4}, "end": {"line": 3, "character": 9}});
+        let location = json!({"uri": "file:///p/a.rs", "range": range});
+        let link = json!({
+            "targetUri": "file:///p/b.rs",
+            "targetRange": {"start": {"line": 1, "character": 0}, "end": {"line": 8, "character": 1}},
+            "targetSelectionRange": range,
+        });
+        let lines = |value| -> Vec<(String, u32)> {
+            parse_definition(value)
+                .unwrap()
+                .iter()
+                .map(|l| (l.uri.to_string(), l.range.start.line))
+                .collect()
+        };
+        assert_eq!(lines(Value::Null), []);
+        assert_eq!(lines(json!([])), []);
+        assert_eq!(lines(location.clone()), [("file:///p/a.rs".to_string(), 3)]);
+        assert_eq!(
+            lines(json!([location])),
+            [("file:///p/a.rs".to_string(), 3)]
+        );
+        // a link points at the name, not at the start of the whole declaration
+        assert_eq!(lines(json!([link])), [("file:///p/b.rs".to_string(), 3)]);
+    }
 
     #[test]
     fn published_diagnostics_are_kept_per_file_and_replaced_by_the_next_publish() {

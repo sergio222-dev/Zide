@@ -202,6 +202,8 @@ pub enum Effect {
     None,
     /// `/` was typed: open the find panel.
     OpenFind,
+    /// `gd` was typed: go to the definition of the word under the cursor.
+    GoToDefinition,
 }
 
 /// A search over the buffer: the query, and where it matches (char ranges).
@@ -1052,6 +1054,10 @@ impl Viewer {
                 }
                 _ => {}
             }
+        }
+        if self.vim.mode() == Mode::Normal && self.vim.pending() == "g" && key == Key::Char('d') {
+            self.vim.handle(&mut self.buffer, Key::Esc); // the `g` is spent
+            return Effect::GoToDefinition;
         }
         if self.vim.mode() == Mode::Normal && self.vim.pending().is_empty() {
             match key {
@@ -2519,6 +2525,23 @@ mod tests {
         type_keys(&mut viewer, "e");
         type_keys(&mut viewer, "l"); // on the space
         assert_eq!(viewer.word_at_cursor(), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn gd_asks_for_the_definition_and_leaves_the_cursor_alone() {
+        let (dir, file) = temp_file("gd", "let foo = 1;\nfoo;\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.handle_key(Key::Char('j'));
+        assert_eq!(viewer.handle_key(Key::Char('g')), Effect::None);
+        assert_eq!(viewer.handle_key(Key::Char('d')), Effect::GoToDefinition);
+        assert_eq!(viewer.cursor_spot(), (1, 0));
+        // nothing is left pending: `d` alone starts a delete again, and `gg` still works
+        assert_eq!(viewer.vim.pending(), "");
+        type_keys(&mut viewer, "gg");
+        assert_eq!(viewer.cursor_spot().0, 0);
+        // `d` not preceded by `g` is no request
+        assert_eq!(viewer.handle_key(Key::Char('d')), Effect::None);
         fs::remove_dir_all(dir).unwrap();
     }
 
