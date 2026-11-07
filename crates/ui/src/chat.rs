@@ -2,8 +2,8 @@
 //! conversation itself is `zide_claude::Transcript`; this module owns the process, turns
 //! its events into UI state and draws the history and the input box.
 
+mod menu;
 mod sessions;
-mod slash;
 
 use std::collections::HashMap;
 
@@ -83,10 +83,10 @@ pub struct Chat {
     /// The rendered Markdown of each assistant text block, by block index.
     markdown: HashMap<usize, Entity<TextViewState>>,
     scroll: ScrollHandle,
-    /// The highlighted command of the `/` menu, among the matches.
-    slash_selected: usize,
-    /// Esc closed the `/` menu; typing opens it again.
-    slash_dismissed: bool,
+    /// The highlighted entry of the `/` and `@` menu, among the matches.
+    menu_selected: usize,
+    /// Esc closed the menu; typing opens it again.
+    menu_dismissed: bool,
     /// Why the last attempt to reach Claude failed.
     notice: Option<String>,
     /// The name of the conversation: the stored session's title, or the first thing said.
@@ -110,8 +110,8 @@ impl Chat {
             move |this: &mut Workspace, input, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => {
                     if let Some(chat) = this.claude.as_mut().and_then(|c| c.find(id)) {
-                        chat.slash_selected = 0;
-                        chat.slash_dismissed = false;
+                        chat.menu_selected = 0;
+                        chat.menu_dismissed = false;
                     }
                     cx.notify();
                 }
@@ -132,8 +132,8 @@ impl Chat {
             input,
             markdown: HashMap::new(),
             scroll: ScrollHandle::new(),
-            slash_selected: 0,
-            slash_dismissed: false,
+            menu_selected: 0,
+            menu_dismissed: false,
             notice: None,
             title: None,
             _submit: submit,
@@ -225,17 +225,17 @@ impl Workspace {
             cx.stop_propagation();
             return cx.notify();
         }
-        if self.slash_matches(cx).is_some() {
+        if self.menu_matches(cx).is_some() {
             match key {
-                "down" => self.slash_move(1),
-                "up" => self.slash_move(-1),
+                "down" => self.menu_move(1, cx),
+                "up" => self.menu_move(-1, cx),
                 "tab" => {
                     let id = self.claude.as_ref().map(|c| c.active().id);
                     id.map(|id| self.claude_complete(id, window, cx));
                 }
                 "escape" => {
                     if let Some(chats) = &mut self.claude {
-                        chats.active_mut().slash_dismissed = true;
+                        chats.active_mut().menu_dismissed = true;
                     }
                 }
                 _ => return,
@@ -606,7 +606,7 @@ impl Workspace {
             .enumerate()
             .map(|(i, block)| self.claude_block(chat, i, block, cx))
             .collect::<Vec<_>>();
-        let slash_menu = self.slash_view(cx);
+        let menu = self.menu_view(cx);
         let panel = self.claude_panel(chats, cx);
         let ended = chat.transcript.status() == Status::Inactive && !chat.is_empty();
         let main = div()
@@ -681,7 +681,7 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .children(slash_menu)
+                            .children(menu)
                             .child(
                                 div()
                                     .rounded_md()
