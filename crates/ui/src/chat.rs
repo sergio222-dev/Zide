@@ -764,6 +764,7 @@ impl Workspace {
                                     }))
                             }))
                             .children(blocks)
+                            .children(chat.busy().then(|| thinking(chat.status())))
                             .children(chat.notice.iter().map(|notice| {
                                 div().text_color(rgb(theme::ERROR)).child(notice.clone())
                             }))
@@ -808,11 +809,21 @@ impl Workspace {
                                     .children(self.dropdowns_view())
                                     .child(gauges::view(&chat.transcript, limits.as_ref(), now)),
                             )
-                            .child(div().text_xs().text_color(rgb(theme::DIM)).child(footer(
-                                chat.status(),
-                                chat.bare,
-                                &chat.transcript,
-                            ))),
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(rgb(theme::DIM))
+                                    .child(footer(chat.status(), &chat.transcript))
+                                    // loud on purpose: this chat is not running with the user's setup
+                                    .children(chat.bare.then(|| {
+                                        div()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(theme::ERROR))
+                                            .child("BARE MODE")
+                                    })),
+                            ),
                     ),
             )
             .children(popup);
@@ -976,7 +987,30 @@ fn hidden_blocks(total: usize, shown: usize) -> usize {
     total.saturating_sub(shown)
 }
 
-fn footer(status: Status, bare: bool, transcript: &Transcript) -> String {
+/// The sign that Claude has not answered yet: a pulsing orange dot and what it is doing.
+fn thinking(status: Status) -> impl IntoElement {
+    let (label, color) = match status {
+        Status::NeedsUser => ("Waiting for you", theme::NEEDS_USER),
+        _ => ("Thinking…", theme::WORKING),
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_sm()
+        .text_color(rgb(color))
+        .child(div().size(px(8.)).rounded_full().bg(rgb(color)))
+        .child(label)
+        .with_animation(
+            "claude-thinking",
+            Animation::new(std::time::Duration::from_millis(1200))
+                .repeat()
+                .with_easing(pulsating_between(0.45, 1.0)),
+            |element, delta| element.opacity(delta),
+        )
+}
+
+fn footer(status: Status, transcript: &Transcript) -> String {
     let state = match status {
         Status::Inactive => "Not running",
         Status::Idle => "Ready",
@@ -984,9 +1018,6 @@ fn footer(status: Status, bare: bool, transcript: &Transcript) -> String {
         Status::NeedsUser => "Waiting for you",
     };
     let mut parts = vec![state.to_owned()];
-    if bare {
-        parts.push("bare mode".to_owned());
-    }
     if let Some(usage) = transcript.usage() {
         parts.push(format!("context {}k", usage.context_tokens / 1000));
     }

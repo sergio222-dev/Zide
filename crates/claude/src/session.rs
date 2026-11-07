@@ -90,7 +90,7 @@ impl Session {
             command
                 .args(["--setting-sources", ""])
                 .args(["--strict-mcp-config", "--disable-slash-commands"])
-                .args(["--tools", "Read"]);
+                .args(["--tools", "Read,AskUserQuestion"]);
         }
         let mut child = command
             .current_dir(cwd)
