@@ -34,6 +34,7 @@ mod usages;
 mod viewer;
 mod welcome;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::WindowExt;
@@ -43,6 +44,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tag::Tag;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use viewer::{Effect, FindStatus, FormatRequest, HighlightKey, Viewer};
 use welcome::{OpenProject, Welcome};
@@ -496,6 +498,8 @@ struct Workspace {
     claude_open: bool,
     commit: Option<commit::CommitPanel>,
     commit_open: bool,
+    /// What git says of each changed file, for the colors of the project tree.
+    git_status: Arc<std::collections::HashMap<String, zide_git::ChangeKind>>,
     /// Chats started from now on run `claude` with none of the user's configuration, which
     /// makes a test turn cheap; see `zide_claude::Options::minimal`.
     claude_bare: bool,
@@ -598,6 +602,7 @@ impl Workspace {
                     Change::Contents => {
                         let previous = this.symbols.clone();
                         this.index_symbols(previous, cx);
+                        this.refresh_commit(cx);
                     }
                 });
                 if reacted.is_err() {
@@ -647,6 +652,7 @@ impl Workspace {
             claude_open: false,
             commit: None,
             commit_open: false,
+            git_status: Arc::default(),
             branch: None,
             branches: None,
             md_preview: false,
@@ -737,6 +743,7 @@ impl Workspace {
                 // the old store indexes the old file list: keep it only to reuse its stubs
                 let previous = this.symbols.take();
                 this.index_symbols(previous, cx);
+                this.refresh_commit(cx);
                 this.search_again(cx);
             })
             .ok();
@@ -1248,7 +1255,21 @@ impl Workspace {
     /// Alt+Down / Alt+Up in the editor.
     /// Ctrl+minus / plus (Ctrl+Shift for all of them): `command` is a `z` fold command.
     fn fold(&mut self, command: char, cx: &mut Context<Self>) {
-        if self.popup.is_some() || self.tree_focused {
+        if self.popup.is_some() {
+            cx.propagate();
+            return;
+        }
+        if self.tree_focused && self.tree_visible {
+            // the tree has no regions to fold: the *All* commands open or close every folder
+            match command {
+                'R' => self.tree.expand_all(),
+                'M' => self.tree.collapse_all(),
+                _ => return cx.propagate(),
+            }
+            self.scroll_tree_to_selection();
+            return cx.notify();
+        }
+        if self.tree_focused {
             cx.propagate();
             return;
         }
@@ -1816,6 +1837,7 @@ impl Workspace {
         let rows = self.tree.shared_rows();
         let selected = self.tree.selected();
         let focused = self.tree_focused;
+        let git_status = self.git_status.clone();
         let workspace = cx.entity();
         // the widest row sets the scrollable width (an indent step is about two characters)
         let widest = rows
@@ -1858,7 +1880,15 @@ impl Workspace {
                                 .flex_shrink_0()
                                 .text_color(rgb(color))
                         })
-                        .child(div().flex_shrink_0().child(row.name.clone()))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .when_some(
+                                    git_status.get(&row.path).filter(|_| !row.dir),
+                                    |d, kind| d.text_color(rgb(commit::kind_color(*kind))),
+                                )
+                                .child(row.name.clone()),
+                        )
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             workspace.update(cx, |this, cx| {
                                 this.tree_focused = true;
@@ -1877,8 +1907,23 @@ impl Workspace {
         .with_width_from_item(widest)
         .track_scroll(&self.tree_scroll)
         .size_full();
+        let (expand, collapse) = (cx.entity(), cx.entity());
+        let tool = |id: &'static str, icon: IconName| {
+            div()
+                .id(id)
+                .p_1()
+                .rounded(px(3.))
+                .text_color(rgb(theme::MUTED))
+                .hover(|d| {
+                    d.bg(rgb(theme::TREE_SELECTED))
+                        .text_color(rgb(theme::STRONG))
+                })
+                .child(Icon::new(icon).size_4())
+        };
         div()
             .id("project-tree")
+            .flex()
+            .flex_col()
             .flex_shrink_0()
             .w(px(260.))
             .h_full()
@@ -1888,8 +1933,38 @@ impl Workspace {
             .text_color(rgb(theme::TEXT))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_1()
+                    .px_2()
+                    .h(px(26.))
+                    .flex_shrink_0()
+                    .child(tool("tree-expand-all", IconName::ChevronsUpDown).on_click(
+                        move |_, _, cx| {
+                            expand.update(cx, |this, cx| {
+                                this.tree.expand_all();
+                                cx.notify();
+                            })
+                        },
+                    ))
+                    .child(
+                        tool("tree-collapse-all", IconName::ChevronsDownUp).on_click(
+                            move |_, _, cx| {
+                                collapse.update(cx, |this, cx| {
+                                    this.tree.collapse_all();
+                                    this.scroll_tree_to_selection();
+                                    cx.notify();
+                                })
+                            },
+                        ),
+                    ),
+            )
+            .child(
+                div()
                     .relative()
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
                     .child(list)
                     .child(Scrollbar::new(&self.tree_scroll)),
             )

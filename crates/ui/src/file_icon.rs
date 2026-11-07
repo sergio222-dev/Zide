@@ -17,7 +17,8 @@ icon_assets!(
         FileLock,
         FileText,
         FileImage,
-        FileArchive
+        FileArchive,
+        ChevronsDownUp
     ]
 );
 

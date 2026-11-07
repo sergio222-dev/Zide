@@ -125,6 +125,7 @@ line says a new release is available.
 | `gd` / `Ctrl+B` | Go to Definition |
 | `Alt+1` | Toggle project tree |
 | `Alt+2` | Commit panel: tick files, write a message, **Commit** or **Commit and Push…** (`Amend` folds them into the last commit) |
+| `Ctrl+Shift+-` / `Ctrl+Shift+=` | With the tree focused: collapse / expand every folder (the buttons on top of the tree do the same) |
 | `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Navigate back / forward (also the mouse's back and forward buttons) |
 | `Ctrl+Shift+M` | Toggle Markdown preview (`.md` files) |
 | `Ctrl+H` / `Ctrl+L` | Focus tree / editor |

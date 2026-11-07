@@ -2,6 +2,7 @@
 //! and the buttons that commit what is ticked.
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
@@ -247,7 +248,7 @@ fn join(path: &str, name: &str) -> String {
     }
 }
 
-fn kind_color(kind: ChangeKind) -> u32 {
+pub(crate) fn kind_color(kind: ChangeKind) -> u32 {
     match kind {
         // a file git does not track yet is a new file: green like the added ones
         ChangeKind::Added | ChangeKind::Untracked => theme::OK,
@@ -310,11 +311,9 @@ impl Workspace {
             .is_some_and(|panel| panel.message.read(cx).focus_handle(cx).is_focused(window))
     }
 
-    /// Reads the repository's changes again, off the UI thread.
+    /// Reads the repository's changes again, off the UI thread: the panel and the colors of the
+    /// project tree show them.
     pub(crate) fn refresh_commit(&mut self, cx: &mut Context<Self>) {
-        if self.commit.is_none() {
-            return;
-        }
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let changes = cx
@@ -322,10 +321,16 @@ impl Workspace {
                 .spawn(async move { zide_git::changes(&root) })
                 .await;
             this.update(cx, |this, cx| {
+                this.git_status = Arc::new(
+                    changes
+                        .iter()
+                        .map(|change| (change.path.clone(), change.kind))
+                        .collect(),
+                );
                 if let Some(panel) = &mut this.commit {
                     panel.changes.set_changes(changes);
-                    cx.notify();
                 }
+                cx.notify();
             })
             .ok();
         })
@@ -336,7 +341,7 @@ impl Workspace {
     /// the message.
     pub(crate) fn commit_finished(&mut self, worked: bool, cx: &mut Context<Self>) {
         let Some(panel) = &mut self.commit else {
-            return;
+            return self.refresh_commit(cx);
         };
         let was_busy = std::mem::take(&mut panel.busy);
         panel.amend = panel.amend && !(was_busy && worked);
