@@ -106,6 +106,8 @@ pub struct Chat {
     /// The rendered Markdown of each assistant text block, by block index.
     markdown: HashMap<usize, Entity<TextViewState>>,
     scroll: ScrollHandle,
+    /// How many of the last blocks are drawn; a long conversation is not drawn whole.
+    shown: usize,
     /// Pictures pasted and not sent yet, with the number they are shown as.
     images: Vec<images::Numbered>,
     /// The number the next picture gets: they count up through the whole conversation.
@@ -174,6 +176,7 @@ impl Chat {
             input,
             markdown: HashMap::new(),
             scroll: ScrollHandle::new(),
+            shown: SHOWN_STEP,
             asks: HashMap::new(),
             toggled: HashSet::new(),
             images: Vec::new(),
@@ -677,11 +680,14 @@ impl Workspace {
             return div();
         };
         let chat = chats.active();
+        let total = chat.transcript.blocks().len();
+        let hidden = hidden_blocks(total, chat.shown);
         let blocks = chat
             .transcript
             .blocks()
             .iter()
             .enumerate()
+            .skip(hidden)
             .map(|(i, block)| self.claude_block(chat, i, block, cx))
             .collect::<Vec<_>>();
         let menu = self.menu_view(cx);
@@ -740,6 +746,17 @@ impl Workspace {
                             .p_4()
                             .max_w(px(900.))
                             .mx_auto()
+                            .children((hidden > 0).then(|| {
+                                Button::new("claude-earlier")
+                                    .ghost()
+                                    .label(format!("Show {} earlier", hidden.min(SHOWN_STEP)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(chats) = &mut this.claude {
+                                            chats.active_mut().shown += SHOWN_STEP;
+                                        }
+                                        cx.notify();
+                                    }))
+                            }))
                             .children(blocks)
                             .children(chat.notice.iter().map(|notice| {
                                 div().text_color(rgb(theme::ERROR)).child(notice.clone())
@@ -946,6 +963,14 @@ fn status_style(status: Status) -> (u32, &'static str) {
     }
 }
 
+/// How many blocks a chat draws at first, and how many more each "Show earlier" adds.
+const SHOWN_STEP: usize = 60;
+
+/// How many of the first blocks are left out when the last `shown` are drawn.
+fn hidden_blocks(total: usize, shown: usize) -> usize {
+    total.saturating_sub(shown)
+}
+
 fn footer(status: Status, transcript: &Transcript) -> String {
     let state = match status {
         Status::Inactive => "Not running",
@@ -961,4 +986,16 @@ fn footer(status: Status, transcript: &Transcript) -> String {
         parts.push(format!("${:.2}", transcript.cost_usd()));
     }
     parts.join("  ·  ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hidden_blocks;
+
+    #[test]
+    fn only_the_last_blocks_are_drawn() {
+        assert_eq!(hidden_blocks(10, 60), 0);
+        assert_eq!(hidden_blocks(60, 60), 0);
+        assert_eq!(hidden_blocks(200, 60), 140);
+    }
 }
