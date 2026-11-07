@@ -9,20 +9,26 @@ use gpui_kit::*;
 
 use crate::{Workspace, fileops, theme};
 
-/// The content of the move dialog: the path of the entry, to edit, and why the one typed is not
-/// good.
+/// The content of the move and new dialogs: a path to edit, and why the one typed is not good.
 pub struct PathDialog {
     input: Entity<InputState>,
     error: Option<String>,
     root: PathBuf,
-    from: String,
+    /// The entry being moved; `None` when the dialog makes a new one.
+    from: Option<String>,
     _subscription: Subscription,
 }
 
 impl PathDialog {
-    fn new(root: PathBuf, from: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        root: PathBuf,
+        from: Option<String>,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx));
-        input.update(cx, |state, cx| state.set_value(&from, window, cx));
+        input.update(cx, |state, cx| state.set_value(&value, window, cx));
         let subscription = cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.validate(cx);
@@ -43,7 +49,10 @@ impl PathDialog {
 
     fn validate(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let typed = self.input.read(cx).value().to_string();
-        let checked = fileops::check_move(&self.root, &self.from, &typed);
+        let checked = match &self.from {
+            Some(from) => fileops::check_move(&self.root, from, &typed),
+            None => fileops::check_new(&self.root, &typed).map(|_| typed),
+        };
         self.error = checked.as_ref().err().cloned();
         cx.notify();
         checked.ok()
@@ -64,6 +73,12 @@ impl Render for PathDialog {
                     .child("Path:")
                     .child(div().flex_1().child(Input::new(&self.input))),
             )
+            .children(self.from.is_none().then(|| {
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::MUTED))
+                    .child("A name ending with / creates a folder; any other creates a file.")
+            }))
             .children(
                 self.error
                     .clone()
@@ -89,7 +104,15 @@ impl Workspace {
         let Some((from, _)) = self.selected_entry() else {
             return;
         };
-        let view = cx.new(|cx| PathDialog::new(self.root.clone(), from.clone(), window, cx));
+        let view = cx.new(|cx| {
+            PathDialog::new(
+                self.root.clone(),
+                Some(from.clone()),
+                from.clone(),
+                window,
+                cx,
+            )
+        });
         let workspace = cx.entity();
         let first = std::cell::Cell::new(true);
         window.open_alert_dialog(cx, move |alert, window, cx| {
@@ -112,6 +135,59 @@ impl Workspace {
                     true
                 })
         });
+    }
+
+    /// `a`: asks for the name of a new file, or folder when it ends with `/`, starting from the
+    /// selected folder (or the folder of the selected file).
+    pub(crate) fn tree_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let start = match self.selected_entry() {
+            Some((path, true)) if !path.is_empty() => format!("{path}/"),
+            Some((path, false)) => path
+                .rsplit_once('/')
+                .map(|(folder, _)| format!("{folder}/"))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        let view = cx.new(|cx| PathDialog::new(self.root.clone(), None, start, window, cx));
+        let workspace = cx.entity();
+        let first = std::cell::Cell::new(true);
+        window.open_alert_dialog(cx, move |alert, window, cx| {
+            if first.replace(false) {
+                view.update(cx, |dialog, cx| dialog.focus(window, cx));
+            }
+            let (view, workspace) = (view.clone(), workspace.clone());
+            alert
+                .title("New File or Folder")
+                .child(view.clone())
+                .ok_text("Create")
+                .show_cancel(true)
+                .on_ok(move |_, _, cx| {
+                    // a name that is not good keeps the dialog open, with the reason in it
+                    let Some(typed) = view.update(cx, |dialog, cx| dialog.validate(cx)) else {
+                        return false;
+                    };
+                    workspace.update(cx, |this, cx| this.create_entry(&typed, cx));
+                    true
+                })
+        });
+    }
+
+    fn create_entry(&mut self, typed: &str, cx: &mut Context<Self>) {
+        let (path, folder) = match fileops::create(&self.root, typed) {
+            Ok(created) => created,
+            Err(why) => {
+                return self.notify(Notification::error(why).title("Could not create it"), cx);
+            }
+        };
+        self.tree_reveal = Some(path.clone());
+        if !folder {
+            self.autosave(cx);
+            self.open_file(&path, None, cx);
+            self.tree_focused = false; // the new file is for editing
+        }
+        self.rescan(cx);
+        self.refresh_commit(cx);
+        cx.notify();
     }
 
     fn move_entry(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {

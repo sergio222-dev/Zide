@@ -42,6 +42,45 @@ pub fn check_move(root: &Path, from: &str, typed: &str) -> Result<String, String
     Ok(to)
 }
 
+/// What a name typed for a new entry means: its path and whether it is a folder (the name ends
+/// with `/`), or why it is not good.
+pub fn check_new(root: &Path, typed: &str) -> Result<(String, bool), String> {
+    let folder = typed.trim().ends_with('/');
+    let path = normalize(typed)?;
+    if path.is_empty() {
+        return Err("The name is empty".into());
+    }
+    let mut at = String::new();
+    for part in path.split('/') {
+        if !at.is_empty() {
+            at.push('/');
+        }
+        at.push_str(part);
+        match absolute(root, &at).symlink_metadata() {
+            Ok(_) if at == path => return Err(format!("'{path}' already exists")),
+            Ok(meta) if !meta.is_dir() => return Err(format!("'{at}' is a file")),
+            _ => {}
+        }
+    }
+    Ok((path, folder))
+}
+
+/// Creates the file or, when `typed` ends with `/`, the folder, with the folders on the way.
+/// Returns its path and whether it is a folder.
+pub fn create(root: &Path, typed: &str) -> Result<(String, bool), String> {
+    let (path, folder) = check_new(root, typed)?;
+    let target = absolute(root, &path);
+    if folder {
+        fs::create_dir_all(&target).map_err(|e| format!("Could not create the folder: {e}"))?;
+    } else {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("Could not create the folder: {e}"))?;
+        }
+        fs::File::create_new(&target).map_err(|e| format!("Could not create the file: {e}"))?;
+    }
+    Ok((path, folder))
+}
+
 /// Moves `from` to `to` (both relative), creating the folders `to` needs.
 pub fn move_path(root: &Path, from: &str, to: &str) -> Result<(), String> {
     let to = check_move(root, from, to)?;
@@ -170,6 +209,28 @@ mod tests {
         assert!(normalize("a/../b").is_err());
         assert!(normalize("./a").is_err());
         assert_eq!(normalize("").unwrap(), "");
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_name_ending_with_a_slash_makes_a_folder_and_any_other_a_file() {
+        let dir = project("new");
+        assert_eq!(create(&dir, "src/new/").unwrap(), ("src/new".into(), true));
+        assert!(dir.join("src/new").is_dir());
+        assert_eq!(
+            create(&dir, "docs/deep/n.md").unwrap(),
+            ("docs/deep/n.md".into(), false)
+        );
+        assert!(dir.join("docs/deep/n.md").is_file());
+        assert!(
+            create(&dir, "top.txt")
+                .unwrap_err()
+                .contains("already exists")
+        );
+        assert!(create(&dir, "top.txt/x").unwrap_err().contains("is a file"));
+        assert!(create(&dir, "../x").is_err());
+        assert!(create(&dir, "  ").is_err());
+        assert!(!dir.join("top.txt/x").exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[::core::prelude::v1::test]

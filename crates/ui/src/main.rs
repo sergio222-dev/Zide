@@ -1866,6 +1866,10 @@ impl Workspace {
                 self.tree_paste(cx);
                 TreeOutcome::None
             }
+            (_, Some(Key::Char('a'))) => {
+                self.tree_new(window, cx);
+                TreeOutcome::None
+            }
             _ => TreeOutcome::None,
         };
         self.apply_tree_outcome(outcome, cx);
