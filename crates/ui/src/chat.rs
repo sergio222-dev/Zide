@@ -290,6 +290,15 @@ impl Workspace {
                     cx.stop_propagation();
                     return;
                 }
+                "h" => {
+                    if self.claude.as_ref().is_some_and(|c| c.sessions.is_some()) {
+                        self.close_claude_history(window, cx);
+                    } else {
+                        self.claude_history(window, cx);
+                    }
+                    cx.stop_propagation();
+                    return cx.notify();
+                }
                 "i" => {
                     self.focus_active_chat(window, cx);
                     cx.stop_propagation();
@@ -678,7 +687,7 @@ impl Workspace {
             .flex_col()
             .flex_none()
             .w(px(240.))
-            .h_full()
+            .min_h_0()
             .border_r_1()
             .border_color(rgb(theme::BORDER))
             .child(
@@ -747,7 +756,7 @@ impl Workspace {
             .flex_col()
             .flex_1()
             .min_w_0()
-            .h_full()
+            .min_h_0()
             .child(
                 div()
                     .flex()
@@ -868,7 +877,7 @@ impl Workspace {
             .flex()
             .flex_1()
             .min_w_0()
-            .h_full()
+            .min_h_0()
             .text_color(rgb(theme::TEXT))
             .child(panel)
             .child(main)

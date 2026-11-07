@@ -197,7 +197,7 @@ fn action_registry() -> Vec<ActionDef> {
             action: Some(Box::new(ToggleProjectTree)),
             closes_popup: true,
             state: None,
-            run: |ws, _, cx| ws.toggle_tree(cx),
+            run: |ws, window, cx| ws.toggle_tree(window, cx),
         },
         ActionDef {
             name: "Toggle Claude Chat",
@@ -1616,7 +1616,11 @@ impl Workspace {
     }
 
     /// Alt+1: shows the tree and focuses it; from the tree, hides it again (like IntelliJ).
-    fn toggle_tree(&mut self, cx: &mut Context<Self>) {
+    fn toggle_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // the tree belongs to the editor: from the chat, Alt+1 goes back to it first
+        if self.claude_open {
+            return self.toggle_claude(window, cx);
+        }
         match (self.tree_visible, self.tree_focused) {
             (true, true) => {
                 self.tree_visible = false;
@@ -2896,7 +2900,9 @@ impl Workspace {
                     this.open_tab(Tab::Text, window, cx)
                 }),
             )
-            .on_action(cx.listener(|this, _: &ToggleProjectTree, _, cx| this.toggle_tree(cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleProjectTree, window, cx| this.toggle_tree(window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &ToggleClaudeChat, window, cx| {
                     this.toggle_claude(window, cx)
