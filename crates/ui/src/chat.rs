@@ -6,16 +6,16 @@ mod asks;
 mod images;
 mod menu;
 mod sessions;
+mod tools;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::*;
 use zide_claude::history::{self, SessionInfo};
 use zide_claude::{
-    Block, Event, Options, Overall, Permission, Resolution, Session, Status, ToolCall, Transcript,
-    Value,
+    Block, Event, Options, Overall, Permission, Resolution, Session, Status, Transcript, Value,
 };
 
 use crate::markdown::{TextView, TextViewState};
@@ -87,6 +87,8 @@ pub struct Chat {
     next_image: u32,
     /// The pictures sent with each message, by the index of its block.
     sent_images: HashMap<usize, Vec<images::Numbered>>,
+    /// Tool cards the user opened or folded against their default, by tool call id.
+    toggled: HashSet<String>,
     /// The questionnaire of each question that waits for an answer, by request id.
     asks: asks::Asks,
     /// The highlighted entry of the `/` and `@` menu, among the matches.
@@ -139,6 +141,7 @@ impl Chat {
             markdown: HashMap::new(),
             scroll: ScrollHandle::new(),
             asks: HashMap::new(),
+            toggled: HashSet::new(),
             images: Vec::new(),
             next_image: 1,
             sent_images: HashMap::new(),
@@ -760,7 +763,7 @@ impl Workspace {
                 .text_color(rgb(theme::DIM))
                 .child(text.clone())
                 .into_any_element(),
-            Block::Tool(call) => tool_line(call).into_any_element(),
+            Block::Tool(call) => self.tool_card(chat, call, cx).into_any_element(),
             Block::Permission(permission) => self.permission_card(chat.id, index, permission, cx),
             Block::Question(ask) => self.ask_card(chat, ask, cx),
             Block::Interrupted => div()
@@ -792,7 +795,11 @@ impl Workspace {
             .border_color(rgb(theme::ACTIVE_BORDER))
             .p_3()
             .child(format!("Claude wants to use {}", permission.tool_name))
-            .child(div().text_sm().text_color(rgb(theme::MUTED)).child(summary));
+            .child(div().text_sm().text_color(rgb(theme::MUTED)).child(summary))
+            .children(tools::input_detail(
+                &permission.tool_name,
+                &permission.input,
+            ));
         match &permission.resolution {
             None => {
                 let (allow_id, deny_id) =
@@ -829,32 +836,6 @@ impl Workspace {
         }
         .into_any_element()
     }
-}
-
-/// One line for a tool call: a mark for how it went, its name and what it works on.
-fn tool_line(call: &ToolCall) -> Div {
-    let (mark, color) = match &call.output {
-        None => ("…", theme::DIM),
-        Some(output) if output.is_error => ("✗", theme::ERROR),
-        Some(_) => ("✓", theme::OK),
-    };
-    div()
-        .flex()
-        .gap_2()
-        .text_sm()
-        .child(div().text_color(rgb(color)).child(mark))
-        .child(
-            div()
-                .text_color(rgb(theme::STRONG))
-                .child(call.name.clone()),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_color(rgb(theme::MUTED))
-                .child(summary(&call.input)),
-        )
 }
 
 /// The argument of a tool that says most about what it does, on one line.
