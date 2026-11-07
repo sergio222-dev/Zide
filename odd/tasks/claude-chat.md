@@ -32,7 +32,7 @@ S13. The status bar icon (phase 3) is postponed: "no vi el icono de claude, lo p
 - [ ] T8 (S10) `@` file mentions (reuse the matcher/file index).
 - [ ] T9 (S11) Paste images with Ctrl+V.
 - [ ] T10 (S12) Output formatting: tables, folding of long output and tool results, tool cards and diffs, the AskUserQuestion UI.
-- [x] T12 (S14, S15) Live chats: `Chats` list in the UI (id per chat replaces the generation), left panel with a state dot per chat, aggregate status bar indicator (`zide_claude::overall`). Closing a chat drops its `Session` (kills the process); stored sessions open without a process until a message is sent. Not observed by a person: the panel, the dot colors, the status bar indicator.
+- [x] T12 (S14, S15) Live chats: `Chats` list in the UI (id per chat replaces the generation), left panel with a state dot per chat, aggregate status bar indicator (`zide_claude::overall`). Closing a chat drops its `Session` (kills the process); stored sessions open without a process until a message is sent. Observed by the user: "se ve bien".
 - [ ] T11 (S13) Status bar icon and the four colors (postponed).
 
 Route declaration: all inline. No Writer trigger: one coherent unit in one crate, each task depends on the previous API.
