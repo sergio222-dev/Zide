@@ -473,6 +473,8 @@ struct Workspace {
     /// Whether a supported `claude` is installed, once known.
     claude_installed: bool,
     claude_open: bool,
+    /// Sees the chat's keys before the input box turns them into its own actions.
+    _claude_keys: Subscription,
     /// The checked-out branch and how far it is from its upstream, `None` outside a repository.
     branch: Option<zide_git::BranchStatus>,
     /// The branch switcher, while it is open.
@@ -593,7 +595,19 @@ impl Workspace {
         .detach();
 
         let registry = action_registry();
+        // The input box binds the arrows, Tab and Ctrl+V to actions, and actions run before
+        // the key listeners, so only an interceptor sees those keys first.
+        let this = cx.weak_entity();
+        let claude_keys = cx.intercept_keystrokes(move |event, window, cx| {
+            this.update(cx, |this, cx| {
+                if this.claude_open && this.popup.is_none() && this.branches.is_none() {
+                    this.claude_key(&event.keystroke, window, cx);
+                }
+            })
+            .ok();
+        });
         let mut workspace = Self {
+            _claude_keys: claude_keys,
             focus: cx.focus_handle(),
             font_size: viewer::DEFAULT_FONT_SIZE,
             minimap: true,
@@ -2918,9 +2932,8 @@ impl Workspace {
                     return this.branches_key(event, window, cx);
                 }
                 let Some(popup) = &mut this.popup else {
-                    if this.claude_open {
-                        this.claude_key(event, window, cx);
-                    } else {
+                    // the chat's keys are seen earlier, by the interceptor
+                    if !this.claude_open {
                         this.editor_key(event, window, cx);
                     }
                     return;

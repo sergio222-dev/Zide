@@ -270,12 +270,12 @@ impl Workspace {
     /// Keys while the chat is showing. The input box handles its own typing.
     pub(crate) fn claude_key(
         &mut self,
-        event: &KeyDownEvent,
+        keystroke: &Keystroke,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let key = event.keystroke.key.as_str();
-        if key == "v" && event.keystroke.modifiers.secondary(cx) && self.claude_paste_image(cx) {
+        let key = keystroke.key.as_str();
+        if key == "v" && keystroke.modifiers.secondary(cx) && self.claude_paste_image(cx) {
             cx.stop_propagation();
             return cx.notify();
         }
