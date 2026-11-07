@@ -5,6 +5,7 @@
 mod asks;
 mod images;
 mod menu;
+mod options;
 mod sessions;
 mod tools;
 
@@ -15,7 +16,8 @@ use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::*;
 use zide_claude::history::{self, SessionInfo};
 use zide_claude::{
-    Block, Event, Options, Overall, Permission, Resolution, Session, Status, Transcript, Value,
+    Block, Defaults, Event, Options, Overall, Permission, Resolution, Session, Status, Transcript,
+    Value,
 };
 
 use crate::markdown::{TextView, TextViewState};
@@ -28,17 +30,25 @@ pub struct Chats {
     next_id: u64,
     /// The slash commands Claude last reported for this project.
     commands: Vec<String>,
+    /// What `claude` uses for the project when no model or effort is picked.
+    defaults: Defaults,
     /// The list of earlier conversations, while it is open.
     sessions: Option<sessions::Sessions>,
 }
 
 impl Chats {
-    fn new(commands: Vec<String>, window: &mut Window, cx: &mut Context<Workspace>) -> Chats {
+    fn new(
+        commands: Vec<String>,
+        defaults: Defaults,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Chats {
         let mut chats = Chats {
             list: Vec::new(),
             active: 0,
             next_id: 0,
             commands,
+            defaults,
             sessions: None,
         };
         chats.add(window, cx);
@@ -49,7 +59,8 @@ impl Chats {
     fn add(&mut self, window: &mut Window, cx: &mut Context<Workspace>) {
         let id = self.next_id;
         self.next_id += 1;
-        self.list.push(Chat::new(id, window, cx));
+        let chat = Chat::new(id, &self.defaults, window, cx);
+        self.list.push(chat);
         self.active = self.list.len() - 1;
     }
 
@@ -67,7 +78,7 @@ impl Chats {
 
     /// How the chats stand together, for the status bar.
     pub fn overall(&self) -> Overall {
-        Overall::of(self.list.iter().map(|chat| chat.transcript.status()))
+        Overall::of(self.list.iter().map(Chat::status))
     }
 }
 
@@ -75,6 +86,16 @@ pub struct Chat {
     /// Names the chat for the events of its process; ids are never reused.
     id: u64,
     transcript: Transcript,
+    /// Which process the events on screen come from: the events of an earlier one are ignored.
+    run: u64,
+    /// The model and effort picked, `None` for the default.
+    model: Option<String>,
+    effort: Option<String>,
+    model_select: options::Dropdown,
+    effort_select: options::Dropdown,
+    /// The dropdowns show something else than `model` and `effort`.
+    dropdowns_stale: bool,
+    _dropdowns: Vec<Subscription>,
     /// `None` until the first message, and again once the process has exited.
     session: Option<Session>,
     input: Entity<TextareaState>,
@@ -103,7 +124,9 @@ pub struct Chat {
 }
 
 impl Chat {
-    fn new(id: u64, window: &mut Window, cx: &mut Context<Workspace>) -> Chat {
+    fn new(id: u64, defaults: &Defaults, window: &mut Window, cx: &mut Context<Workspace>) -> Chat {
+        let (model_select, effort_select) = Chat::new_dropdowns(defaults, window, cx);
+        let dropdowns = Chat::dropdown_events(id, &model_select, &effort_select, window, cx);
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
@@ -136,6 +159,13 @@ impl Chat {
         Chat {
             id,
             transcript: Transcript::new(),
+            run: 0,
+            model: None,
+            effort: None,
+            model_select,
+            effort_select,
+            dropdowns_stale: false,
+            _dropdowns: dropdowns,
             session: None,
             input,
             markdown: HashMap::new(),
@@ -150,6 +180,15 @@ impl Chat {
             notice: None,
             title: None,
             _submit: submit,
+        }
+    }
+
+    /// What the chat is doing. A chat without a process is not running, whatever it shows.
+    fn status(&self) -> Status {
+        if self.session.is_none() {
+            Status::Inactive
+        } else {
+            self.transcript.status()
         }
     }
 
@@ -205,7 +244,8 @@ impl Workspace {
         }
         if self.claude.is_none() {
             let commands = crate::session::claude_commands(&self.root);
-            self.claude = Some(Chats::new(commands, window, cx));
+            let defaults = zide_claude::defaults(&self.root);
+            self.claude = Some(Chats::new(commands, defaults, window, cx));
         }
         self.claude_open = true;
         self.focus_active_chat(window, cx);
@@ -338,10 +378,14 @@ impl Workspace {
         let resume = chat.transcript.session_id().map(str::to_owned);
         let options = Options {
             resume: resume.as_deref(),
+            model: chat.model.as_deref(),
+            effort: chat.effort.as_deref(),
             ..Options::default()
         };
         let (session, events) = Session::spawn(&self.root, options)?;
         chat.session = Some(session);
+        chat.run += 1;
+        let run = chat.run;
 
         // The session reports on a std channel; a thread forwards it to the UI's executor.
         let (forward, incoming) = async_channel::unbounded::<Event>();
@@ -355,7 +399,7 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             while let Ok(event) = incoming.recv().await {
                 if this
-                    .update(cx, |this, cx| this.claude_event(id, event, cx))
+                    .update(cx, |this, cx| this.claude_event(id, run, event, cx))
                     .is_err()
                 {
                     break;
@@ -366,7 +410,7 @@ impl Workspace {
         Ok(())
     }
 
-    fn claude_event(&mut self, id: u64, event: Event, cx: &mut Context<Self>) {
+    fn claude_event(&mut self, id: u64, run: u64, event: Event, cx: &mut Context<Self>) {
         if let Event::Init { commands, .. } = &event
             && !commands.is_empty()
             && let Some(chats) = &mut self.claude
@@ -376,7 +420,12 @@ impl Workspace {
             crate::session::remember_claude_commands(&self.root, commands);
         }
         // a closed chat has no one to tell
-        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
+        let Some(chat) = self
+            .claude
+            .as_mut()
+            .and_then(|c| c.find(id))
+            .filter(|chat| chat.run == run)
+        else {
             return;
         };
         let follow = chat.at_bottom();
@@ -467,6 +516,10 @@ impl Workspace {
                 };
                 match loaded {
                     Ok(transcript) => {
+                        // continue with what the conversation was made with
+                        chat.model = transcript.model().map(str::to_owned);
+                        chat.effort = transcript.effort().map(str::to_owned);
+                        chat.dropdowns_stale = true;
                         chat.transcript = transcript;
                         chat.rebuild_markdown(cx);
                         chat.scroll.scroll_to_bottom();
@@ -523,7 +576,7 @@ impl Workspace {
                 .iter()
                 .enumerate()
                 .map(|(index, chat)| {
-                    let status = chat.transcript.status();
+                    let status = chat.status();
                     let (color, label) = status_style(status);
                     let id = chat.id;
                     div()
@@ -609,6 +662,7 @@ impl Workspace {
     /// The chat, filling the area where the editor would be.
     pub(crate) fn claude_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         self.ensure_asks(window, cx);
+        self.sync_dropdowns(window, cx);
         let popup = self.sessions_view(window, cx);
         let Some(chats) = &self.claude else {
             return div();
@@ -624,7 +678,7 @@ impl Workspace {
         let menu = self.menu_view(cx);
         let images = self.images_view(cx);
         let panel = self.claude_panel(chats, cx);
-        let ended = chat.transcript.status() == Status::Inactive && !chat.is_empty();
+        let ended = chat.status() == Status::Inactive && !chat.is_empty();
         let main = div()
             .relative()
             .flex()
@@ -649,6 +703,7 @@ impl Workspace {
                             .text_color(rgb(theme::STRONG))
                             .child(chat.title.clone().unwrap_or_else(|| "New chat".to_owned())),
                     )
+                    .children(self.dropdowns_view())
                     .child(
                         Button::new("claude-history-open")
                             .ghost()
@@ -713,7 +768,7 @@ impl Workspace {
                                 div()
                                     .text_xs()
                                     .text_color(rgb(theme::DIM))
-                                    .child(footer(&chat.transcript)),
+                                    .child(footer(chat.status(), &chat.transcript)),
                             ),
                     ),
             )
@@ -870,8 +925,8 @@ fn status_style(status: Status) -> (u32, &'static str) {
     }
 }
 
-fn footer(transcript: &Transcript) -> String {
-    let state = match transcript.status() {
+fn footer(status: Status, transcript: &Transcript) -> String {
+    let state = match status {
         Status::Inactive => "Not running",
         Status::Idle => "Ready",
         Status::Working => "Working. Esc interrupts",
