@@ -57,6 +57,18 @@ pub fn remember_minimap(root: &Path, shown: bool) {
     write(root, "minimap", if shown { "on" } else { "off" });
 }
 
+/// The slash commands Claude reported the last time it ran in this project, one per line.
+pub fn claude_commands(root: &Path) -> Vec<String> {
+    fs::read_to_string(file_for(root, "claude-commands"))
+        .map(|text| text.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// Best effort, like `remember_file`.
+pub fn remember_claude_commands(root: &Path, commands: &[String]) {
+    write(root, "claude-commands", &commands.join("\n"));
+}
+
 /// Where a file was left: the first line on screen and the caret (0-based lines and chars).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct View {
@@ -153,6 +165,17 @@ mod tests {
             fs::read_to_string(root.join(".zide/.gitignore")).unwrap(),
             "*\n"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_commands_come_back_in_order() {
+        let root = std::env::temp_dir().join(format!("zide-commands-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(claude_commands(&root).is_empty());
+        let commands = vec!["compact".to_owned(), "review".to_owned()];
+        remember_claude_commands(&root, &commands);
+        assert_eq!(claude_commands(&root), commands);
         fs::remove_dir_all(root).unwrap();
     }
 

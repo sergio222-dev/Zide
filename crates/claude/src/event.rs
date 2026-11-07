@@ -26,9 +26,11 @@ pub struct Usage {
 /// (hooks, status, rate limits, protocol bookkeeping) produce no event.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    /// The session is ready. `session_id` is what `Session::spawn` takes to resume it.
+    /// The session is ready. `session_id` is what `Session::spawn` takes to resume it;
+    /// `commands` are the names the user can type after `/` (skills included).
     Init {
         session_id: String,
+        commands: Vec<String>,
     },
     /// A chunk of the assistant's text as it is produced.
     TextDelta(String),
@@ -137,6 +139,12 @@ pub fn parse_events(line: &str) -> Vec<Event> {
             .as_str()
             .map(|id| Event::Init {
                 session_id: id.to_owned(),
+                commands: value["slash_commands"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|name| name.as_str().map(str::to_owned))
+                    .collect(),
             })
             .into_iter()
             .collect(),
@@ -222,12 +230,21 @@ mod tests {
     }
 
     #[test]
-    fn init_carries_the_session_id() {
-        let line = r#"{"type":"system","subtype":"init","session_id":"abc","cwd":"/x"}"#;
+    fn init_carries_the_session_id_and_the_commands() {
+        let line = r#"{"type":"system","subtype":"init","session_id":"abc","cwd":"/x","slash_commands":["compact","review"]}"#;
         assert_eq!(
             one(line),
             Event::Init {
-                session_id: "abc".into()
+                session_id: "abc".into(),
+                commands: vec!["compact".into(), "review".into()],
+            }
+        );
+        let bare = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
+        assert_eq!(
+            one(bare),
+            Event::Init {
+                session_id: "abc".into(),
+                commands: Vec::new(),
             }
         );
     }

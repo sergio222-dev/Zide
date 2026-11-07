@@ -29,7 +29,7 @@ fn main() -> io::Result<()> {
         session.send(&line)?;
         for event in &events {
             match event {
-                Event::Init { session_id } => eprintln!("[session {session_id}]"),
+                Event::Init { session_id, .. } => eprintln!("[session {session_id}]"),
                 Event::TextDelta(chunk) => {
                     print!("{chunk}");
                     io::stdout().flush()?;

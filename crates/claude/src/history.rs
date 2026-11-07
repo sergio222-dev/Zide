@@ -144,6 +144,7 @@ pub fn load_from(path: &Path, id: &str) -> io::Result<Transcript> {
     let mut transcript = Transcript::new();
     transcript.apply(Event::Init {
         session_id: id.to_owned(),
+        commands: Vec::new(),
     });
     for line in BufReader::new(fs::File::open(path)?)
         .lines()

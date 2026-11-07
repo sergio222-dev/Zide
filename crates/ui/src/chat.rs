@@ -3,6 +3,7 @@
 //! its events into UI state and draws the history and the input box.
 
 mod sessions;
+mod slash;
 
 use std::collections::HashMap;
 
@@ -27,16 +28,19 @@ pub struct Chats {
     list: Vec<Chat>,
     active: usize,
     next_id: u64,
+    /// The slash commands Claude last reported for this project.
+    commands: Vec<String>,
     /// The list of earlier conversations, while it is open.
     sessions: Option<sessions::Sessions>,
 }
 
 impl Chats {
-    fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Chats {
+    fn new(commands: Vec<String>, window: &mut Window, cx: &mut Context<Workspace>) -> Chats {
         let mut chats = Chats {
             list: Vec::new(),
             active: 0,
             next_id: 0,
+            commands,
             sessions: None,
         };
         chats.add(window, cx);
@@ -79,6 +83,10 @@ pub struct Chat {
     /// The rendered Markdown of each assistant text block, by block index.
     markdown: HashMap<usize, Entity<TextViewState>>,
     scroll: ScrollHandle,
+    /// The highlighted command of the `/` menu, among the matches.
+    slash_selected: usize,
+    /// Esc closed the `/` menu; typing opens it again.
+    slash_dismissed: bool,
     /// Why the last attempt to reach Claude failed.
     notice: Option<String>,
     /// The name of the conversation: the stored session's title, or the first thing said.
@@ -99,11 +107,22 @@ impl Chat {
         let submit = cx.subscribe_in(
             &input,
             window,
-            move |this: &mut Workspace, input, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { shift: false, .. } = event {
+            move |this: &mut Workspace, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    if let Some(chat) = this.claude.as_mut().and_then(|c| c.find(id)) {
+                        chat.slash_selected = 0;
+                        chat.slash_dismissed = false;
+                    }
+                    cx.notify();
+                }
+                // with the `/` menu open, Enter completes instead of sending
+                InputEvent::PressEnter { shift: false, .. }
+                    if !this.claude_complete(id, window, cx) =>
+                {
                     let text = input.read(cx).value().to_string();
                     this.claude_send(id, text, window, cx);
                 }
+                _ => {}
             },
         );
         Chat {
@@ -113,6 +132,8 @@ impl Chat {
             input,
             markdown: HashMap::new(),
             scroll: ScrollHandle::new(),
+            slash_selected: 0,
+            slash_dismissed: false,
             notice: None,
             title: None,
             _submit: submit,
@@ -170,7 +191,8 @@ impl Workspace {
             return cx.notify();
         }
         if self.claude.is_none() {
-            self.claude = Some(Chats::new(window, cx));
+            let commands = crate::session::claude_commands(&self.root);
+            self.claude = Some(Chats::new(commands, window, cx));
         }
         self.claude_open = true;
         self.focus_active_chat(window, cx);
@@ -198,6 +220,24 @@ impl Workspace {
                 "down" => sessions.move_selection(1, cx),
                 "up" => sessions.move_selection(-1, cx),
                 "escape" => self.close_claude_history(window, cx),
+                _ => return,
+            }
+            cx.stop_propagation();
+            return cx.notify();
+        }
+        if self.slash_matches(cx).is_some() {
+            match key {
+                "down" => self.slash_move(1),
+                "up" => self.slash_move(-1),
+                "tab" => {
+                    let id = self.claude.as_ref().map(|c| c.active().id);
+                    id.map(|id| self.claude_complete(id, window, cx));
+                }
+                "escape" => {
+                    if let Some(chats) = &mut self.claude {
+                        chats.active_mut().slash_dismissed = true;
+                    }
+                }
                 _ => return,
             }
             cx.stop_propagation();
@@ -303,6 +343,14 @@ impl Workspace {
     }
 
     fn claude_event(&mut self, id: u64, event: Event, cx: &mut Context<Self>) {
+        if let Event::Init { commands, .. } = &event
+            && !commands.is_empty()
+            && let Some(chats) = &mut self.claude
+            && chats.commands != *commands
+        {
+            chats.commands = commands.clone();
+            crate::session::remember_claude_commands(&self.root, commands);
+        }
         // a closed chat has no one to tell
         let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
             return;
@@ -315,6 +363,7 @@ impl Workspace {
         if matches!(event, Event::Exit) {
             chat.session = None;
         }
+
         chat.transcript.apply(event);
         chat.sync_markdown(cx);
         if let Some(request_id) = question {
@@ -557,6 +606,7 @@ impl Workspace {
             .enumerate()
             .map(|(i, block)| self.claude_block(chat, i, block, cx))
             .collect::<Vec<_>>();
+        let slash_menu = self.slash_view(cx);
         let panel = self.claude_panel(chats, cx);
         let ended = chat.transcript.status() == Status::Inactive && !chat.is_empty();
         let main = div()
@@ -631,6 +681,7 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .gap_1()
+                            .children(slash_menu)
                             .child(
                                 div()
                                     .rounded_md()

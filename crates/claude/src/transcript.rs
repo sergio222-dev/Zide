@@ -184,7 +184,7 @@ impl Transcript {
 
     pub fn apply(&mut self, event: Event) {
         match event {
-            Event::Init { session_id } => self.session_id = Some(session_id),
+            Event::Init { session_id, .. } => self.session_id = Some(session_id),
             Event::TextDelta(chunk) => match self.blocks.last_mut() {
                 Some(Block::Text(text)) => text.push_str(&chunk),
                 _ => self.blocks.push(Block::Text(chunk)),
@@ -532,6 +532,7 @@ mod tests {
         let mut t = Transcript::new();
         t.apply(Event::Init {
             session_id: "s1".into(),
+            commands: Vec::new(),
         });
         let usage = Usage {
             context_tokens: 10,
