@@ -4,6 +4,7 @@
 
 mod cli;
 mod event;
+pub mod history;
 mod session;
 mod transcript;
 

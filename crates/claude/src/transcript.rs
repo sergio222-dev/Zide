@@ -132,9 +132,14 @@ impl Transcript {
     /// Records what the user sent, which the stream does not echo back, and opens the turn.
     /// Sending means there is a live process, even when an earlier one had exited.
     pub fn user_message(&mut self, text: &str) {
-        self.blocks.push(Block::User(text.to_owned()));
+        self.push_user(text);
         self.turn_open = true;
         self.alive = true;
+    }
+
+    /// A message from a stored conversation: shown, but it opens no turn.
+    pub fn push_user(&mut self, text: &str) {
+        self.blocks.push(Block::User(text.to_owned()));
     }
 
     /// Records the user's decision on a permission request or a question.
