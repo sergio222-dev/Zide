@@ -1320,15 +1320,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Shows `notification`, in place of the last one this view showed: they do not pile up.
     fn notify(&self, notification: Notification, cx: &mut Context<Self>) {
-        struct WorkspaceNote;
         self.window
             .update(cx, |_, window, cx| {
-                let notification = notification
-                    .id::<WorkspaceNote>()
-                    .placement(Anchor::BottomRight);
-                window.push_notification(notification, cx)
+                window.push_notification(notification.placement(Anchor::BottomRight), cx)
             })
             .ok();
     }
@@ -1692,15 +1687,19 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Alt+Shift+`: shows the tree scrolled to the file open in the editor, selected (IntelliJ's
-    /// *Select Opened File*). The keyboard stays where it was.
+    /// Alt+Shift+`: shows the tree scrolled to the file open in the editor, selected and centered
+    /// (IntelliJ's *Select Opened File*). The keyboard stays where it was.
     fn reveal_open_file(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path().to_string()) else {
             return;
         };
         self.tree_visible = true;
         self.tree.reveal(&path);
-        self.scroll_tree_to_selection();
+        if let Some(row) = self.tree.selected() {
+            // in the middle of the panel, when the tree is long enough to scroll
+            self.tree_scroll.scroll_to_item(row, ScrollStrategy::Center);
+            self.scroll_tree_sideways(row);
+        }
         cx.notify();
     }
 
