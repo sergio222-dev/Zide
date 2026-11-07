@@ -240,6 +240,22 @@ impl CommitPanel {
     }
 }
 
+/// What the notification says once a commit went through: how many files it holds.
+fn done_message(files: usize, push: bool, amend: bool) -> String {
+    let what = match (amend, files) {
+        (true, 0) => "Amended the last commit".to_string(),
+        (true, 1) => "Amended the last commit with 1 file".to_string(),
+        (true, n) => format!("Amended the last commit with {n} files"),
+        (false, 1) => "Committed 1 file".to_string(),
+        (false, n) => format!("Committed {n} files"),
+    };
+    if push {
+        format!("{what} and pushed")
+    } else {
+        what
+    }
+}
+
 fn join(path: &str, name: &str) -> String {
     if path.is_empty() {
         name.to_string()
@@ -368,17 +384,14 @@ impl Workspace {
             return;
         }
         let paths = panel.changes.paths();
+        let files = panel.changes.ticked();
         let message = panel.message.read(cx).value().to_string();
         let amend = panel.amend;
         panel.busy = true;
-        let done = if push {
-            "Committed and pushed"
-        } else {
-            "Committed"
-        };
+        let done = done_message(files, push, amend);
         self.git_task(
             "Could not commit",
-            Some(done.into()),
+            Some(done),
             move |root| {
                 zide_git::commit(&root, &paths, &message, amend)?;
                 if push {
@@ -675,6 +688,17 @@ mod tests {
             change("new.rs", ChangeKind::Untracked),
         ]);
         assert_eq!(changes.paths(), ["new.rs"]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_notification_counts_the_files_of_the_commit() {
+        assert_eq!(done_message(1, false, false), "Committed 1 file");
+        assert_eq!(done_message(3, true, false), "Committed 3 files and pushed");
+        assert_eq!(done_message(0, false, true), "Amended the last commit");
+        assert_eq!(
+            done_message(2, false, true),
+            "Amended the last commit with 2 files"
+        );
     }
 
     #[::core::prelude::v1::test]
