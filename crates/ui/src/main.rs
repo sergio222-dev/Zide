@@ -22,6 +22,7 @@ mod diff_view;
 mod file_icon;
 mod fileops;
 mod indent;
+mod layout;
 mod markdown;
 mod meter;
 mod minimap;
@@ -550,6 +551,8 @@ struct Workspace {
     /// Whether a supported `claude` is installed, once known.
     claude_installed: bool,
     claude_open: bool,
+    /// What was last written as the layout, to write it only when it changes.
+    saved_layout: Option<session::Layout>,
     commit: Option<commit::CommitPanel>,
     commit_open: bool,
     /// What git says of each changed file, for the colors of the project tree.
@@ -712,6 +715,7 @@ impl Workspace {
             claude_installed: false,
             claude_bare: false,
             claude_open: false,
+            saved_layout: None,
             commit: None,
             commit_open: false,
             tree_clipboard: None,
@@ -3055,6 +3059,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = Instant::now();
+        self.remember_layout_if_changed();
         let root = self.view(window, cx);
         let Some(meter) = &mut self.meter else {
             return root;
@@ -4155,6 +4160,7 @@ impl Shell {
         let root = root.canonicalize().unwrap_or(root);
         projects::record(&root);
         let workspace = cx.new(|cx| Workspace::new(root, window, cx));
+        workspace.update(cx, |workspace, cx| workspace.restore_layout(window, cx));
         let saver = workspace.downgrade();
         self._activation = Some(cx.observe_window_activation(window, move |_, window, cx| {
             if !window.is_window_active() {

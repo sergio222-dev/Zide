@@ -73,6 +73,18 @@ pub fn list_in(dir: &Path) -> Vec<SessionInfo> {
     sessions
 }
 
+/// When the file of conversation `id` of `root` last changed: what a reader compares to know
+/// whether it must read the conversation again.
+pub fn modified_at(root: &Path, id: &str) -> Option<SystemTime> {
+    let path = project_dir(root)?.join(format!("{id}.jsonl"));
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+/// The title of conversation `id` of `root`: what the CLI generated, else the first thing said.
+pub fn title(root: &Path, id: &str) -> Option<String> {
+    title_of(&project_dir(root)?.join(format!("{id}.jsonl")))
+}
+
 /// The title the CLI generated for the session, else the first thing the user said.
 /// `None` for a session where nobody said anything.
 fn title_of(path: &Path) -> Option<String> {

@@ -2,6 +2,7 @@
 //! scrolled to and left its caret, and the font size.
 
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -67,6 +68,82 @@ pub fn claude_commands(root: &Path) -> Vec<String> {
 /// Best effort, like `remember_file`.
 pub fn remember_claude_commands(root: &Path, commands: &[String]) {
     write(root, "claude-commands", &commands.join("\n"));
+}
+
+/// How the project was left: the panels that were showing and, when the Claude chat was, the
+/// conversation it was on.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Layout {
+    pub tree: bool,
+    pub commit: bool,
+    pub preview: bool,
+    pub claude: bool,
+    /// The conversation the chat was on: its session id and its title.
+    pub chat: Option<(String, String)>,
+}
+
+/// How the project was left, `None` when it never was.
+pub fn layout(root: &Path) -> Option<Layout> {
+    let text = fs::read_to_string(file_for(root, "layout")).ok()?;
+    let mut layout = Layout::default();
+    for line in text.lines() {
+        match line.split_once('=') {
+            Some(("tree", on)) => layout.tree = on == "1",
+            Some(("commit", on)) => layout.commit = on == "1",
+            Some(("preview", on)) => layout.preview = on == "1",
+            Some(("claude", on)) => layout.claude = on == "1",
+            Some(("chat", chat)) => {
+                let (id, title) = chat.split_once('\t')?;
+                layout.chat = Some((id.to_owned(), title.to_owned()));
+            }
+            _ => {}
+        }
+    }
+    Some(layout)
+}
+
+/// Best effort, like `remember_file`.
+pub fn remember_layout(root: &Path, layout: &Layout) {
+    let flag = |on: bool| if on { "1" } else { "0" };
+    let mut text = format!(
+        "tree={}\ncommit={}\npreview={}\nclaude={}\n",
+        flag(layout.tree),
+        flag(layout.commit),
+        flag(layout.preview),
+        flag(layout.claude)
+    );
+    if let Some((id, title)) = &layout.chat {
+        text.push_str(&format!("chat={id}\t{}\n", one_line(title)));
+    }
+    write(root, "layout", &text);
+}
+
+/// The titles of the conversations of the project's live agents, by session id: what the CLI
+/// calls each one (or the first thing said in it), kept so they need not be read again.
+pub fn claude_titles(root: &Path) -> HashMap<String, String> {
+    fs::read_to_string(file_for(root, "claude-titles"))
+        .map(|text| {
+            text.lines()
+                .filter_map(|line| line.split_once('\t'))
+                .map(|(id, title)| (id.to_owned(), title.to_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Best effort, like `remember_file`.
+pub fn remember_claude_titles(root: &Path, titles: &HashMap<String, String>) {
+    let mut lines: Vec<_> = titles
+        .iter()
+        .map(|(id, title)| format!("{id}\t{}", one_line(title)))
+        .collect();
+    lines.sort();
+    write(root, "claude-titles", &lines.join("\n"));
+}
+
+/// A title as one line without tabs, which the files separate their fields with.
+fn one_line(text: &str) -> String {
+    text.replace(['\t', '\n', '\r'], " ")
 }
 
 /// Where a file was left: the first line on screen and the caret (0-based lines and chars).
@@ -215,6 +292,34 @@ mod tests {
         remember_minimap(&root, true);
         assert_eq!(minimap(&root), Some(true));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_layout_and_the_titles_come_back() {
+        let root = std::env::temp_dir().join(format!("zide-layout-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(layout(&root), None);
+        let left = Layout {
+            tree: true,
+            commit: false,
+            preview: true,
+            claude: true,
+            chat: Some(("abc".to_owned(), "fix\tthe\nbug".to_owned())),
+        };
+        remember_layout(&root, &left);
+        let back = layout(&root).unwrap();
+        assert_eq!(
+            back.chat,
+            Some(("abc".to_owned(), "fix the bug".to_owned()))
+        );
+        assert_eq!(
+            (back.tree, back.commit, back.preview, back.claude),
+            (true, false, true, true)
+        );
+        let titles = HashMap::from([("s1".to_owned(), "First one".to_owned())]);
+        remember_claude_titles(&root, &titles);
+        assert_eq!(claude_titles(&root), titles);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

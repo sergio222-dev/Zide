@@ -48,9 +48,20 @@ pub struct Chats {
     agents: Vec<Agent>,
     /// The picture shown large over the chat, if any.
     preview: Option<std::sync::Arc<Image>>,
+    /// What each live agent's conversation is called, by session id: the title the CLI gave it
+    /// or the first thing said in it, which says more than the agent's own name.
+    titles: HashMap<String, String>,
 }
 
 impl Chats {
+    /// What to call `agent`: its conversation's title when known, else the name `claude` gave it.
+    fn name_of(&self, agent: &Agent) -> String {
+        self.titles
+            .get(&agent.session_id)
+            .cloned()
+            .unwrap_or_else(|| agent.name.clone())
+    }
+
     /// What `chat` is doing. A chat that only follows an agent running elsewhere has no process
     /// here, so it shows the state `claude agents` reports for that agent.
     fn status_of(&self, chat: &Chat) -> Status {
@@ -81,6 +92,7 @@ impl Chats {
             sessions: None,
             agents: Vec::new(),
             preview: None,
+            titles: HashMap::new(),
         };
         chats.add(window, cx);
         chats
@@ -162,6 +174,8 @@ pub struct Chat {
     /// The conversation belongs to another process (a background agent, another window): while
     /// this chat has no process of its own, it follows the stored session as it grows.
     tail: bool,
+    /// When the file of the conversation this chat follows was last read.
+    loaded_at: Option<std::time::SystemTime>,
     _submit: Subscription,
 }
 
@@ -223,6 +237,7 @@ impl Chat {
             notice: None,
             title: None,
             tail: false,
+            loaded_at: None,
             _submit: submit,
         }
     }
@@ -318,7 +333,9 @@ impl Workspace {
         if self.claude.is_none() {
             let commands = crate::session::claude_commands(&self.root);
             let defaults = zide_claude::defaults(&self.root);
-            self.claude = Some(Chats::new(commands, defaults, window, cx));
+            let mut chats = Chats::new(commands, defaults, window, cx);
+            chats.titles = crate::session::claude_titles(&self.root);
+            self.claude = Some(chats);
             self.watch_agents(cx);
         }
         self.claude_open = true;
@@ -350,34 +367,72 @@ impl Workspace {
     /// follow another process re-read their session too.
     fn refresh_agents(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
-        let followed: Vec<(u64, String)> = self
+        let followed: Vec<(u64, String, Option<std::time::SystemTime>)> = self
             .claude
             .iter()
             .flat_map(|chats| chats.list.iter())
             .filter(|chat| chat.tail && chat.session.is_none())
-            .filter_map(|chat| Some((chat.id, chat.transcript.session_id()?.to_owned())))
+            .filter_map(|chat| {
+                Some((
+                    chat.id,
+                    chat.transcript.session_id()?.to_owned(),
+                    chat.loaded_at,
+                ))
+            })
             .collect();
         let project = self.root.clone();
+        let known: HashSet<String> = self
+            .claude
+            .iter()
+            .flat_map(|chats| chats.titles.keys().cloned())
+            .collect();
         cx.spawn(async move |this, cx| {
-            let (agents, stored) = cx
+            let (agents, stored, found) = cx
                 .background_executor()
                 .spawn(async move {
+                    // a conversation is read again only when its file changed
                     let stored: Vec<_> = followed
                         .into_iter()
-                        .map(|(id, session)| (id, history::load_with_images(&project, &session)))
+                        .filter_map(|(id, session, since)| {
+                            let modified = history::modified_at(&project, &session);
+                            if modified.is_some() && modified == since {
+                                return None;
+                            }
+                            Some((id, modified, history::load_with_images(&project, &session)))
+                        })
                         .collect();
-                    (agents::list(&root), stored)
+                    let agents = agents::list(&root);
+                    // reading a conversation for its title is done once per agent
+                    let found: Vec<(String, String)> = agents
+                        .iter()
+                        .filter(|agent| !known.contains(&agent.session_id))
+                        .filter_map(|agent| {
+                            let title = history::title(&root, &agent.session_id)?;
+                            Some((agent.session_id.clone(), title))
+                        })
+                        .collect();
+                    (agents, stored, found)
                 })
                 .await;
             this.update(cx, |this, cx| {
                 let Some(chats) = &mut this.claude else {
                     return;
                 };
+                // titles of agents that are gone are forgotten, so the cache stays small
+                let before = chats.titles.clone();
+                chats.titles.extend(found);
+                chats
+                    .titles
+                    .retain(|id, _| agents.iter().any(|agent| &agent.session_id == id));
+                if chats.titles != before {
+                    crate::session::remember_claude_titles(&this.root, &chats.titles);
+                    cx.notify();
+                }
                 if chats.agents != agents {
                     chats.agents = agents;
                     cx.notify();
                 }
-                for (id, loaded) in stored {
+                for (id, modified, loaded) in stored {
                     let Some(chat) = chats.find(id) else {
                         continue;
                     };
@@ -385,6 +440,7 @@ impl Workspace {
                     let Ok((transcript, pictures)) = loaded else {
                         continue;
                     };
+                    chat.loaded_at = modified;
                     if chat.session.is_none()
                         && transcript.blocks().len() != chat.transcript.blocks().len()
                     {
@@ -403,6 +459,38 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// The session id and title of the conversation the active chat is on, if it is on one.
+    pub(crate) fn claude_conversation(&self) -> Option<(String, String)> {
+        let chat = self.claude.as_ref()?.active();
+        let id = chat.transcript.session_id()?.to_owned();
+        Some((id, chat.title.clone().unwrap_or_default()))
+    }
+
+    /// Puts the active chat back on a conversation from an earlier run. It follows the agent that
+    /// may still be alive: its state comes from `claude agents` until a message starts a process.
+    pub(crate) fn restore_conversation(
+        &mut self,
+        id: String,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chats) = &mut self.claude else {
+            return;
+        };
+        let chat_id = chats.active().id;
+        chats.active_mut().tail = true;
+        let session = SessionInfo {
+            id,
+            title,
+            modified: std::time::UNIX_EPOCH,
+        };
+        let untitled = session.title.is_empty();
+        self.load_session(chat_id, session, cx);
+        if untitled && let Some(chat) = self.claude.as_mut().and_then(|c| c.find(chat_id)) {
+            chat.title = None; // the first message names it, as in any new chat
+        }
     }
 
     /// Shows what an agent is doing: the chat that already follows its session, else a new one
@@ -425,9 +513,10 @@ impl Workspace {
         chats.add(window, cx);
         let id = chats.active().id;
         chats.active_mut().tail = true;
+        let title = chats.name_of(&agent);
         let session = SessionInfo {
             id: agent.session_id,
-            title: agent.name,
+            title,
             modified: std::time::UNIX_EPOCH + std::time::Duration::from_millis(agent.started_at),
         };
         self.load_session(id, session, cx);
@@ -967,7 +1056,7 @@ impl Workspace {
                             div()
                                 .truncate()
                                 .text_color(rgb(theme::STRONG))
-                                .child(agent.name.clone()),
+                                .child(chats.name_of(agent)),
                         )
                         .child(div().text_xs().text_color(rgb(color)).child(label)),
                 )

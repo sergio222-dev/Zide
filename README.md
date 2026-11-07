@@ -168,7 +168,7 @@ something changes, so read it while scrolling or holding a movement key.
 ### Project folder
 
 Zide keeps what it remembers about a project (last open file, where each file was left, font
-size) in the project's own `.zide/` folder, which ignores itself through a `.gitignore` inside.
+size, which panels were showing, the Claude conversation the chat was on and the titles of its agents) in the project's own `.zide/` folder, which ignores itself through a `.gitignore` inside.
 Delete the folder to forget it; `--purge` on uninstall does not touch it.
 
 ### Language servers
