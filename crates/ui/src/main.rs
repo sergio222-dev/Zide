@@ -133,6 +133,8 @@ enum Tab {
     Actions,
     /// Files opened in this session (Ctrl+E); not part of the Tab cycle.
     Recent,
+    /// Projects opened before, from the Actions tab; not part of the Tab cycle.
+    Projects,
 }
 
 impl Tab {
@@ -141,7 +143,7 @@ impl Tab {
             Tab::Files => Tab::Symbols,
             Tab::Symbols => Tab::Text,
             Tab::Text => Tab::Actions,
-            Tab::Actions | Tab::Recent => Tab::Files,
+            Tab::Actions | Tab::Recent | Tab::Projects => Tab::Files,
         }
     }
 }
@@ -390,6 +392,28 @@ fn action_registry() -> Vec<ActionDef> {
             run: |_, _, cx| cx.emit(OpenRequested),
         },
         ActionDef {
+            name: "Recent Projects",
+            synonyms: &["open recent", "switch project", "projects", "history"],
+            action: None,
+            closes_popup: false,
+            state: None,
+            run: |ws, _, cx| ws.show_tab(Tab::Projects, cx),
+        },
+        ActionDef {
+            name: "Close Project",
+            synonyms: &[
+                "close folder",
+                "welcome",
+                "dashboard",
+                "home",
+                "start screen",
+            ],
+            action: None,
+            closes_popup: true,
+            state: None,
+            run: |_, _, cx| cx.emit(CloseRequested),
+        },
+        ActionDef {
             name: "Quit",
             synonyms: &["exit", "close ide"],
             action: None,
@@ -433,6 +457,8 @@ struct Popup {
     /// Where the Text rows came from, beside the count (e.g. a language server).
     note: String,
     actions: Arc<Vec<ActionHit>>,
+    /// The Projects rows: the projects opened before that match the query.
+    projects: Arc<Vec<PathBuf>>,
     /// Draws the Actions rows; the query, matching and selection stay Zide's.
     commands: Entity<CommandState>,
     symbols: Arc<Vec<SymbolHit>>,
@@ -452,6 +478,7 @@ impl Popup {
             Tab::Text => self.text.len(),
             Tab::Actions => self.actions.len(),
             Tab::Recent => self.files.len(),
+            Tab::Projects => self.projects.len(),
         }
     }
 
@@ -492,6 +519,16 @@ impl EventEmitter<UpdateRequested> for Workspace {}
 struct OpenRequested;
 
 impl EventEmitter<OpenRequested> for Workspace {}
+
+/// The user asked for "Close Project": the [`Shell`] goes back to the welcome screen.
+struct CloseRequested;
+
+impl EventEmitter<CloseRequested> for Workspace {}
+
+/// The user chose a project from "Recent Projects": the [`Shell`] swaps it in.
+struct ProjectRequested(PathBuf);
+
+impl EventEmitter<ProjectRequested> for Workspace {}
 
 struct Workspace {
     focus: FocusHandle,
@@ -937,6 +974,7 @@ impl Workspace {
             text_status: String::new(),
             note: String::new(),
             actions: Arc::default(),
+            projects: Arc::default(),
             commands,
             symbols: Arc::default(),
             options: TextOptions::default(),
@@ -2126,6 +2164,13 @@ impl Workspace {
         if self.popup.as_ref().is_some_and(|p| p.tab == Tab::Actions) {
             return self.run_selected_action(window, cx);
         }
+        if let Some(popup) = self.popup.as_ref().filter(|p| p.tab == Tab::Projects) {
+            if let Some(project) = popup.projects.get(popup.selected).cloned() {
+                self.close_popup(window, cx);
+                cx.emit(ProjectRequested(project));
+            }
+            return;
+        }
         let (Some(popup), Some(index)) = (&self.popup, &self.index) else {
             return;
         };
@@ -2142,7 +2187,7 @@ impl Workspace {
                 let symbol = self.symbols.as_ref()?.symbol(hit.entry);
                 Some((symbol.file, Some(symbol.node.line)))
             }),
-            Tab::Actions => None,
+            Tab::Actions | Tab::Projects => None,
         };
         if let Some((file, line)) = target {
             let path = index.paths()[file].clone();
@@ -2719,6 +2764,12 @@ impl Workspace {
     /// never waits and never shows stale hits.
     fn search_again(&mut self, cx: &mut Context<Self>) {
         self.cancel_running_search();
+        if let Some(popup) = self.popup.as_mut().filter(|p| p.tab == Tab::Projects) {
+            // a short list read from disk: matched here, and it does not wait for the index
+            popup.projects = Arc::new(matching_projects(&self.root, &popup.query));
+            popup.select(0);
+            return cx.notify();
+        }
         let (Some(popup), Some(index)) = (&mut self.popup, self.index.clone()) else {
             cx.notify();
             return;
@@ -2793,6 +2844,7 @@ impl Workspace {
                     self.search_symbols(query, symbols, generation, cancel, cx);
                 }
             }
+            Tab::Projects => {}
             Tab::Actions => {
                 popup.actions = Arc::new(search_actions(&self.action_texts, &query, usize::MAX));
                 popup.select(0);
@@ -2975,6 +3027,7 @@ impl Workspace {
         match (&self.index, popup.tab) {
             (_, Tab::Actions) => format!("{} actions", popup.actions.len()),
             (_, Tab::Recent) => format!("{} recent files", popup.files.len()),
+            (_, Tab::Projects) => format!("{} recent projects", popup.projects.len()),
             (None, _) => format!("Indexing {}…", self.root.display()),
             (Some(_), Tab::Symbols) => match &self.symbols {
                 None => "Indexing symbols…".into(),
@@ -3313,6 +3366,7 @@ impl Workspace {
         );
         let selected = popup.selected;
         let rows = match (popup.tab, &self.index) {
+            (Tab::Projects, _) => Some(project_items(&popup.projects)),
             (Tab::Actions, _) => Some(action_items(&popup.actions, &self.registry, self)),
             (Tab::Files | Tab::Recent, Some(index)) => Some(file_items(index, &popup.files)),
             (Tab::Text, Some(index)) => Some(text_items(index, &popup.text)),
@@ -3603,6 +3657,42 @@ fn action_items(
         .collect()
 }
 
+/// The projects opened before that match every word of `query` (in the name or the location),
+/// leaving out the one open.
+fn matching_projects(open: &Path, query: &str) -> Vec<PathBuf> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    projects::recent()
+        .into_iter()
+        .filter(|project| project != open)
+        .filter(|project| {
+            let text = format!(
+                "{} {}",
+                projects::title(project),
+                projects::location(project)
+            );
+            let text = text.to_lowercase();
+            words.iter().all(|word| text.contains(word))
+        })
+        .collect()
+}
+
+fn project_items(projects: &[PathBuf]) -> Vec<CommandItem> {
+    projects
+        .iter()
+        .map(|project| {
+            let (title, location) = (projects::title(project), projects::location(project));
+            CommandItem::new().child(move |_, _| {
+                div().flex().flex_1().gap_2().child(title.clone()).child(
+                    div()
+                        .ml_auto()
+                        .text_color(rgb(theme::MUTED))
+                        .child(location.clone()),
+                )
+            })
+        })
+        .collect()
+}
+
 fn file_items(index: &FileIndex, hits: &[FileHit]) -> Vec<CommandItem> {
     hits.iter()
         .map(|hit| {
@@ -3792,6 +3882,9 @@ fn popup_frame(
                 .flex()
                 .gap_1()
                 .children((tab == Tab::Recent).then(|| tab_label("Recent files", Tab::Recent)))
+                .children(
+                    (tab == Tab::Projects).then(|| tab_label("Recent projects", Tab::Projects)),
+                )
                 .child(tab_label("Files", Tab::Files))
                 .child(tab_label("Symbols", Tab::Symbols))
                 .child(tab_label("Text", Tab::Text))
@@ -3827,7 +3920,8 @@ enum Content {
 }
 
 impl Shell {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// The welcome screen, and what listens to it.
+    fn welcome(window: &mut Window, cx: &mut Context<Self>) -> (Entity<Welcome>, Subscription) {
         let welcome = cx.new(|cx| Welcome::new(window, cx));
         let opened = cx.subscribe_in(
             &welcome,
@@ -3836,6 +3930,22 @@ impl Shell {
                 this.show_workspace(event.0.clone(), window, cx)
             },
         );
+        (welcome, opened)
+    }
+
+    /// Closes the project (saving it first) and goes back to the welcome screen.
+    fn close_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.autosave(cx);
+        let (welcome, opened) = Self::welcome(window, cx);
+        self._opened = opened;
+        self._activation = None;
+        self._workspace_requests = Vec::new();
+        self.content = Content::Welcome(welcome);
+        cx.notify();
+    }
+
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (welcome, opened) = Self::welcome(window, cx);
         let updates = cx.spawn(async move |this, cx| {
             loop {
                 if this
@@ -4053,6 +4163,19 @@ impl Shell {
                 &workspace,
                 window,
                 |this, _, _: &OpenRequested, window, cx| this.open_folder(window, cx),
+            ),
+            cx.subscribe_in(
+                &workspace,
+                window,
+                |this, _, _: &CloseRequested, window, cx| this.close_project(window, cx),
+            ),
+            cx.subscribe_in(
+                &workspace,
+                window,
+                |this, _, event: &ProjectRequested, window, cx| {
+                    this.autosave(cx);
+                    this.show_workspace(event.0.clone(), window, cx)
+                },
             ),
         ];
         workspace.read(cx).focus.clone().focus(window, cx);

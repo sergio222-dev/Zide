@@ -108,6 +108,9 @@ zide --version
 Zide updates itself: run **Update Zide** from the Actions tab (double-Shift) when the status
 line says a new release is available.
 
+From the Actions tab, **Close Project** goes back to the welcome screen, **Recent Projects** lists
+the projects opened before (Enter opens one in this window) and **Open** picks a folder.
+
 ### Shortcuts
 
 | Keys | Action |
