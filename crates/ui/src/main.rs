@@ -500,6 +500,8 @@ struct Workspace {
     minimap: bool,
     /// When the last Space was pressed in Normal mode: two in a row open the popup.
     last_space: Option<Instant>,
+    /// The diff of a commit panel file is on screen, in a dialog.
+    diff_open: bool,
     /// The frame-rate overlay, when started with `ZIDE_FPS=1`.
     meter: Option<meter::FrameMeter>,
     /// The project tree on the left.
@@ -661,6 +663,7 @@ impl Workspace {
             font_size: viewer::DEFAULT_FONT_SIZE,
             minimap: true,
             last_space: None,
+            diff_open: false,
             meter: meter::FrameMeter::from_env(),
             tree: Tree::new(),
             tree_visible: false,
@@ -1674,6 +1677,7 @@ impl Workspace {
             return self.toggle_claude(window, cx);
         }
         self.autosave(cx);
+        self.leave_commit_list();
         match (self.tree_visible, self.tree_focused) {
             (true, true) => {
                 self.tree_visible = false;
@@ -1796,6 +1800,7 @@ impl Workspace {
             return;
         }
         self.autosave(cx); // leaving a panel is a save
+        self.leave_commit_list();
         self.focus.focus(window, cx); // the commit message gives the keyboard back
         if tree {
             self.tree_visible = true;
@@ -2022,6 +2027,19 @@ impl Workspace {
             )
     }
 
+    /// Registers a Space; true when it is the second of a double tap.
+    fn space_twice(&mut self) -> bool {
+        let now = Instant::now();
+        let double = self
+            .last_space
+            .take()
+            .is_some_and(|t| now.duration_since(t) <= DoubleShiftDetector::DEFAULT_INTERVAL);
+        if !double {
+            self.last_space = Some(now);
+        }
+        double
+    }
+
     fn editor_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let in_panel = self.find.as_ref().is_some_and(|panel| {
             [&panel.find, &panel.replace]
@@ -2035,20 +2053,18 @@ impl Workspace {
             }
             return; // the input handles its own keys
         }
+        if self.commit_open && self.commit.as_ref().is_some_and(|panel| panel.list_focused) {
+            self.commit_key(event, window, cx);
+            cx.stop_propagation();
+            return;
+        }
         let m = event.keystroke.modifiers;
         let plain = !(m.control || m.alt || m.platform || m.shift);
         let in_tree = self.tree_focused && self.tree_visible;
         let idle = in_tree || self.viewer.as_ref().is_none_or(Viewer::awaits_command);
         if event.keystroke.key == "space" && plain && idle {
-            let now = Instant::now();
-            let double = self
-                .last_space
-                .take()
-                .is_some_and(|t| now.duration_since(t) <= DoubleShiftDetector::DEFAULT_INTERVAL);
-            if double {
+            if self.space_twice() {
                 self.open_popup(window, cx);
-            } else {
-                self.last_space = Some(now);
             }
             cx.stop_propagation();
             return;
@@ -3106,14 +3122,33 @@ impl Workspace {
             }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if window.has_active_dialog(cx) {
-                    return; // typing in a dialog is not for the editor or the tree
+                    // typing in a dialog is not for the editor or the tree; only the diff gives
+                    // way to the search popup
+                    let plain = event.keystroke.modifiers == Modifiers::default();
+                    if this.diff_open
+                        && event.keystroke.key == "space"
+                        && plain
+                        && this.space_twice()
+                    {
+                        window.close_all_dialogs(cx);
+                        this.diff_open = false;
+                        this.open_popup(window, cx);
+                        cx.stop_propagation();
+                    }
+                    return;
                 }
+                this.diff_open = false;
                 if this.branches.is_some() {
                     return this.branches_key(event, window, cx);
                 }
                 let Some(popup) = &mut this.popup else {
                     // the chat's keys are seen earlier, by the interceptor
-                    if !this.claude_open && !this.commit_focused(window, cx) {
+                    if this.commit_open && this.commit_focused(window, cx) {
+                        if event.keystroke.key == "escape" {
+                            this.focus_commit_list(window, cx); // out of the message, onto the files
+                            cx.stop_propagation();
+                        }
+                    } else if !this.claude_open {
                         this.editor_key(event, window, cx);
                     }
                     return;
@@ -3183,6 +3218,7 @@ impl Workspace {
                                                 && viewer.click(row, at)
                                             {
                                                 this.tree_focused = false; // keys are the editor's
+                                                this.leave_commit_list();
                                                 cx.notify();
                                             }
                                         });
@@ -4058,6 +4094,10 @@ fn apply_palette(cx: &mut App) {
     // the selected row, like the active tab chip
     colors.accent = rgb(theme::ACTIVE_BG).into();
     colors.accent_foreground = rgb(theme::STRONG).into();
+    // the diff dialog: the editor's background, with Zide's green and red for what changed
+    colors.background = rgb(theme::BACKGROUND).into();
+    colors.success = rgb(theme::OK).into();
+    colors.danger = rgb(theme::ERROR).into();
     // shortcuts, paths, hints
     colors.muted_foreground = rgb(theme::MUTED).into();
 }

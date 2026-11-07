@@ -42,6 +42,7 @@ impl Workspace {
                 return self.notify(note, cx);
             }
         };
+        self.diff_open = true;
         let state = cx.new(|cx| DiffState::new(files, cx).with_mode(DiffMode::Split));
         let title = path.to_string();
         window.open_dialog(cx, move |dialog, window, _| {

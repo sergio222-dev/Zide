@@ -75,6 +75,8 @@ pub struct Changes {
     /// Every path seen so far: a new one starts ticked, one the user unticked stays unticked.
     seen: HashSet<String>,
     collapsed: HashSet<String>,
+    /// The row the keyboard is on, by key.
+    selected: Option<String>,
 }
 
 impl Changes {
@@ -203,6 +205,49 @@ impl Changes {
         }
     }
 
+    /// The row the keyboard is on: the first one when none is chosen or it is no longer there.
+    pub fn selected_row(&self) -> Option<Row> {
+        let rows = self.rows();
+        let at = self.selected_index(&rows)?;
+        rows.into_iter().nth(at)
+    }
+
+    pub fn selected_index(&self, rows: &[Row]) -> Option<usize> {
+        let chosen = self
+            .selected
+            .as_ref()
+            .and_then(|key| rows.iter().position(|row| &row.key == key));
+        chosen.or((!rows.is_empty()).then_some(0))
+    }
+
+    pub fn select(&mut self, key: &str) {
+        self.selected = Some(key.to_string());
+    }
+
+    /// Moves the selection by `delta` rows, stopping at the ends.
+    pub fn move_by(&mut self, delta: isize) {
+        let rows = self.rows();
+        let Some(at) = self.selected_index(&rows) else {
+            return;
+        };
+        let to = at.saturating_add_signed(delta).min(rows.len() - 1);
+        self.selected = Some(rows[to].key.clone());
+    }
+
+    pub fn select_edge(&mut self, last: bool) {
+        let rows = self.rows();
+        let row = if last { rows.last() } else { rows.first() };
+        self.selected = row.map(|row| row.key.clone());
+    }
+
+    pub fn set_folded(&mut self, key: &str, folded: bool) {
+        if folded {
+            self.collapsed.insert(key.to_string());
+        } else {
+            self.collapsed.remove(key);
+        }
+    }
+
     pub fn toggle_fold(&mut self, key: &str) {
         if !self.collapsed.remove(key) {
             self.collapsed.insert(key.to_string());
@@ -231,6 +276,10 @@ pub struct CommitPanel {
     pub busy: bool,
     pub message: Entity<TextareaState>,
     scroll: UniformListScrollHandle,
+    /// The keyboard is on the list of files (j/k, Space, Enter), not on the message.
+    pub list_focused: bool,
+    /// A `g` waits for the second one.
+    g_pending: bool,
 }
 
 impl CommitPanel {
@@ -241,6 +290,8 @@ impl CommitPanel {
             busy: false,
             message: cx.new(|cx| TextareaState::new(window, cx).placeholder("Commit message")),
             scroll: UniformListScrollHandle::new(),
+            list_focused: false,
+            g_pending: false,
         }
     }
 }
@@ -309,9 +360,12 @@ impl Workspace {
             return self.toggle_claude(window, cx);
         }
         self.autosave(cx); // what git is about to show is what is on disk
-        let in_panel = self.commit_open && self.commit_focused(window, cx);
+        let in_panel = self.commit_open
+            && (self.commit_focused(window, cx)
+                || self.commit.as_ref().is_some_and(|panel| panel.list_focused));
         if in_panel {
             self.commit_open = false;
+            self.leave_commit_list();
             self.focus.focus(window, cx);
             return cx.notify();
         }
@@ -320,10 +374,96 @@ impl Workspace {
         }
         self.commit_open = true;
         self.refresh_commit(cx);
+        self.focus_commit_list(window, cx);
+    }
+
+    /// The keyboard goes to the list of files.
+    pub(crate) fn focus_commit_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.commit else {
+            return;
+        };
+        panel.list_focused = true;
+        self.tree_focused = false;
+        self.focus.focus(window, cx); // the message gives the keyboard back
+        cx.notify();
+    }
+
+    /// The keyboard is no longer on the list (it went to the editor, the tree or the message).
+    pub(crate) fn leave_commit_list(&mut self) {
+        if let Some(panel) = &mut self.commit {
+            panel.list_focused = false;
+        }
+    }
+
+    /// Keys while the list of files has the keyboard: `j`/`k`, Space ticks, Enter opens the diff.
+    pub(crate) fn commit_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use zide_vim::Key;
+        let Some(panel) = &mut self.commit else {
+            return;
+        };
+        let pending_g = std::mem::take(&mut panel.g_pending);
+        let selected = panel.changes.selected_row();
+        let key = crate::vim_key(event);
+        let plain = !(event.keystroke.modifiers.control
+            || event.keystroke.modifiers.alt
+            || event.keystroke.modifiers.platform
+            || event.keystroke.modifiers.shift);
+        match (event.keystroke.key.as_str(), key) {
+            ("down", _) | (_, Some(Key::Char('j'))) => panel.changes.move_by(1),
+            ("up", _) | (_, Some(Key::Char('k'))) => panel.changes.move_by(-1),
+            (_, Some(Key::Char('G'))) => panel.changes.select_edge(true),
+            (_, Some(Key::Char('g'))) if pending_g => panel.changes.select_edge(false),
+            (_, Some(Key::Char('g'))) => panel.g_pending = true,
+            ("space", _) if plain => {
+                if let Some(row) = &selected {
+                    panel.changes.toggle_check(&row.key);
+                }
+            }
+            ("right", _) | (_, Some(Key::Char('l'))) => {
+                if let Some(row) = selected
+                    && !matches!(row.kind, RowKind::File(_))
+                {
+                    panel.changes.set_folded(&row.key, false);
+                }
+            }
+            ("left", _) | (_, Some(Key::Char('h'))) => {
+                if let Some(row) = selected
+                    && !matches!(row.kind, RowKind::File(_))
+                {
+                    panel.changes.set_folded(&row.key, true);
+                }
+            }
+            (_, Some(Key::Enter)) => match selected {
+                Some(Row {
+                    kind: RowKind::File(_),
+                    key,
+                    ..
+                }) => self.show_diff(&key, window, cx),
+                Some(row) => panel.changes.toggle_fold(&row.key),
+                None => {}
+            },
+            (_, Some(Key::Char('i'))) => {
+                panel.list_focused = false;
+                panel
+                    .message
+                    .update(cx, |state, cx| state.focus(window, cx));
+            }
+            (_, Some(Key::Esc)) => {
+                panel.list_focused = false;
+                self.focus.focus(window, cx);
+            }
+            _ => return,
+        }
         if let Some(panel) = &self.commit {
-            panel
-                .message
-                .update(cx, |state, cx| state.focus(window, cx));
+            let rows = panel.changes.rows();
+            if let Some(at) = panel.changes.selected_index(&rows) {
+                panel.scroll.scroll_to_item(at, ScrollStrategy::Nearest);
+            }
         }
         cx.notify();
     }
@@ -424,6 +564,8 @@ impl Workspace {
         let message = panel.message.clone();
         let scroll = panel.scroll.clone();
         let can_commit = !busy && ticked > 0 || amend;
+        let selected = panel.changes.selected_row().map(|row| row.key);
+        let list_focused = panel.list_focused;
 
         let list = uniform_list("commit-tree", rows.len(), {
             let workspace = workspace.clone();
@@ -435,6 +577,7 @@ impl Workspace {
                         let foldable = !matches!(row.kind, RowKind::File(_));
                         let (on_check, on_fold) = (workspace.clone(), workspace.clone());
                         let on_open = workspace.clone();
+                        let is_selected = selected.as_deref() == Some(key.as_str());
                         let (check_key, fold_key, open_key) = (key.clone(), key.clone(), key);
                         div()
                             .id(("commit-row", index))
@@ -446,12 +589,21 @@ impl Workspace {
                             .pl(px(8. + 14. * row.depth as f32))
                             .pr(px(8.))
                             .whitespace_nowrap()
-                            .when(!foldable, |d| {
-                                d.on_click(move |event, window, cx| {
-                                    if event.click_count() == 2 {
-                                        on_open.update(cx, |this, cx| {
-                                            this.show_diff(&open_key, window, cx)
-                                        });
+                            .when(is_selected, |d| {
+                                d.bg(rgb(if list_focused {
+                                    theme::TREE_FOCUSED
+                                } else {
+                                    theme::TREE_SELECTED
+                                }))
+                            })
+                            .on_click(move |event, window, cx| {
+                                on_open.update(cx, |this, cx| {
+                                    if let Some(panel) = &mut this.commit {
+                                        panel.changes.select(&open_key);
+                                    }
+                                    this.focus_commit_list(window, cx);
+                                    if !foldable && event.click_count() == 2 {
+                                        this.show_diff(&open_key, window, cx);
                                     }
                                 })
                             })
@@ -621,6 +773,45 @@ mod tests {
             from: None,
             kind,
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_selection_moves_by_row_and_stays_inside_the_list() {
+        let mut changes = sample();
+        let rows = changes.rows();
+        assert_eq!(changes.selected_index(&rows), Some(0));
+        changes.move_by(-1);
+        assert_eq!(changes.selected_index(&changes.rows()), Some(0));
+        changes.move_by(2);
+        assert_eq!(changes.selected_index(&changes.rows()), Some(2));
+        changes.select_edge(true);
+        assert_eq!(
+            changes.selected_index(&changes.rows()),
+            Some(rows.len() - 1)
+        );
+        changes.move_by(5);
+        assert_eq!(
+            changes.selected_index(&changes.rows()),
+            Some(rows.len() - 1)
+        );
+        changes.select_edge(false);
+        assert_eq!(changes.selected_index(&changes.rows()), Some(0));
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_selected_row_that_folds_away_falls_back_to_the_first() {
+        let mut changes = sample();
+        let file = changes
+            .rows()
+            .into_iter()
+            .find(|row| matches!(row.kind, RowKind::File(_)))
+            .unwrap();
+        changes.select(&file.key);
+        changes.set_folded("", true);
+        assert_eq!(
+            changes.selected_row().map(|row| row.kind),
+            Some(RowKind::Root)
+        );
     }
 
     fn sample() -> Changes {
