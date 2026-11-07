@@ -24,12 +24,65 @@ impl Vim {
                     self.set_cursor(buffer, at);
                 }
             }
+            Key::Ctrl(c @ ('a' | 'x')) => {
+                let step = self.count.max(1) as i64 * if c == 'a' { 1 } else { -1 };
+                let plain = self.operator.is_none() && !self.is_visual();
+                self.reset_pending();
+                if plain {
+                    self.add_to_number(buffer, step);
+                }
+            }
             Key::Char(c) => self.normal_char(buffer, c),
             Key::Ctrl(_) | Key::Enter | Key::Backspace => self.reset_pending(),
         }
         if self.mode == Mode::Normal {
             buffer.commit();
         }
+    }
+
+    /// `Ctrl-A` / `Ctrl-X`: adds `step` to the decimal number under or after the cursor on its
+    /// line (a `-` right before it makes it negative, unless it follows a word character), keeps
+    /// leading zeros, and leaves the cursor on the number's last digit.
+    fn add_to_number(&mut self, buffer: &mut Buffer, step: i64) {
+        let line = buffer.position_of(self.cursor).line;
+        let start = buffer.line_start(line);
+        let chars: Vec<char> = buffer.line(line).chars().collect();
+        let column = self.cursor - start;
+        let digit = |i: usize| chars.get(i).is_some_and(char::is_ascii_digit);
+        let Some(mut first) = (column..chars.len()).find(|&i| digit(i)) else {
+            return;
+        };
+        if first == column {
+            while first > 0 && digit(first - 1) {
+                first -= 1;
+            }
+        }
+        let mut end = first;
+        while digit(end) {
+            end += 1;
+        }
+        let negative = first > 0
+            && chars[first - 1] == '-'
+            && !(first > 1 && (chars[first - 2].is_alphanumeric() || chars[first - 2] == '_'));
+        let from = if negative { first - 1 } else { first };
+        let digits: String = chars[first..end].iter().collect();
+        let Ok(magnitude) = digits.parse::<i64>() else {
+            return;
+        };
+        let value = (if negative { -magnitude } else { magnitude }).saturating_add(step);
+        let width = if digits.starts_with('0') {
+            digits.len()
+        } else {
+            0
+        };
+        let text = format!(
+            "{}{:0>width$}",
+            if value < 0 { "-" } else { "" },
+            value.unsigned_abs()
+        );
+        buffer.edit(start + from..start + end, &text);
+        self.cursor = start + from + text.chars().count() - 1;
+        self.want_column = self.cursor - start;
     }
 
     pub(crate) fn reset_pending(&mut self) {

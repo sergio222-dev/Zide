@@ -24,7 +24,7 @@ Only Linux x86_64 is published for now.
 ## Features
 
 - **Vim editing**: motions, operators (`d`, `c`, `y`), visual modes, text objects, registers,
-  dot repeat, undo/redo.
+  dot repeat, undo/redo, `Ctrl+A` / `Ctrl+X` to increment / decrement the number under the cursor.
 - **Search Everywhere** (double-Shift): files, text in the project, recent files and actions in
   one popup. Go to File, Go to Symbol and Find Action have their own shortcuts.
 - **Find and replace** in the file (with regex, case and whole-word toggles) and Find in Files.

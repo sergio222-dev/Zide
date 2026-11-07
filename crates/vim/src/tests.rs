@@ -15,6 +15,8 @@ fn run_at(text: &str, at: usize, keys: &str) -> (String, usize) {
             ("<CR>", Key::Enter),
             ("<BS>", Key::Backspace),
             ("<C-r>", Key::Ctrl('r')),
+            ("<C-a>", Key::Ctrl('a')),
+            ("<C-x>", Key::Ctrl('x')),
         ]
         .iter()
         .find(|(name, _)| rest.starts_with(name))
@@ -333,4 +335,24 @@ fn a_click_in_insert_mode_keeps_inserting_and_may_sit_at_the_end_of_the_line() {
     assert_eq!(vim.cursor(), 4);
     vim.handle(&mut buffer, Key::Char('!'));
     assert_eq!(buffer.text(), "Xone!\ntwo\n");
+}
+
+#[test]
+fn ctrl_a_and_ctrl_x_change_the_number_at_or_after_the_cursor() {
+    assert_eq!(run("x = 9;", "<C-a>"), ("x = 10;".into(), 5));
+    assert_eq!(run("x = 10;", "<C-x>").0, "x = 9;");
+    assert_eq!(run_at("12 34", 3, "<C-a>").0, "12 35");
+    assert_eq!(run_at("12 34", 1, "<C-a>").0, "13 34");
+    assert_eq!(run("a 5", "5<C-a>").0, "a 10");
+    assert_eq!(run("a 5", "7<C-x>").0, "a -2");
+    assert_eq!(run("a -2", "<C-a>").0, "a -1");
+    assert_eq!(run("a 007", "<C-a>").0, "a 008");
+    assert_eq!(run("foo-1", "<C-a>").0, "foo-2");
+}
+
+#[test]
+fn ctrl_a_without_a_number_changes_nothing_and_repeats_with_dot() {
+    assert_eq!(run("abc\n1", "<C-a>").0, "abc\n1");
+    assert_eq!(run("1", "<C-a>.").0, "3");
+    assert_eq!(run("1", "<C-a>u").0, "1");
 }
