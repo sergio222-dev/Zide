@@ -2,6 +2,7 @@
 //! Claude reported for the project; a trailing `@word` lists the project's files. Tab, Enter or
 //! a click completes, arrows move, Esc hides it.
 
+use gpui_kit::component::input::Position;
 use gpui_kit::*;
 use zide_search::{FileQuery, search_files};
 
@@ -47,6 +48,16 @@ fn matching(commands: &[String], query: &str) -> Vec<String> {
 /// `message` with the word that starts at `start` replaced by `insertion` and a space.
 fn complete(message: &str, start: usize, insertion: &str) -> String {
     format!("{}{insertion} ", &message[..start])
+}
+
+/// Where the text ends: the last line, and the characters on it.
+fn end_of(text: &str) -> Position {
+    let line = text.matches('\n').count();
+    let column = text
+        .rsplit('\n')
+        .next()
+        .map_or(0, |last| last.chars().count());
+    Position::new(line as u32, column as u32)
 }
 
 /// One row of the menu: what it shows, and the message once it is picked.
@@ -129,8 +140,12 @@ impl Workspace {
         };
         let chat = chats.active_mut();
         let picked = entries.swap_remove(chat.menu_selected.min(entries.len() - 1));
-        chat.input
-            .update(cx, |state, cx| state.set_value(picked.message, window, cx));
+        // `set_value` leaves the caret at the start; the user keeps typing after the mention
+        chat.input.update(cx, |state, cx| {
+            let at = end_of(&picked.message);
+            state.set_value(picked.message, window, cx);
+            state.set_cursor_position(at, window, cx);
+        });
         cx.notify();
         true
     }
@@ -179,7 +194,9 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{Trigger, complete, matching, trigger};
+    use gpui_kit::component::input::Position;
+
+    use super::{Trigger, complete, end_of, matching, trigger};
 
     fn commands() -> Vec<String> {
         ["compact", "review", "code-review", "clear"]
@@ -221,6 +238,12 @@ mod tests {
         assert_eq!(trigger("explain @src/main.rs "), None);
         assert_eq!(trigger("mail me@home"), None);
         assert_eq!(trigger("plain"), None);
+    }
+
+    #[test]
+    fn the_caret_goes_to_the_end_of_the_last_line() {
+        assert_eq!(end_of("@src/main.rs "), Position::new(0, 13));
+        assert_eq!(end_of("one\nñandú @a "), Position::new(1, 9));
     }
 
     #[test]
