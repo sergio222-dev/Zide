@@ -284,10 +284,307 @@ fn parse_branch_status(output: &str) -> Option<BranchStatus> {
     })
 }
 
+/// A local branch and the remote branch it tracks (`origin/main`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalBranch {
+    pub name: String,
+    pub upstream: Option<String>,
+}
+
+/// The branches of a repository.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Branches {
+    /// The checked-out branch; `None` when HEAD is detached.
+    pub current: Option<String>,
+    pub local: Vec<LocalBranch>,
+    /// Remote-tracking branches with their remote (`origin/feat/x`), `HEAD` aliases left out.
+    pub remote: Vec<String>,
+    /// Local branches checked out lately, the latest first.
+    pub recent: Vec<String>,
+}
+
+impl Branches {
+    /// One line per fact, `kind<TAB>name[<TAB>upstream]`, to keep between runs.
+    pub fn to_cache(&self) -> String {
+        let mut out = format!("current\t{}\n", self.current.as_deref().unwrap_or(""));
+        for branch in &self.local {
+            let upstream = branch.upstream.as_deref().unwrap_or("");
+            out += &format!("local\t{}\t{upstream}\n", branch.name);
+        }
+        for remote in &self.remote {
+            out += &format!("remote\t{remote}\n");
+        }
+        for recent in &self.recent {
+            out += &format!("recent\t{recent}\n");
+        }
+        out
+    }
+
+    /// What [`Branches::to_cache`] wrote; lines it does not understand are skipped.
+    pub fn from_cache(text: &str) -> Self {
+        let mut branches = Self::default();
+        for line in text.lines() {
+            let mut fields = line.split('\t');
+            let (Some(kind), Some(name)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            match kind {
+                "current" if !name.is_empty() => branches.current = Some(name.to_string()),
+                "local" if !name.is_empty() => branches.local.push(LocalBranch {
+                    name: name.to_string(),
+                    upstream: fields.next().filter(|u| !u.is_empty()).map(str::to_string),
+                }),
+                "remote" if !name.is_empty() => branches.remote.push(name.to_string()),
+                "recent" if !name.is_empty() => branches.recent.push(name.to_string()),
+                _ => {}
+            }
+        }
+        branches
+    }
+}
+
+/// How many recently checked-out branches are kept.
+const RECENT_BRANCHES: usize = 5;
+
+/// The branches of the repository at `root`; `None` when git is missing or `root` is none.
+pub fn branches(root: &Path) -> Option<Branches> {
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let refs = git(&[
+        "for-each-ref",
+        "--format=%(refname)\t%(upstream:short)\t%(HEAD)",
+        "refs/heads",
+        "refs/remotes",
+    ])?;
+    let reflog = git(&["reflog", "show", "--format=%gs", "-n", "300"]).unwrap_or_default();
+    Some(parse_branches(&refs, &reflog))
+}
+
+/// Reads `for-each-ref` lines (`refname<TAB>upstream<TAB>HEAD marker`) and the subjects of the
+/// reflog of HEAD, whose checkouts say which branches were visited.
+fn parse_branches(refs: &str, reflog: &str) -> Branches {
+    let mut branches = Branches::default();
+    for line in refs.lines() {
+        let mut fields = line.split('\t');
+        let (Some(name), upstream, marker) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        if let Some(local) = name.strip_prefix("refs/heads/") {
+            if marker == Some("*") {
+                branches.current = Some(local.to_string());
+            }
+            branches.local.push(LocalBranch {
+                name: local.to_string(),
+                upstream: upstream.filter(|u| !u.is_empty()).map(str::to_string),
+            });
+        } else if let Some(remote) = name.strip_prefix("refs/remotes/")
+            && remote.contains('/')
+            && !remote.ends_with("/HEAD")
+        {
+            branches.remote.push(remote.to_string());
+        }
+    }
+    for subject in reflog.lines() {
+        let Some(moved) = subject.strip_prefix("checkout: moving from ") else {
+            continue;
+        };
+        let Some((_, to)) = moved.split_once(" to ") else {
+            continue;
+        };
+        if branches.local.iter().any(|b| b.name == to)
+            && !branches.recent.iter().any(|r| r == to)
+            && branches.recent.len() < RECENT_BRANCHES
+        {
+            branches.recent.push(to.to_string());
+        }
+    }
+    branches
+}
+
+/// What to check out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Switch {
+    /// A local branch.
+    Local(String),
+    /// A remote-tracking branch (`origin/feat/x`): its local branch, created to track it when
+    /// there is none yet.
+    Remote(String),
+}
+
+/// Checks out `target` in the repository at `root`. The error is what git said (for instance
+/// that local changes would be overwritten), for the user to read.
+pub fn switch(root: &Path, target: &Switch) -> Result<(), String> {
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .map_err(|e| format!("git could not run: {e}"))
+    };
+    let output = match target {
+        Switch::Local(name) => git(&["switch", name])?,
+        Switch::Remote(full) => {
+            let short = full
+                .split_once('/')
+                .map_or(full.as_str(), |(_, short)| short);
+            let exists = git(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{short}"),
+            ])?
+            .status
+            .success();
+            if exists {
+                git(&["switch", short])?
+            } else {
+                git(&["switch", "--track", full])?
+            }
+        }
+    };
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn the_cache_text_gives_back_the_same_branches() {
+        let branches = Branches {
+            current: Some("feat/x".into()),
+            local: vec![
+                LocalBranch {
+                    name: "main".into(),
+                    upstream: Some("origin/main".into()),
+                },
+                LocalBranch {
+                    name: "feat/x".into(),
+                    upstream: None,
+                },
+            ],
+            remote: vec!["origin/main".into()],
+            recent: vec!["feat/x".into(), "main".into()],
+        };
+        assert_eq!(Branches::from_cache(&branches.to_cache()), branches);
+        let detached = Branches::default();
+        assert_eq!(Branches::from_cache(&detached.to_cache()), detached);
+        // damaged lines are skipped, not fatal
+        assert_eq!(
+            Branches::from_cache("junk\nlocal\n\tx\n"),
+            Branches::default()
+        );
+    }
+
+    #[test]
+    fn branches_are_read_from_refs_and_the_reflog() {
+        let refs = "refs/heads/main\torigin/main\t*\nrefs/heads/feat/x\t\t \n\
+                    refs/remotes/origin/HEAD\t\t \nrefs/remotes/origin/main\t\t \n\
+                    refs/remotes/origin/feat/y\t\t \n";
+        let reflog = "checkout: moving from feat/x to main\ncommit: work\n\
+                      checkout: moving from main to feat/x\ncheckout: moving from a1b2c3 to main\n\
+                      checkout: moving from main to gone\n";
+        let found = parse_branches(refs, reflog);
+        assert_eq!(found.current.as_deref(), Some("main"));
+        assert_eq!(
+            found.local,
+            [
+                LocalBranch {
+                    name: "main".into(),
+                    upstream: Some("origin/main".into())
+                },
+                LocalBranch {
+                    name: "feat/x".into(),
+                    upstream: None
+                },
+            ]
+        );
+        assert_eq!(found.remote, ["origin/main", "origin/feat/y"]);
+        // latest first, each once, and only branches that still exist
+        assert_eq!(found.recent, ["main", "feat/x"]);
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    #[test]
+    fn switching_checks_out_local_branches_and_tracks_remote_ones() {
+        let base = std::env::temp_dir().join(format!("zide-switch-{}", std::process::id()));
+        let (origin, clone) = (base.join("origin"), base.join("clone"));
+        fs::create_dir_all(&origin).unwrap();
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        git_in(&origin, &["branch", "feat/y"]);
+        git_in(
+            &base,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+        git_in(&clone, &["branch", "local-only"]);
+
+        assert_eq!(switch(&clone, &Switch::Local("local-only".into())), Ok(()));
+        assert_eq!(branch_status(&clone).unwrap().name, "local-only");
+        // no local `feat/y` yet: it is created and tracks the remote one
+        assert_eq!(
+            switch(&clone, &Switch::Remote("origin/feat/y".into())),
+            Ok(())
+        );
+        let status = branch_status(&clone).unwrap();
+        assert_eq!((status.name.as_str(), status.tracked), ("feat/y", true));
+        // now it exists: the remote entry just goes to it
+        git_in(&clone, &["switch", "-q", "main"]);
+        assert_eq!(
+            switch(&clone, &Switch::Remote("origin/feat/y".into())),
+            Ok(())
+        );
+        assert_eq!(branch_status(&clone).unwrap().name, "feat/y");
+
+        let listed = branches(&clone).unwrap();
+        assert_eq!(listed.current.as_deref(), Some("feat/y"));
+        assert!(listed.remote.contains(&"origin/main".to_string()));
+        assert!(!listed.remote.iter().any(|r| r.ends_with("HEAD")));
+        assert_eq!(listed.recent.first().map(String::as_str), Some("feat/y"));
+
+        assert!(switch(&clone, &Switch::Local("missing".into())).is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn the_branch_status_reads_the_headers_of_git_status() {

@@ -28,7 +28,12 @@ pub fn branch_label(branch: &BranchStatus) -> (String, u32) {
     }
 }
 
-pub fn render(status: Option<ViewerStatus>, branch: Option<&BranchStatus>) -> StatusBar {
+/// `on_branch` runs when the branch name is clicked.
+pub fn render(
+    status: Option<ViewerStatus>,
+    branch: Option<&BranchStatus>,
+    on_branch: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> StatusBar {
     let mut bar = StatusBar::new()
         .bg(rgb(theme::BACKGROUND))
         .border_color(rgb(theme::BORDER))
@@ -40,9 +45,12 @@ pub fn render(status: Option<ViewerStatus>, branch: Option<&BranchStatus>) -> St
         let (label, color) = branch_label(branch);
         bar = bar.right(div().text_color(rgb(color)).child(label)).right(
             div()
+                .id("branch")
                 .flex()
                 .items_center()
                 .gap_1()
+                .cursor_pointer()
+                .on_click(on_branch)
                 .child(
                     svg()
                         .path(BRANCH_ICON)

@@ -33,6 +33,9 @@ Only Linux x86_64 is published for now.
   symbol index and the status line says so.
 - **Status bar**: messages on the left; on the right the branch's state against its upstream (`↑` to push, `↓` to pull,
   `Δ` when diverged), the branch name, the cursor position and the vim mode.
+- **Branch switcher** (``Ctrl+Shift+` ``, click the branch in the status bar, or Find Action → *Switch Branch*): Recent, Local and
+  Remote branches as folder trees (`feat/` holds `feat/*`), searchable; Enter checks out, a remote branch gets a
+  tracking local one.
 - **Code folding** for blocks, declarations, imports and long comments, with gutter chevrons.
 - **Git blame** in gray after the cursor line: author's last name, date, time and commit summary.
 - **Matching pairs**: the caret on a bracket highlights its partner; on a JSX tag name, the other tag; on the `:` of a Python block, the block's last line.
@@ -111,6 +114,7 @@ line says a new release is available.
 | `Ctrl+F` / `Ctrl+R` | Find / Replace in file |
 | `F3` / `Shift+F3` | Next / previous match |
 | `Ctrl+Shift+F` | Find in Files |
+| ``Ctrl+Shift+` `` | Switch Branch |
 | `Alt+F7` | Find Usages |
 | `gd` / `Ctrl+B` | Go to Definition |
 | `Alt+1` | Toggle project tree |

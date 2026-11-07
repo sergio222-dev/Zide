@@ -92,6 +92,18 @@ fn parse_view(entry: &str, relative: &str) -> Option<View> {
     })
 }
 
+/// The branches as of the last time the switcher read them, to show at once while it reads them
+/// again. `None` when there is no cache yet.
+pub fn branches(root: &Path) -> Option<zide_git::Branches> {
+    let text = fs::read_to_string(file_for(root, "branches")).ok()?;
+    Some(zide_git::Branches::from_cache(&text))
+}
+
+/// Keeps `branches` for the next run. Best effort, like `remember_file`.
+pub fn remember_branches(root: &Path, branches: &zide_git::Branches) {
+    write(root, "branches", &branches.to_cache());
+}
+
 /// Creates the folder with a `.gitignore` that ignores it whole, so the project's own
 /// `.gitignore` stays untouched.
 fn write(root: &Path, kind: &str, content: &str) {

@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod branches;
 mod definition;
 mod file_icon;
 mod indent;
@@ -75,6 +76,7 @@ actions!(
         NavigateForward,
         FindUsages,
         GoToDefinition,
+        SwitchBranch,
         ReformatCode,
         ExtendSelection,
         FocusTree,
@@ -162,6 +164,13 @@ fn action_registry() -> Vec<ActionDef> {
             action: Some(Box::new(GoToDefinition)),
             closes_popup: true,
             run: |ws, _, cx| ws.go_to_definition(cx),
+        },
+        ActionDef {
+            name: "Switch Branch",
+            synonyms: &["branches", "checkout", "git", "change branch"],
+            action: Some(Box::new(SwitchBranch)),
+            closes_popup: true,
+            run: |ws, window, cx| ws.open_branches(window, cx),
         },
         ActionDef {
             name: "Find Usages",
@@ -397,6 +406,8 @@ struct Workspace {
     tree_visible: bool,
     /// The checked-out branch and how far it is from its upstream, `None` outside a repository.
     branch: Option<zide_git::BranchStatus>,
+    /// The branch switcher, while it is open.
+    branches: Option<branches::BranchPopup>,
     /// The rendered Markdown beside the editor (Ctrl+Shift+M), for `.md` files.
     md_preview: bool,
     md: Option<MdPreview>,
@@ -508,6 +519,7 @@ impl Workspace {
             tree: Tree::new(),
             tree_visible: false,
             branch: None,
+            branches: None,
             md_preview: false,
             md: None,
             nav: nav::NavHistory::default(),
@@ -2026,6 +2038,148 @@ impl Workspace {
         run(self, window, cx);
     }
 
+    /// Opens the branch switcher (the status bar's branch, or the Switch Branch action).
+    fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.popup = None;
+        self.cancel_running_search();
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search for branches"));
+        let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change)
+                && let Some(popup) = &mut this.branches
+            {
+                popup.model.set_query(input.read(cx).value().as_ref());
+                popup.reveal_selected();
+                cx.notify();
+            }
+        });
+        input.update(cx, |state, cx| state.focus(window, cx));
+        // what the last run saw is shown at once; the branches are read again behind it
+        let cached = session::branches(&self.root).unwrap_or_default();
+        let popup = branches::BranchPopup {
+            input,
+            model: branches::Model::new(cached),
+            scroll: UniformListScrollHandle::new(),
+            loading: true,
+            _subscription: subscription,
+        };
+        popup.reveal_selected();
+        self.branches = Some(popup);
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    let found = zide_git::branches(&root)?;
+                    session::remember_branches(&root, &found);
+                    Some(found)
+                })
+                .await;
+            this.update(cx, |this, cx| match (found, &mut this.branches) {
+                (Some(found), Some(popup)) => {
+                    popup.model.replace(found);
+                    popup.loading = false;
+                    popup.reveal_selected();
+                    cx.notify();
+                }
+                (None, Some(_)) => {
+                    this.branches = None;
+                    let note = Notification::warning("This project is not a git repository.");
+                    this.notify(note.title("Switch branch"), cx);
+                }
+                // closed before the branches arrived
+                (_, None) => {}
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn close_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.branches = None;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Keys of the open branch switcher; the others go to its search box.
+    fn branches_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(popup) = &mut self.branches else {
+            return;
+        };
+        match event.keystroke.key.as_str() {
+            "escape" => return self.close_branches_stopping(window, cx),
+            "down" => popup.model.move_by(1),
+            "up" => popup.model.move_by(-1),
+            "pagedown" => popup.model.move_by(10),
+            "pageup" => popup.model.move_by(-10),
+            "right" => popup.model.fold(true),
+            "left" => popup.model.fold(false),
+            "enter" => {
+                let row = popup.model.selected();
+                return self.activate_branch_row(row, window, cx);
+            }
+            _ => return,
+        }
+        popup.reveal_selected();
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn close_branches_stopping(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_branches(window, cx);
+        cx.stop_propagation();
+    }
+
+    /// A click or Enter on `row` of the switcher: opens a folder, or checks out a branch.
+    fn activate_branch_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(popup) = &mut self.branches else {
+            return;
+        };
+        popup.model.select(row);
+        match popup.model.activate() {
+            Some(target) => {
+                self.close_branches(window, cx);
+                self.switch_branch(target, cx);
+            }
+            None => {
+                popup.reveal_selected();
+                cx.notify();
+            }
+        }
+        cx.stop_propagation();
+    }
+
+    /// Checks `target` out in the background, then reads the project and the branch again.
+    fn switch_branch(&mut self, target: zide_git::Switch, cx: &mut Context<Self>) {
+        self.autosave(cx); // the edits are in the files git is about to change
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    let result = zide_git::switch(&root, &target);
+                    (result, zide_git::branch_status(&root))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let (result, status) = outcome;
+                match result {
+                    Ok(()) => {
+                        this.branch = status;
+                        this.rescan(cx);
+                        cx.notify();
+                    }
+                    Err(why) => {
+                        let note = Notification::error(why).title("Could not switch branch");
+                        this.notify(note, cx);
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn close_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_running_search();
         self.popup = None;
@@ -2409,6 +2563,9 @@ impl Workspace {
             )
             .on_action(cx.listener(|this, _: &FindUsages, window, cx| this.find_usages(window, cx)))
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
+            .on_action(
+                cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
             .on_action(cx.listener(|this, _: &FocusTree, _, cx| this.focus_tree(true, cx)))
             .on_action(cx.listener(|this, _: &FocusEditor, _, cx| this.focus_tree(false, cx)))
@@ -2432,6 +2589,9 @@ impl Workspace {
                 }
             }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.branches.is_some() {
+                    return this.branches_key(event, window, cx);
+                }
                 let Some(popup) = &mut this.popup else {
                     this.editor_key(event, window, cx);
                     return;
@@ -2525,7 +2685,11 @@ impl Workspace {
             .child(statusbar::render(
                 self.viewer.as_ref().map(Viewer::status),
                 self.branch.as_ref(),
+                cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
             ));
+        if let Some(branches) = &self.branches {
+            root = root.child(branches::render(branches, cx));
+        }
 
         let Some(popup) = &self.popup else {
             return root;
@@ -3380,6 +3544,7 @@ fn main() {
             KeyBinding::new("f3", FindNext, Some("Workspace")),
             KeyBinding::new("shift-f3", FindPrevious, Some("Workspace")),
             KeyBinding::new("ctrl-shift-f", FindInFiles, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-`", SwitchBranch, Some("Workspace")),
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
             KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
