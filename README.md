@@ -38,6 +38,10 @@ Only Linux x86_64 is published for now.
   tracking local one.
   Right-click a branch for its menu: *New Branch from…*, *Update* (fast-forward only), *Push…* (asks first, never forced)
   and *Rename* (the dialog refuses a name that already exists).
+- **Minimap** at the right of the editor: every line as colored bars (folded lines are left out), the visible part
+  marked, click or drag to jump. Lines added or modified since the last commit are painted green or brown, removed ones
+  gray, errors red and the cursor's line blue.
+  Turn it off with Find Action → *Show Minimap* (Enter flips it, the popup stays open; the project remembers it).
 - **Code folding** for blocks, declarations, imports and long comments, with gutter chevrons.
 - **Git blame** in gray after the cursor line: author's last name, date, time and commit summary.
 - **Matching pairs**: the caret on a bracket highlights its partner; on a JSX tag name, the other tag; on the `:` of a Python block, the block's last line.

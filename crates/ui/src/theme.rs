@@ -40,6 +40,9 @@ pub const CHANGE_ADDED: u32 = 0x4f9a56;
 pub const CHANGE_MODIFIED: u32 = 0x9a7040;
 pub const CHANGE_REMOVED: u32 = 0x7d848f;
 
+/// The minimap: the line of the cursor.
+pub const MINIMAP_CURSOR: u32 = 0x3b82f6;
+
 /// The chip with a parameter's name before an argument.
 pub const HINT_BG: u32 = 0x2f3239;
 pub const HINT_TEXT: u32 = 0x8c93a1;

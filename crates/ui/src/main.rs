@@ -20,6 +20,7 @@ mod file_icon;
 mod indent;
 mod markdown;
 mod meter;
+mod minimap;
 mod nav;
 mod projects;
 mod rows;
@@ -39,6 +40,7 @@ use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::tag::Tag;
 use gpui_kit::*;
 use viewer::{Effect, FindStatus, FormatRequest, HighlightKey, Viewer};
 use welcome::{OpenProject, Welcome};
@@ -139,6 +141,9 @@ struct ActionDef {
     action: Option<Box<dyn Action>>,
     /// Commands that act on the popup itself keep it open; the others close it first.
     closes_popup: bool,
+    /// For a setting that is switched on and off: whether it is on. The row shows it, and
+    /// running the command flips it.
+    state: Option<fn(&Workspace) -> bool>,
     run: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
 }
 
@@ -149,6 +154,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["find files", "open file"],
             action: Some(Box::new(GoToFile)),
             closes_popup: false,
+            state: None,
             run: |ws, _, cx| ws.show_tab(Tab::Files, cx),
         },
         ActionDef {
@@ -156,6 +162,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["format", "beautify", "prettify", "indent"],
             action: Some(Box::new(ReformatCode)),
             closes_popup: true,
+            state: None,
             run: |ws, _, cx| ws.reformat(cx),
         },
         ActionDef {
@@ -163,6 +170,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["declaration", "gd", "jump to definition", "goto definition"],
             action: Some(Box::new(GoToDefinition)),
             closes_popup: true,
+            state: None,
             run: |ws, _, cx| ws.go_to_definition(cx),
         },
         ActionDef {
@@ -170,6 +178,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["branches", "checkout", "git", "change branch"],
             action: Some(Box::new(SwitchBranch)),
             closes_popup: true,
+            state: None,
             run: |ws, window, cx| ws.open_branches(window, cx),
         },
         ActionDef {
@@ -177,6 +186,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["references", "occurrences", "where used"],
             action: Some(Box::new(FindUsages)),
             closes_popup: false,
+            state: None,
             run: |ws, window, cx| ws.find_usages(window, cx),
         },
         ActionDef {
@@ -184,6 +194,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["file explorer", "project view", "sidebar"],
             action: Some(Box::new(ToggleProjectTree)),
             closes_popup: true,
+            state: None,
             run: |ws, _, cx| ws.toggle_tree(cx),
         },
         ActionDef {
@@ -191,6 +202,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["markdown", "md", "render"],
             action: Some(Box::new(ToggleMarkdownPreview)),
             closes_popup: true,
+            state: None,
             run: |ws, _, cx| ws.toggle_md_preview(cx),
         },
         ActionDef {
@@ -198,6 +210,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["previous location", "go back", "history"],
             action: Some(Box::new(NavigateBack)),
             closes_popup: true,
+            state: None,
             run: |ws, _, cx| ws.navigate(true, cx),
         },
         ActionDef {
@@ -205,6 +218,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["next location", "go forward", "history"],
             action: Some(Box::new(NavigateForward)),
             closes_popup: true,
+            state: None,
             run: |ws, _, cx| ws.navigate(false, cx),
         },
         ActionDef {
@@ -212,6 +226,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["recent", "history", "switcher"],
             action: Some(Box::new(RecentFiles)),
             closes_popup: false,
+            state: None,
             run: |ws, _, cx| ws.show_tab(Tab::Recent, cx),
         },
         ActionDef {
@@ -219,6 +234,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["symbols", "function", "class", "method"],
             action: Some(Box::new(GoToSymbol)),
             closes_popup: false,
+            state: None,
             run: |ws, _, cx| ws.show_tab(Tab::Symbols, cx),
         },
         ActionDef {
@@ -226,6 +242,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["commands", "actions"],
             action: Some(Box::new(FindAction)),
             closes_popup: false,
+            state: None,
             run: |ws, _, cx| ws.show_tab(Tab::Actions, cx),
         },
         ActionDef {
@@ -233,6 +250,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["search in file", "find in editor"],
             action: Some(Box::new(FindInFile)),
             closes_popup: true,
+            state: None,
             run: |ws, window, cx| ws.open_find(false, window, cx),
         },
         ActionDef {
@@ -240,6 +258,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["find and replace", "substitute"],
             action: Some(Box::new(ReplaceInFile)),
             closes_popup: true,
+            state: None,
             run: |ws, window, cx| ws.open_find(true, window, cx),
         },
         ActionDef {
@@ -247,6 +266,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["grep", "ripgrep", "search text"],
             action: Some(Box::new(FindInFiles)),
             closes_popup: false,
+            state: None,
             run: |ws, _, cx| ws.show_tab(Tab::Text, cx),
         },
         ActionDef {
@@ -254,6 +274,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["next tab"],
             action: Some(Box::new(SwitchTab)),
             closes_popup: false,
+            state: None,
             run: |ws, _, cx| ws.switch_tab(cx),
         },
         ActionDef {
@@ -261,6 +282,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["regular expression"],
             action: Some(Box::new(ToggleRegex)),
             closes_popup: false,
+            state: None,
             run: |ws, _, cx| ws.toggle_text_option(|o| o.regex = !o.regex, cx),
         },
         ActionDef {
@@ -268,6 +290,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["case sensitive"],
             action: Some(Box::new(ToggleCase)),
             closes_popup: false,
+            state: None,
             run: |ws, _, cx| ws.toggle_text_option(|o| o.case_sensitive = !o.case_sensitive, cx),
         },
         ActionDef {
@@ -275,6 +298,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["words"],
             action: Some(Box::new(ToggleWord)),
             closes_popup: false,
+            state: None,
             run: |ws, _, cx| ws.toggle_text_option(|o| o.whole_word = !o.whole_word, cx),
         },
         ActionDef {
@@ -282,6 +306,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["rescan", "refresh", "reindex"],
             action: None,
             closes_popup: true,
+            state: None,
             run: |ws, _, cx| ws.rescan(cx),
         },
         ActionDef {
@@ -289,6 +314,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["upgrade", "check for updates", "new version"],
             action: None,
             closes_popup: true,
+            state: None,
             run: |_, _, cx| cx.emit(UpdateRequested),
         },
         ActionDef {
@@ -296,6 +322,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["open project", "open folder", "switch project"],
             action: None,
             closes_popup: true,
+            state: None,
             run: |_, _, cx| cx.emit(OpenRequested),
         },
         ActionDef {
@@ -303,7 +330,16 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["exit", "close ide"],
             action: None,
             closes_popup: true,
+            state: None,
             run: |_, _, cx| cx.quit(),
+        },
+        ActionDef {
+            name: "Show Minimap",
+            synonyms: &["minimap", "overview", "map", "hide minimap"],
+            action: None,
+            closes_popup: false,
+            state: Some(|ws| ws.minimap),
+            run: |ws, _, cx| ws.toggle_minimap(cx),
         },
     ]
 }
@@ -397,6 +433,8 @@ struct Workspace {
     focus: FocusHandle,
     /// Editor font size, changed with Ctrl+wheel and shared by every file.
     font_size: f32,
+    /// Whether the editor shows the minimap.
+    minimap: bool,
     /// When the last Space was pressed in Normal mode: two in a row open the popup.
     last_space: Option<Instant>,
     /// The frame-rate overlay, when started with `ZIDE_FPS=1`.
@@ -514,6 +552,7 @@ impl Workspace {
         let mut workspace = Self {
             focus: cx.focus_handle(),
             font_size: viewer::DEFAULT_FONT_SIZE,
+            minimap: true,
             last_space: None,
             meter: meter::FrameMeter::from_env(),
             tree: Tree::new(),
@@ -555,6 +594,7 @@ impl Workspace {
             window: window.window_handle(),
         };
         workspace.rescan(cx);
+        workspace.minimap = session::minimap(&workspace.root).unwrap_or(true);
         if let Some(size) = session::font_size(&workspace.root) {
             workspace.font_size = size.clamp(viewer::MIN_FONT_SIZE, viewer::MAX_FONT_SIZE);
         }
@@ -1964,6 +2004,7 @@ impl Workspace {
             viewer.go_to_line(line);
         }
         viewer.set_font_size(self.font_size);
+        viewer.set_minimap(self.minimap);
         // a file read again starts where it was left, unless it was opened at a line
         if line.is_none()
             && reopened
@@ -2012,6 +2053,7 @@ impl Workspace {
         self.font_size =
             (self.font_size + step).clamp(viewer::MIN_FONT_SIZE, viewer::MAX_FONT_SIZE);
         viewer.set_font_size(self.font_size);
+        viewer.set_minimap(self.minimap);
         session::remember_font_size(&self.root, self.font_size);
         cx.notify();
     }
@@ -2023,19 +2065,29 @@ impl Workspace {
         let Some(hit) = popup.actions.get(popup.selected) else {
             return;
         };
-        let (run, closes_popup) = {
+        let (run, closes_popup, is_setting) = {
             let def = &self.registry[hit.index];
-            (def.run, def.closes_popup)
+            (def.run, def.closes_popup, def.state.is_some())
         };
         if closes_popup {
             self.close_popup(window, cx);
-        } else {
+        } else if !is_setting {
             // the query was typed to find the action, not to search with
             popup.query.clear();
             let input = popup.input.clone();
             input.update(cx, |state, cx| state.set_value("", window, cx));
         }
         run(self, window, cx);
+    }
+
+    /// Shows or hides the minimap of every file; the project remembers it.
+    fn toggle_minimap(&mut self, cx: &mut Context<Self>) {
+        self.minimap = !self.minimap;
+        session::remember_minimap(&self.root, self.minimap);
+        if let Some(viewer) = &mut self.viewer {
+            viewer.set_minimap(self.minimap);
+        }
+        cx.notify();
     }
 
     /// Opens the branch switcher (the status bar's branch, or the Switch Branch action).
@@ -2957,7 +3009,7 @@ impl Workspace {
         );
         let selected = popup.selected;
         let rows = match (popup.tab, &self.index) {
-            (Tab::Actions, _) => Some(action_items(&popup.actions, &self.registry)),
+            (Tab::Actions, _) => Some(action_items(&popup.actions, &self.registry, self)),
             (Tab::Files | Tab::Recent, Some(index)) => Some(file_items(index, &popup.files)),
             (Tab::Text, Some(index)) => Some(text_items(index, &popup.text)),
             (Tab::Symbols, Some(index)) => self
@@ -3207,11 +3259,16 @@ fn command_list(
         })
 }
 
-fn action_items(hits: &[ActionHit], registry: &std::rc::Rc<Vec<ActionDef>>) -> Vec<CommandItem> {
+fn action_items(
+    hits: &[ActionHit],
+    registry: &std::rc::Rc<Vec<ActionDef>>,
+    workspace: &Workspace,
+) -> Vec<CommandItem> {
     hits.iter()
         .map(|hit| {
             let registry = registry.clone();
             let (index, fragments) = (hit.index, hit.fragments.clone());
+            let on = registry[index].state.map(|state| state(workspace));
             CommandItem::new().child(move |_, cx| {
                 let def = &registry[index];
                 let shortcut = def
@@ -3230,6 +3287,13 @@ fn action_items(hits: &[ActionHit], registry: &std::rc::Rc<Vec<ActionDef>>) -> V
                             .text_color(rgb(theme::MUTED))
                             .child(shortcut),
                     )
+                    .children(on.map(|on| {
+                        if on {
+                            Tag::success().child("ON")
+                        } else {
+                            Tag::secondary().child("OFF")
+                        }
+                    }))
             })
         })
         .collect()
