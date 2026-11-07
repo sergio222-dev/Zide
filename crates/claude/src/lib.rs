@@ -2,8 +2,14 @@
 //! user's own Claude Code, so everything configured in `~/.claude` and the project's
 //! `.claude` (CLAUDE.md, hooks, MCP servers, skills, output style) applies unchanged.
 
+mod cli;
 mod event;
 mod session;
+mod transcript;
 
-pub use event::{Event, Question, QuestionOption, parse_event};
+pub use cli::{MIN_VERSION, Version, installed};
+pub use event::{Event, Question, QuestionOption, Usage, parse_events};
 pub use session::{Options, Session};
+pub use transcript::{
+    Ask, Block, Permission, Resolution, Status, ToolCall, ToolOutput, Transcript,
+};

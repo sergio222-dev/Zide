@@ -8,7 +8,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::event::{Event, parse_event};
+use crate::event::{Event, parse_events};
 
 #[derive(Default)]
 pub struct Options<'a> {
@@ -53,12 +53,13 @@ impl Session {
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Some(event) = parse_event(&line)
-                    && sender.send(event).is_err()
-                {
-                    break;
+                for event in parse_events(&line) {
+                    if sender.send(event).is_err() {
+                        return;
+                    }
                 }
             }
+            let _ = sender.send(Event::Exit);
         });
         Ok((Session { child, stdin }, receiver))
     }
@@ -80,7 +81,10 @@ impl Session {
 
     /// Lets the tool run. `input` is the request's input, possibly edited.
     pub fn allow(&mut self, request_id: &str, input: &Value) -> io::Result<()> {
-        self.respond(request_id, json!({"behavior": "allow", "updatedInput": input}))
+        self.respond(
+            request_id,
+            json!({"behavior": "allow", "updatedInput": input}),
+        )
     }
 
     /// Answers an `Event::Question`: each pair is (question text, chosen option label).
@@ -91,7 +95,10 @@ impl Session {
         answers: &[(&str, &str)],
     ) -> io::Result<()> {
         let mut updated = input.clone();
-        updated["answers"] = answers.iter().map(|&(q, a)| (q.to_owned(), json!(a))).collect();
+        updated["answers"] = answers
+            .iter()
+            .map(|&(q, a)| (q.to_owned(), json!(a)))
+            .collect();
         self.allow(request_id, &updated)
     }
 

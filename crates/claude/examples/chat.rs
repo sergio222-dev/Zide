@@ -33,8 +33,12 @@ fn main() -> io::Result<()> {
                     print!("{chunk}");
                     io::stdout().flush()?;
                 }
-                Event::ToolUse { name } => eprintln!("\n[tool {name}]"),
-                Event::PermissionRequest { request_id, tool_name, input } => {
+                Event::ToolUse { name, .. } => eprintln!("\n[tool {name}]"),
+                Event::PermissionRequest {
+                    request_id,
+                    tool_name,
+                    input,
+                } => {
                     eprintln!("\n[allow {tool_name} {input}? y/N]");
                     let answer = lines.next().transpose()?.unwrap_or_default();
                     if answer.trim() == "y" {
@@ -43,7 +47,11 @@ fn main() -> io::Result<()> {
                         session.deny(&request_id, "denied by the user")?;
                     }
                 }
-                Event::Question { request_id, input, questions } => {
+                Event::Question {
+                    request_id,
+                    input,
+                    questions,
+                } => {
                     let mut answers = Vec::new();
                     for q in &questions {
                         eprintln!("\n[{}] {}", q.header, q.question);
@@ -51,17 +59,24 @@ fn main() -> io::Result<()> {
                             eprintln!("  {}) {} - {}", i + 1, o.label, o.description);
                         }
                         let pick = lines.next().transpose()?.unwrap_or_default();
-                        let index = pick.trim().parse::<usize>().unwrap_or(1).clamp(1, q.options.len());
+                        let index = pick
+                            .trim()
+                            .parse::<usize>()
+                            .unwrap_or(1)
+                            .clamp(1, q.options.len());
                         answers.push((q.question.as_str(), q.options[index - 1].label.as_str()));
                     }
                     session.answer(&request_id, &input, &answers)?;
                 }
-                Event::Result { is_error, cost_usd, .. } => {
+                Event::Result {
+                    is_error, cost_usd, ..
+                } => {
                     println!();
                     eprintln!("[turn done, error={is_error}, ${cost_usd:.3}]");
                     break;
                 }
-                Event::Other => {}
+                Event::Exit => return Ok(()),
+                _ => {}
             }
         }
     }
