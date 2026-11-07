@@ -8,6 +8,7 @@ use gpui_kit::*;
 use zide_claude::{Block, ToolCall, ToolOutput, Value};
 
 use super::{Chat, summary};
+use crate::markdown::TextView;
 use crate::{Workspace, theme};
 
 /// Monospace for code and output; GPUI falls back to its default font when it is missing.
@@ -292,6 +293,61 @@ impl Workspace {
             chat.toggled.insert(tool_id.to_owned());
         }
         cx.notify();
+    }
+
+    /// A `/context` answer: its head, then every section folded under its title.
+    pub(super) fn report_view(
+        &self,
+        chat: &Chat,
+        index: usize,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(report) = super::report::parse(text) else {
+            return div().child(text.to_owned()).into_any_element();
+        };
+        let part = |n: usize| {
+            chat.report_md
+                .get(&(index, n))
+                .map(|state| TextView::new(state).selectable(true))
+        };
+        let chat_id = chat.id;
+        let sections = report.sections.iter().enumerate().map(|(n, section)| {
+            let key = format!("report-{index}-{n}");
+            let open = super::report::starts_open(n) != chat.toggled.contains(&key);
+            let toggle = key.clone();
+            let header =
+                div()
+                    .id(SharedString::from(key))
+                    .flex()
+                    .gap_2()
+                    .text_sm()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.claude_toggle_tool(chat_id, &toggle, cx)
+                    }))
+                    .child(div().text_color(rgb(theme::DIM)).child(if open {
+                        "▾"
+                    } else {
+                        "▸"
+                    }))
+                    .child(
+                        div()
+                            .text_color(rgb(theme::STRONG))
+                            .child(section.title.clone()),
+                    );
+            Collapsible::new()
+                .open(open)
+                .child(header)
+                .content(div().pl_5().children(part(n + 1)))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .children(part(0))
+            .children(sections)
+            .into_any_element()
     }
 
     /// A tool call: its line, opening to the change it makes and what it printed.
