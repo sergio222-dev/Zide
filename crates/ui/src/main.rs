@@ -1649,26 +1649,20 @@ impl Workspace {
         }
     }
 
-    /// A row whose name is cut off on the right scrolls sideways so its icon sits at the left
-    /// edge; a row that fits shows the tree from the left again. Text width is estimated.
+    /// Scrolls the tree sideways so the icon of `row` sits in the middle of the panel, as far as
+    /// the width of the tree allows (a tree that fits does not scroll).
     fn scroll_tree_sideways(&self, row: usize) {
-        const CHAR: f32 = 7.5; // approximate advance of one character
         const ICON_AT: f32 = 24.; // chevron column + gap, after the indent
+        const ICON: f32 = 16.;
         let rows = self.tree.shared_rows();
         let Some(row) = rows.get(row) else { return };
         let handle = self.tree_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.width);
         let viewport = if viewport > 0. { viewport } else { TREE_WIDTH };
-        let icon_x = ICON_AT + 14. * row.depth as f32;
-        let right = icon_x + 20. + CHAR * row.name.chars().count() as f32 + 8.;
+        let icon_middle = ICON_AT + 14. * row.depth as f32 + ICON / 2.;
         let max = f32::from(handle.max_offset().x);
-        let x = if right > viewport {
-            -icon_x.min(max)
-        } else {
-            0.
-        };
         let mut offset = handle.offset();
-        offset.x = px(x);
+        offset.x = px(-(icon_middle - viewport / 2.).clamp(0., max));
         handle.set_offset(offset);
     }
 
@@ -1908,15 +1902,13 @@ impl Workspace {
                         (true, false) => Some(theme::TREE_SELECTED),
                         _ => None,
                     };
-                    // The row is as wide as the list, so its highlight spans it. What is in it is
-                    // centered in the width of the panel; a name too long for that overflows to
-                    // the right and the list scrolls sideways to it.
-                    let content = div()
+                    let line = div()
+                        .id(("tree-row", index))
+                        .w_full()
+                        .h(px(TREE_ROW_HEIGHT))
                         .flex()
                         .items_center()
-                        .justify_center()
                         .gap_1()
-                        .min_w(px(TREE_WIDTH))
                         .pl(px(8. + 14. * row.depth as f32))
                         .pr(px(16.))
                         .whitespace_nowrap()
@@ -1943,14 +1935,7 @@ impl Workspace {
                                     |d, kind| d.text_color(rgb(commit::kind_color(*kind))),
                                 )
                                 .child(row.name.clone()),
-                        );
-                    let line = div()
-                        .id(("tree-row", index))
-                        .w_full()
-                        .h(px(TREE_ROW_HEIGHT))
-                        .flex()
-                        .items_center()
-                        .child(content)
+                        )
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             workspace.update(cx, |this, cx| {
                                 this.tree_focused = true;
