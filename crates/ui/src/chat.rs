@@ -1092,7 +1092,8 @@ impl Workspace {
             .iter()
             .filter(|agent| agent.kind == Kind::Background)
             .count();
-        let ended = chats.status_of(chat) == Status::Inactive && !chat.is_empty();
+        let shown = chats.status_of(chat);
+        let ended = shown == Status::Inactive && !chat.is_empty();
         // a running process keeps the mode it started with; any other starts with the toggle's
         let bare = if chat.session.is_some() {
             chat.bare
@@ -1159,7 +1160,10 @@ impl Workspace {
                                     }))
                             }))
                             .children(blocks)
-                            .children(chat.busy().then(|| thinking(chat.status())))
+                            .children(
+                                matches!(shown, Status::Working | Status::NeedsUser)
+                                    .then(|| thinking(shown)),
+                            )
                             .children(chat.notice.iter().map(|notice| {
                                 div().text_color(rgb(theme::ERROR)).child(notice.clone())
                             }))
