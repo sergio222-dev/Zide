@@ -43,6 +43,20 @@ pub fn remember_font_size(root: &Path, size: f32) {
     write(root, "font-size", &size.to_string());
 }
 
+/// Whether the minimap is shown in this project; `None` when it was never decided.
+pub fn minimap(root: &Path) -> Option<bool> {
+    match fs::read_to_string(file_for(root, "minimap")).ok()?.trim() {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Best effort, like `remember_file`.
+pub fn remember_minimap(root: &Path, shown: bool) {
+    write(root, "minimap", if shown { "on" } else { "off" });
+}
+
 /// Where a file was left: the first line on screen and the caret (0-based lines and chars).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct View {
@@ -166,6 +180,18 @@ mod tests {
         remember_view(&root, "tab\there", place(1)); // not storable: ignored
         assert_eq!(view(&root, "tab\there"), None);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_minimap_choice_is_remembered_per_project() {
+        let root = std::env::temp_dir().join(format!("zide-minimap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(minimap(&root), None);
+        remember_minimap(&root, false);
+        assert_eq!(minimap(&root), Some(false));
+        remember_minimap(&root, true);
+        assert_eq!(minimap(&root), Some(true));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

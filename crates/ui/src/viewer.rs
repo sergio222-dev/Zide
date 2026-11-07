@@ -335,6 +335,8 @@ pub struct Viewer {
     /// Where the editor was drawn last, to turn a mouse position into a line and column.
     editor_bounds: Rc<Cell<Bounds<Pixels>>>,
     minimap_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// Whether the minimap is drawn.
+    minimap_shown: bool,
     /// The two ends of the pair under the caret (char ranges), for the revision and caret
     /// they were found at.
     pair: RefCell<Option<(PairKey, Pair)>>,
@@ -401,6 +403,7 @@ impl Viewer {
             hints: None,
             editor_bounds: Rc::default(),
             minimap_bounds: Rc::default(),
+            minimap_shown: true,
             changes: Arc::default(),
             pair: RefCell::new(None),
         };
@@ -1871,7 +1874,7 @@ impl Viewer {
                         .child(StyledText::new(shown.text.clone()).with_highlights(shown.styles()))
                 }))
         });
-        let minimap = self.minimap();
+        let minimap = self.minimap_shown.then(|| self.minimap());
         let list = uniform_list("viewer", rows.len(), move |range, _, _| {
             range
                 .map(|row| {
@@ -2073,8 +2076,12 @@ impl Viewer {
                             .children(sticky)
                             .children(popup),
                     )
-                    .child(minimap),
+                    .children(minimap),
             )
+    }
+
+    pub fn set_minimap(&mut self, shown: bool) {
+        self.minimap_shown = shown;
     }
 
     /// The minimap of the file: its tokens, and the lines that changed, have errors or hold the
