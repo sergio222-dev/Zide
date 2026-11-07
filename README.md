@@ -134,9 +134,9 @@ line says a new release is available.
 | `Alt+C` / `Alt+W` / `Alt+R` | Toggle case / whole word / regex in the find panel |
 
 In the Claude chat (`Alt+2` toggles it): `Alt+Up` / `Alt+Down` switch between open chats,
-`Alt+I` focuses the message input, `Esc` interrupts a running turn (or closes the chat when idle),
+`Alt+I` focuses the message input, `Alt+H` opens (or closes) the list of earlier conversations, `Esc` interrupts a running turn (or closes the chat when idle),
 `Ctrl+V` pastes an image, and `/` and `@` open the command and file menus. Earlier conversations
-are listed by **Claude: Resume Session** in Find Action (`Ctrl+Shift+A`).
+are also listed by **Claude: Resume Session** in Find Action (`Ctrl+Shift+A`).
 
 Vim fold keys (`za`, `zo`, `zc`, `zM`, `zR`) and scroll keys (`zt`, `zz`, `zb`, `Ctrl+D`,
 `Ctrl+U`) work in normal mode.
