@@ -2,6 +2,29 @@ use serde_json::Value;
 
 use crate::event::{Event, Question, Usage};
 
+/// How all the chats stand together, which is what the status bar shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overall {
+    /// No chat has a process.
+    Off,
+    /// At least one chat is thinking.
+    Working,
+    /// None is thinking and at least one waits for the user (a question counts as waiting).
+    Waiting,
+}
+
+impl Overall {
+    pub fn of(statuses: impl IntoIterator<Item = Status>) -> Overall {
+        statuses
+            .into_iter()
+            .fold(Overall::Off, |overall, status| match (overall, status) {
+                (Overall::Working, _) | (_, Status::Working) => Overall::Working,
+                (_, Status::Inactive) => overall,
+                _ => Overall::Waiting,
+            })
+    }
+}
+
 /// What the chat is doing, which is what an indicator shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -517,5 +540,40 @@ mod tests {
         t.apply(Event::Usage(usage));
         assert_eq!(t.session_id(), Some("s1"));
         assert_eq!(t.usage(), Some(usage));
+    }
+}
+
+#[cfg(test)]
+mod overall_tests {
+    use super::{Overall, Status};
+
+    #[test]
+    fn the_status_bar_is_off_without_a_process() {
+        assert_eq!(Overall::of([]), Overall::Off);
+        assert_eq!(
+            Overall::of([Status::Inactive, Status::Inactive]),
+            Overall::Off
+        );
+    }
+
+    #[test]
+    fn one_chat_thinking_is_enough_to_work() {
+        let all = [
+            Status::Idle,
+            Status::Working,
+            Status::NeedsUser,
+            Status::Inactive,
+        ];
+        assert_eq!(Overall::of(all), Overall::Working);
+        assert_eq!(Overall::of(all.into_iter().rev()), Overall::Working);
+    }
+
+    #[test]
+    fn waiting_when_none_thinks_and_one_has_a_process() {
+        assert_eq!(
+            Overall::of([Status::Inactive, Status::Idle]),
+            Overall::Waiting
+        );
+        assert_eq!(Overall::of([Status::NeedsUser]), Overall::Waiting);
     }
 }

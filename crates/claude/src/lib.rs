@@ -13,5 +13,5 @@ pub use event::{Event, Question, QuestionOption, Usage, parse_events};
 pub use serde_json::Value;
 pub use session::{Options, Session};
 pub use transcript::{
-    Ask, Block, Permission, Resolution, Status, ToolCall, ToolOutput, Transcript,
+    Ask, Block, Overall, Permission, Resolution, Status, ToolCall, ToolOutput, Transcript,
 };
