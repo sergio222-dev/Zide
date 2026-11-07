@@ -411,6 +411,110 @@ fn parse_branches(refs: &str, reflog: &str) -> Branches {
     branches
 }
 
+/// Runs git in `root`; the error is what git said. `network` commands never ask for a password
+/// on a terminal that is not there: they fail instead of hanging.
+fn run(root: &Path, args: &[&str], network: bool) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .stdin(std::process::Stdio::null());
+    if network {
+        command.env("GIT_TERMINAL_PROMPT", "0");
+    }
+    let output = command
+        .output()
+        .map_err(|e| format!("git could not run: {e}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if said.is_empty() {
+            format!("git {} failed", args.first().copied().unwrap_or(""))
+        } else {
+            said
+        })
+    }
+}
+
+/// Why `name` cannot be the name of a new local branch: empty, taken by one of `existing`, or
+/// not a name git accepts (spaces, `..`, a trailing `/`...).
+pub fn check_new_branch_name(root: &Path, name: &str, existing: &[String]) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("The branch name is empty".into());
+    }
+    if existing.iter().any(|e| e == name) {
+        return Err(format!("A branch named '{name}' already exists"));
+    }
+    // `--branch` also expands things like `@{-1}`, which are no names
+    if name.starts_with('@') && name != "@"
+        || run(root, &["check-ref-format", "--branch", name], false).is_err()
+    {
+        return Err(format!("'{name}' is not a valid branch name"));
+    }
+    Ok(())
+}
+
+/// Creates the branch `name` at `start` (a branch, local or remote) and checks it out; from a
+/// remote branch it tracks it.
+pub fn create_branch(root: &Path, name: &str, start: &str) -> Result<(), String> {
+    run(root, &["switch", "-c", name, start], false).map(drop)
+}
+
+/// Renames the local branch `old` to `new`. A tracked remote branch keeps its name.
+pub fn rename_branch(root: &Path, old: &str, new: &str) -> Result<(), String> {
+    run(root, &["branch", "-m", old, new], false).map(drop)
+}
+
+/// Brings the local branch `name` up to date with its upstream, only when that moves it forward
+/// (no merge, no rebase, nothing lost). The checked-out branch is pulled; another one is fetched
+/// into place.
+pub fn update_branch(root: &Path, name: &str, checked_out: bool) -> Result<(), String> {
+    let config = |key: &str| {
+        run(
+            root,
+            &["config", "--get", &format!("branch.{name}.{key}")],
+            false,
+        )
+    };
+    let (Ok(remote), Ok(merge)) = (config("remote"), config("merge")) else {
+        return Err(format!("'{name}' has no upstream branch to update from"));
+    };
+    if checked_out {
+        run(root, &["pull", "--ff-only"], true).map(drop)
+    } else {
+        let source = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+        run(root, &["fetch", &remote, &format!("{source}:{name}")], true).map(drop)
+    }
+}
+
+/// The remote `name` is pushed to: the one configured for it, the one it tracks, `origin`, or
+/// the only remote there is.
+pub fn push_remote(root: &Path, name: &str) -> Result<String, String> {
+    let config = |key: &str| run(root, &["config", "--get", key], false).ok();
+    if let Some(remote) = config(&format!("branch.{name}.pushRemote"))
+        .or_else(|| config("remote.pushDefault"))
+        .or_else(|| config(&format!("branch.{name}.remote")))
+        .filter(|remote| remote != ".")
+    {
+        return Ok(remote);
+    }
+    let remotes = run(root, &["remote"], false)?;
+    let remotes: Vec<&str> = remotes.lines().collect();
+    match remotes.as_slice() {
+        [] => Err("This repository has no remote to push to".into()),
+        [only] => Ok(only.to_string()),
+        _ if remotes.contains(&"origin") => Ok("origin".into()),
+        _ => Err("There is more than one remote and none is set for this branch".into()),
+    }
+}
+
+/// Pushes the local branch `name` to `remote`, which then tracks it. Never forced.
+pub fn push_branch(root: &Path, name: &str, remote: &str) -> Result<(), String> {
+    run(root, &["push", "--set-upstream", remote, name], true).map(drop)
+}
+
 /// What to check out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Switch {
@@ -463,7 +567,7 @@ pub fn switch(root: &Path, target: &Switch) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{fs, path::PathBuf};
 
     #[test]
     fn the_cache_text_gives_back_the_same_branches() {
@@ -538,6 +642,90 @@ mod tests {
             .status
             .success();
         assert!(ok, "git {args:?} failed");
+    }
+
+    /// An origin with `main`, and a clone of it.
+    fn origin_and_clone(tag: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("zide-{tag}-{}", std::process::id()));
+        let (origin, clone) = (base.join("origin"), base.join("clone"));
+        fs::create_dir_all(&origin).unwrap();
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        git_in(&origin, &["config", "receive.denyCurrentBranch", "ignore"]);
+        git_in(
+            &base,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+        (base, clone)
+    }
+
+    #[test]
+    fn a_new_branch_name_must_be_free_and_valid() {
+        let (base, clone) = origin_and_clone("names");
+        let existing = vec!["main".to_string()];
+        let check = |name: &str| check_new_branch_name(&clone, name, &existing);
+        assert_eq!(check("feat/x"), Ok(()));
+        assert!(check("").unwrap_err().contains("empty"));
+        assert!(check("main").unwrap_err().contains("already exists"));
+        for bad in ["a b", "x..y", "/x", "x/", "x.lock", "@{-1}", "-x"] {
+            assert!(check(bad).unwrap_err().contains("not a valid"), "{bad}");
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn branches_are_created_renamed_updated_and_pushed() {
+        let (base, clone) = origin_and_clone("ops");
+        let name = |dir: &Path| branch_status(dir).unwrap().name;
+
+        // new branch from another one, checked out
+        assert_eq!(create_branch(&clone, "feat/a", "main"), Ok(()));
+        assert_eq!(name(&clone), "feat/a");
+        assert!(create_branch(&clone, "feat/a", "main").is_err());
+
+        // rename
+        assert_eq!(rename_branch(&clone, "feat/a", "feat/b"), Ok(()));
+        assert_eq!(name(&clone), "feat/b");
+        assert!(rename_branch(&clone, "feat/b", "main").is_err());
+
+        // push: the remote is found, the branch then tracks it
+        assert_eq!(push_remote(&clone, "feat/b"), Ok("origin".to_string()));
+        assert_eq!(push_branch(&clone, "feat/b", "origin"), Ok(()));
+        assert!(branch_status(&clone).unwrap().tracked);
+
+        // update a branch that is not checked out (`feat/b` is), moving it forward only
+        let origin = base.join("origin");
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "second"]);
+        assert_eq!(update_branch(&clone, "main", false), Ok(()));
+        let head = |dir: &Path, rev: &str| run(dir, &["rev-parse", rev], false).unwrap();
+        assert_eq!(head(&clone, "main"), head(&origin, "main"));
+        // and the checked-out one
+        git_in(&clone, &["switch", "-q", "main"]);
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "third"]);
+        assert_eq!(update_branch(&clone, "main", true), Ok(()));
+        assert_eq!(head(&clone, "main"), head(&origin, "main"));
+        // a branch without upstream has nothing to update from
+        git_in(&clone, &["branch", "lonely"]);
+        assert!(
+            update_branch(&clone, "lonely", false)
+                .unwrap_err()
+                .contains("no upstream")
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn the_push_remote_is_none_without_remotes() {
+        let dir = std::env::temp_dir().join(format!("zide-noremote-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q", "-b", "main"]);
+        assert!(push_remote(&dir, "main").unwrap_err().contains("no remote"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

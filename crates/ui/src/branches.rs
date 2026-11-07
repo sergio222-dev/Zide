@@ -4,15 +4,19 @@
 
 use std::{collections::BTreeMap, collections::HashSet, sync::Arc};
 
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::*;
+use std::path::PathBuf;
+
 use zide_git::{Branches, Switch};
 
 use crate::{Workspace, file_icon, theme};
 
 const ROW_HEIGHT: f32 = 24.;
+/// Where the rows start inside the popup: its padding, the search field and the gap under it.
+const MENU_LIST_TOP: f32 = 52.;
 const SECTIONS: [(&str, &str); 3] = [
     ("recent", "Recent"),
     ("local", "Local"),
@@ -102,6 +106,19 @@ impl Model {
             })
             .or_else(|| self.first_branch())
             .unwrap_or(0);
+    }
+
+    /// The names of the local branches.
+    pub fn local_names(&self) -> Vec<String> {
+        self.data.local.iter().map(|b| b.name.clone()).collect()
+    }
+
+    /// What the selected row checks out, when it is a branch.
+    pub fn selected_target(&self) -> Option<Switch> {
+        match &self.rows.get(self.selected)?.kind {
+            Kind::Branch { target, .. } => Some(target.clone()),
+            _ => None,
+        }
     }
 
     pub fn rows(&self) -> Arc<Vec<Row>> {
@@ -312,12 +329,44 @@ fn expand_folders(expanded: &mut HashSet<String>, section: &str, name: &str) {
     }
 }
 
+/// What the context menu of a branch asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchAction {
+    /// A new branch that starts at this one (local, or remote like `origin/main`).
+    NewFrom(String),
+    /// Brings a local branch up to date with its upstream.
+    Update(String),
+    Push(String),
+    Rename(String),
+}
+
+/// The entries of the context menu of a branch: a remote one can only start new branches.
+pub fn menu_entries(target: &Switch) -> Vec<(String, BranchAction)> {
+    match target {
+        Switch::Local(name) => vec![
+            (
+                format!("New Branch from '{name}'…"),
+                BranchAction::NewFrom(name.clone()),
+            ),
+            ("Update".into(), BranchAction::Update(name.clone())),
+            ("Push…".into(), BranchAction::Push(name.clone())),
+            ("Rename…".into(), BranchAction::Rename(name.clone())),
+        ],
+        Switch::Remote(name) => vec![(
+            format!("New Branch from '{name}'…"),
+            BranchAction::NewFrom(name.clone()),
+        )],
+    }
+}
+
 pub struct BranchPopup {
     pub input: Entity<InputState>,
     pub model: Model,
     pub scroll: UniformListScrollHandle,
     /// The branches are being read again; what is listed may be from the last run.
     pub loading: bool,
+    /// The entry chosen in the menu of the selected branch, while that menu is open.
+    pub menu: Option<usize>,
     pub _subscription: Subscription,
 }
 
@@ -333,11 +382,58 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
     let rows = popup.model.rows();
     let selected = popup.model.selected();
     let workspace = cx.entity();
+    let menu = popup
+        .menu
+        .zip(popup.model.selected_target())
+        .map(|(chosen, target)| {
+            // beside the selected row, wherever the list is scrolled to
+            let scrolled = f32::from(popup.scroll.0.borrow().base_handle.offset().y);
+            let top = (MENU_LIST_TOP + selected as f32 * ROW_HEIGHT + scrolled)
+                .clamp(MENU_LIST_TOP, MENU_LIST_TOP + 400.);
+            div()
+                .absolute()
+                .left_full()
+                .ml_1()
+                .top(px(top))
+                .min_w(px(240.))
+                .py_1()
+                .flex()
+                .flex_col()
+                .bg(rgb(theme::POPUP))
+                .border_1()
+                .border_color(rgb(theme::CONTROL_BORDER))
+                .rounded_md()
+                .children(menu_entries(&target).into_iter().enumerate().map(
+                    |(position, (label, action))| {
+                        let workspace = workspace.clone();
+                        let line = div()
+                            .id(("branch-menu", position))
+                            .h(px(ROW_HEIGHT))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .whitespace_nowrap()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                workspace.update(cx, |this, cx| {
+                                    this.branch_action(action.clone(), window, cx)
+                                });
+                            })
+                            .child(label);
+                        if position == chosen {
+                            line.bg(rgb(theme::TREE_FOCUSED))
+                        } else {
+                            line
+                        }
+                    },
+                ))
+        });
     let list = uniform_list("branch-rows", rows.len(), move |range, _, _| {
         range
             .map(|index| {
                 let row = &rows[index];
                 let workspace = workspace.clone();
+                let select = workspace.clone();
                 let line = div()
                     .id(("branch-row", index))
                     .w_full()
@@ -349,9 +445,16 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
                     .pr_2()
                     .whitespace_nowrap()
                     .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        workspace
-                            .update(cx, |this, cx| this.activate_branch_row(index, window, cx));
+                    .on_mouse_down(MouseButton::Left, {
+                        let workspace = workspace.clone();
+                        move |_, window, cx| {
+                            workspace
+                                .update(cx, |this, cx| this.activate_branch_row(index, window, cx));
+                        }
+                    })
+                    // the menu opens on the row it was asked on, which is then the selected one
+                    .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                        select.update(cx, |this, cx| this.open_branch_menu(Some(index), cx));
                     });
                 let line = match &row.kind {
                     Kind::Section { expanded } => line
@@ -383,11 +486,12 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
                                 .child(upstream)
                         })),
                 };
-                if index == selected {
+                let line = if index == selected {
                     line.bg(rgb(theme::TREE_FOCUSED))
                 } else {
                     line
-                }
+                };
+                line.into_any_element()
             })
             .collect()
     })
@@ -426,6 +530,85 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
                 })),
         )
         .child(list)
+        .children(menu)
+}
+
+/// The content of the dialogs that ask for a branch name: the field, and why the name typed is
+/// not good (it exists, or git does not take it).
+pub struct NameDialog {
+    input: Entity<InputState>,
+    error: Option<String>,
+    root: PathBuf,
+    /// The local branches: a name among them is taken.
+    existing: Vec<String>,
+    _subscription: Subscription,
+}
+
+impl NameDialog {
+    pub fn new(
+        root: PathBuf,
+        existing: Vec<String>,
+        initial: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| InputState::new(window, cx));
+        input.update(cx, |state, cx| state.set_value(initial, window, cx));
+        let subscription = cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.validate(cx);
+            }
+        });
+        Self {
+            input,
+            error: None,
+            root,
+            existing,
+            _subscription: subscription,
+        }
+    }
+
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        self.input.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    fn typed(&self, cx: &App) -> String {
+        self.input.read(cx).value().trim().to_string()
+    }
+
+    fn validate(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let name = self.typed(cx);
+        self.error = zide_git::check_new_branch_name(&self.root, &name, &self.existing).err();
+        cx.notify();
+        self.error.is_none().then_some(name)
+    }
+
+    /// The name typed, when it is good; otherwise the reason is shown and there is none.
+    pub fn submit(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        self.validate(cx)
+    }
+}
+
+impl Render for NameDialog {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child("Branch Name:")
+                    .child(div().flex_1().child(Input::new(&self.input))),
+            )
+            .children(
+                self.error
+                    .clone()
+                    .map(|error| div().text_xs().text_color(rgb(theme::ERROR)).child(error)),
+            )
+    }
 }
 
 #[cfg(test)]
@@ -567,6 +750,27 @@ mod tests {
         newest.local.push(local("zeta", None));
         model.replace(newest);
         assert_eq!(shown(&model), ["Local/", "  zeta"]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn local_branches_offer_four_actions_and_remote_ones_only_new_branch() {
+        let labels = |target: Switch| -> Vec<String> {
+            menu_entries(&target)
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect()
+        };
+        assert_eq!(
+            labels(Switch::Local("feat/x".into())),
+            ["New Branch from 'feat/x'…", "Update", "Push…", "Rename…"]
+        );
+        assert_eq!(
+            menu_entries(&Switch::Remote("origin/main".into())),
+            [(
+                "New Branch from 'origin/main'…".to_string(),
+                BranchAction::NewFrom("origin/main".into())
+            )]
+        );
     }
 
     #[::core::prelude::v1::test]
