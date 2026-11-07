@@ -105,6 +105,9 @@ pub struct Transcript {
     alive: bool,
     usage: Option<Usage>,
     cost_usd: f64,
+    /// The model and effort of the latest reply, from a stored conversation or a running one.
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 impl Default for Transcript {
@@ -116,6 +119,8 @@ impl Default for Transcript {
             alive: true,
             usage: None,
             cost_usd: 0.0,
+            model: None,
+            effort: None,
         }
     }
 }
@@ -131,6 +136,26 @@ impl Transcript {
 
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// The model that made the latest reply, if it is known.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// The effort the latest reply was made with, if it is known.
+    pub fn effort(&self) -> Option<&str> {
+        self.effort.as_deref()
+    }
+
+    /// Records what a reply was made with; what is not known keeps its earlier value.
+    pub(crate) fn note_settings(&mut self, model: Option<&str>, effort: Option<&str>) {
+        if let Some(model) = model {
+            self.model = Some(model.to_owned());
+        }
+        if let Some(effort) = effort {
+            self.effort = Some(effort.to_owned());
+        }
     }
 
     pub fn usage(&self) -> Option<Usage> {
@@ -186,7 +211,14 @@ impl Transcript {
 
     pub fn apply(&mut self, event: Event) {
         match event {
-            Event::Init { session_id, .. } => self.session_id = Some(session_id),
+            Event::Init {
+                session_id, model, ..
+            } => {
+                self.session_id = Some(session_id);
+                if model.is_some() {
+                    self.model = model;
+                }
+            }
             Event::TextDelta(chunk) => match self.blocks.last_mut() {
                 Some(Block::Text(text)) => text.push_str(&chunk),
                 _ => self.blocks.push(Block::Text(chunk)),
@@ -536,6 +568,7 @@ mod tests {
         t.apply(Event::Init {
             session_id: "s1".into(),
             commands: Vec::new(),
+            model: None,
         });
         let usage = Usage {
             context_tokens: 10,
@@ -579,5 +612,19 @@ mod overall_tests {
             Overall::Waiting
         );
         assert_eq!(Overall::of([Status::NeedsUser]), Overall::Waiting);
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::Transcript;
+
+    #[test]
+    fn the_latest_known_model_and_effort_stay() {
+        let mut t = Transcript::new();
+        assert_eq!((t.model(), t.effort()), (None, None));
+        t.note_settings(Some("claude-a"), Some("high"));
+        t.note_settings(Some("claude-b"), None);
+        assert_eq!((t.model(), t.effort()), (Some("claude-b"), Some("high")));
     }
 }

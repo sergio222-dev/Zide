@@ -145,6 +145,7 @@ pub fn load_from(path: &Path, id: &str) -> io::Result<Transcript> {
     transcript.apply(Event::Init {
         session_id: id.to_owned(),
         commands: Vec::new(),
+        model: None,
     });
     for line in BufReader::new(fs::File::open(path)?)
         .lines()
@@ -198,6 +199,13 @@ fn replay_user(record: &Value, transcript: &mut Transcript) {
 }
 
 fn replay_assistant(record: &Value, transcript: &mut Transcript) {
+    // each reply says what it was made with: the last one is what the conversation ends on
+    transcript.note_settings(
+        record["message"]["model"]
+            .as_str()
+            .filter(|model| !model.starts_with('<')),
+        record["effort"].as_str(),
+    );
     for block in record["message"]["content"]
         .as_array()
         .into_iter()
@@ -277,6 +285,22 @@ mod tests {
     const RESULT: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a.rs"}]}}"#;
     const ANSWER: &str =
         r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hay a.rs"}]}}"#;
+
+    #[test]
+    fn the_model_and_effort_of_the_last_reply_are_kept() {
+        let scratch = Scratch::new();
+        let path = scratch.write(
+            "s.jsonl",
+            &[
+                r#"{"type":"assistant","effort":"low","message":{"model":"claude-a","content":[{"type":"text","text":"one"}]}}"#,
+                r#"{"type":"assistant","effort":"high","message":{"model":"<synthetic>","content":[{"type":"text","text":"two"}]}}"#,
+                r#"{"type":"assistant","message":{"model":"claude-b","content":[{"type":"text","text":"three"}]}}"#,
+            ],
+        );
+        let transcript = load_from(&path, "s").unwrap();
+        assert_eq!(transcript.model(), Some("claude-b"));
+        assert_eq!(transcript.effort(), Some("high"));
+    }
 
     #[test]
     fn the_folder_name_replaces_everything_but_letters_and_digits() {

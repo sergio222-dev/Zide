@@ -31,6 +31,8 @@ pub enum Event {
     Init {
         session_id: String,
         commands: Vec<String>,
+        /// The model the session runs, as its full name.
+        model: Option<String>,
     },
     /// A chunk of the assistant's text as it is produced.
     TextDelta(String),
@@ -145,6 +147,7 @@ pub fn parse_events(line: &str) -> Vec<Event> {
                     .flatten()
                     .filter_map(|name| name.as_str().map(str::to_owned))
                     .collect(),
+                model: value["model"].as_str().map(str::to_owned),
             })
             .into_iter()
             .collect(),
@@ -231,12 +234,13 @@ mod tests {
 
     #[test]
     fn init_carries_the_session_id_and_the_commands() {
-        let line = r#"{"type":"system","subtype":"init","session_id":"abc","cwd":"/x","slash_commands":["compact","review"]}"#;
+        let line = r#"{"type":"system","subtype":"init","session_id":"abc","cwd":"/x","slash_commands":["compact","review"],"model":"claude-x"}"#;
         assert_eq!(
             one(line),
             Event::Init {
                 session_id: "abc".into(),
                 commands: vec!["compact".into(), "review".into()],
+                model: Some("claude-x".into()),
             }
         );
         let bare = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
@@ -245,6 +249,7 @@ mod tests {
             Event::Init {
                 session_id: "abc".into(),
                 commands: Vec::new(),
+                model: None,
             }
         );
     }

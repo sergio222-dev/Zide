@@ -46,6 +46,10 @@ pub struct Options<'a> {
     pub resume: Option<&'a str>,
     /// `claude --permission-mode`; `None` keeps whatever the user's settings say.
     pub permission_mode: Option<&'a str>,
+    /// `claude --model`: an alias (`opus`, `sonnet`) or a full name; `None` keeps the default.
+    pub model: Option<&'a str>,
+    /// `claude --effort`: `low`, `medium`, `high`, `xhigh` or `max`; `None` keeps the default.
+    pub effort: Option<&'a str>,
     /// Starts `claude` bare-bones: none of the user's settings, hooks, plugins, MCP servers
     /// or skills, and only the `Read` tool. A turn then costs about 8k tokens instead of the
     /// 140k a heavy setup adds (measured), which is what tests that spend real tokens want.
@@ -75,6 +79,12 @@ impl Session {
         }
         if let Some(mode) = options.permission_mode {
             command.args(["--permission-mode", mode]);
+        }
+        if let Some(model) = options.model {
+            command.args(["--model", model]);
+        }
+        if let Some(effort) = options.effort {
+            command.args(["--effort", effort]);
         }
         if options.minimal {
             command
@@ -121,6 +131,24 @@ impl Session {
             "type": "control_request",
             "request_id": "interrupt",
             "request": {"subtype": "interrupt"},
+        }))
+    }
+
+    /// Switches the model for the turns to come, without restarting the process.
+    pub fn set_model(&mut self, model: &str) -> io::Result<()> {
+        self.write(&json!({
+            "type": "control_request",
+            "request_id": "set-model",
+            "request": {"subtype": "set_model", "model": model},
+        }))
+    }
+
+    /// Changes the effort for the turns to come, without restarting the process.
+    pub fn set_effort(&mut self, effort: &str) -> io::Result<()> {
+        self.write(&json!({
+            "type": "control_request",
+            "request_id": "set-effort",
+            "request": {"subtype": "apply_flag_settings", "settings": {"effortLevel": effort}},
         }))
     }
 
