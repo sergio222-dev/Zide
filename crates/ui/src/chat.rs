@@ -2,6 +2,7 @@
 //! conversation itself is `zide_claude::Transcript`; this module owns the process, turns
 //! its events into UI state and draws the history and the input box.
 
+mod asks;
 mod images;
 mod menu;
 mod sessions;
@@ -19,10 +20,6 @@ use zide_claude::{
 
 use crate::markdown::{TextView, TextViewState};
 use crate::{Workspace, theme};
-
-/// What a question tells Claude while the chat cannot show questions yet.
-const NO_QUESTIONS: &str =
-    "This chat cannot show multiple-choice questions yet. Ask in plain text instead.";
 
 /// The conversations that are open, one of them showing.
 pub struct Chats {
@@ -90,6 +87,8 @@ pub struct Chat {
     next_image: u32,
     /// The pictures sent with each message, by the index of its block.
     sent_images: HashMap<usize, Vec<images::Numbered>>,
+    /// The questionnaire of each question that waits for an answer, by request id.
+    asks: asks::Asks,
     /// The highlighted entry of the `/` and `@` menu, among the matches.
     menu_selected: usize,
     /// Esc closed the menu; typing opens it again.
@@ -139,6 +138,7 @@ impl Chat {
             input,
             markdown: HashMap::new(),
             scroll: ScrollHandle::new(),
+            asks: HashMap::new(),
             images: Vec::new(),
             next_image: 1,
             sent_images: HashMap::new(),
@@ -377,22 +377,12 @@ impl Workspace {
             return;
         };
         let follow = chat.at_bottom();
-        let question = match &event {
-            Event::Question { request_id, .. } => Some(request_id.clone()),
-            _ => None,
-        };
         if matches!(event, Event::Exit) {
             chat.session = None;
         }
 
         chat.transcript.apply(event);
         chat.sync_markdown(cx);
-        if let Some(request_id) = question {
-            if let Some(session) = &mut chat.session {
-                let _ = session.deny(&request_id, NO_QUESTIONS);
-            }
-            chat.transcript.resolve(&request_id, Resolution::Denied);
-        }
         if follow {
             chat.scroll.scroll_to_bottom();
         }
@@ -615,6 +605,7 @@ impl Workspace {
 
     /// The chat, filling the area where the editor would be.
     pub(crate) fn claude_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        self.ensure_asks(window, cx);
         let popup = self.sessions_view(window, cx);
         let Some(chats) = &self.claude else {
             return div();
@@ -771,12 +762,7 @@ impl Workspace {
                 .into_any_element(),
             Block::Tool(call) => tool_line(call).into_any_element(),
             Block::Permission(permission) => self.permission_card(chat.id, index, permission, cx),
-            // Questions are denied on arrival until the chat can show them.
-            Block::Question(_) => div()
-                .text_sm()
-                .text_color(rgb(theme::DIM))
-                .child("Claude asked a question the chat cannot show yet.")
-                .into_any_element(),
+            Block::Question(ask) => self.ask_card(chat, ask, cx),
             Block::Interrupted => div()
                 .text_sm()
                 .text_color(rgb(theme::DIM))

@@ -75,6 +75,8 @@ pub struct Permission {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ask {
     pub request_id: String,
+    /// The request's input, which the answers are added to when it is allowed.
+    pub input: Value,
     pub questions: Vec<Question>,
     pub resolution: Option<Resolution>,
 }
@@ -230,10 +232,11 @@ impl Transcript {
             })),
             Event::Question {
                 request_id,
+                input,
                 questions,
-                ..
             } => self.blocks.push(Block::Question(Ask {
                 request_id,
+                input,
                 questions,
                 resolution: None,
             })),
