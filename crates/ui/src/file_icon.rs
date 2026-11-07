@@ -26,6 +26,11 @@ pub struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if path == crate::statusbar::BRANCH_ICON {
+            return Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "../icons/git-branch.svg"
+            ))));
+        }
         match TreeIcons.load(path)? {
             Some(icon) => Ok(Some(icon)),
             None => Assets.load(path),
@@ -34,6 +39,9 @@ impl AssetSource for AppAssets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = TreeIcons.list(path)?;
+        if crate::statusbar::BRANCH_ICON.starts_with(path) {
+            paths.push(crate::statusbar::BRANCH_ICON.into());
+        }
         paths.extend(Assets.list(path)?);
         Ok(paths)
     }

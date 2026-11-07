@@ -222,10 +222,108 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (yoe + era * 400 + i64::from(month <= 2), month, day)
 }
 
+/// Where the checked-out branch stands against the one it tracks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchStatus {
+    /// The branch name, or the short commit when HEAD is detached.
+    pub name: String,
+    /// Whether it has an upstream to compare with; without one `ahead` and `behind` are 0.
+    pub tracked: bool,
+    /// Commits to push.
+    pub ahead: u32,
+    /// Commits to pull.
+    pub behind: u32,
+}
+
+/// The branch of the repository at `root` and how far it is from its upstream, as of the last
+/// fetch. `None` when git is missing or `root` is not a repository.
+pub fn branch_status(root: &Path) -> Option<BranchStatus> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--untracked-files=no",
+        ])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| parse_branch_status(&String::from_utf8_lossy(&output.stdout)))
+        .flatten()
+}
+
+/// Reads the `# branch.*` headers of `git status --porcelain=v2 --branch`.
+fn parse_branch_status(output: &str) -> Option<BranchStatus> {
+    let header = |key: &str| {
+        output.lines().find_map(|line| {
+            line.strip_prefix("# ")?
+                .strip_prefix(key)?
+                .strip_prefix(' ')
+        })
+    };
+    let name = match header("branch.head")? {
+        "(detached)" => header("branch.oid")?.chars().take(7).collect(),
+        head => head.to_string(),
+    };
+    let counts = header("branch.ab").and_then(|ab| {
+        let (ahead, behind) = ab.split_once(' ')?;
+        Some((
+            ahead.strip_prefix('+')?.parse().ok()?,
+            behind.strip_prefix('-')?.parse().ok()?,
+        ))
+    });
+    Some(BranchStatus {
+        name,
+        tracked: counts.is_some(),
+        ahead: counts.map_or(0, |(ahead, _)| ahead),
+        behind: counts.map_or(0, |(_, behind)| behind),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn the_branch_status_reads_the_headers_of_git_status() {
+        let status = |text| parse_branch_status(text);
+        let diverged = "# branch.oid abc\n# branch.head feat/x\n# branch.upstream origin/feat/x\n# branch.ab +4 -2\n";
+        assert_eq!(
+            status(diverged),
+            Some(BranchStatus {
+                name: "feat/x".into(),
+                tracked: true,
+                ahead: 4,
+                behind: 2
+            })
+        );
+        let local = "# branch.oid abc\n# branch.head wip\n";
+        assert_eq!(
+            status(local),
+            Some(BranchStatus {
+                name: "wip".into(),
+                tracked: false,
+                ahead: 0,
+                behind: 0
+            })
+        );
+        let detached = "# branch.oid 0123456789abcdef\n# branch.head (detached)\n";
+        assert_eq!(status(detached).map(|b| b.name), Some("0123456".into()));
+        assert_eq!(status(""), None);
+    }
+
+    #[test]
+    fn branch_status_of_a_folder_that_is_no_repository_is_none() {
+        let dir = std::env::temp_dir().join(format!("zide-nogit-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(branch_status(&dir), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     fn line(author: &str, time: i64, tz_minutes: i32) -> BlameLine {
         BlameLine {

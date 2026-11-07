@@ -206,6 +206,19 @@ pub enum Effect {
     GoToDefinition,
 }
 
+/// What the status bar shows of the open file.
+pub struct ViewerStatus {
+    pub mode: &'static str,
+    /// What is typed so far of an unfinished vim command.
+    pub pending: String,
+    pub dirty: bool,
+    /// A message for the user (a failed save, a jump by fallback).
+    pub notice: Option<String>,
+    /// Cursor position, 1-based.
+    pub line: usize,
+    pub column: usize,
+}
+
 /// A search over the buffer: the query, and where it matches (char ranges).
 struct FindState {
     finder: Option<Finder>,
@@ -745,6 +758,24 @@ impl Viewer {
         self.unfold_hiding(row);
         self.scroll
             .scroll_to_item(self.rows.row_of(row), ScrollStrategy::Top);
+    }
+
+    /// What the status bar shows of this file.
+    pub fn status(&self) -> ViewerStatus {
+        let at = self.buffer.position_of(self.vim.cursor());
+        ViewerStatus {
+            mode: match self.vim.mode() {
+                Mode::Normal => "NORMAL",
+                Mode::Insert => "INSERT",
+                Mode::Visual => "VISUAL",
+                Mode::VisualLine => "VISUAL LINE",
+            },
+            pending: self.pending_keys(),
+            dirty: self.is_dirty(),
+            notice: self.notice.clone(),
+            line: at.line + 1,
+            column: at.column + 1,
+        }
     }
 
     /// Shows `notice` in the status line (`None` clears it).
@@ -2033,27 +2064,6 @@ impl Viewer {
                     .child(Scrollbar::new(&self.scroll))
                     .children(sticky)
                     .children(popup),
-            )
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .flex()
-                    .gap_3()
-                    .text_color(rgb(theme::MUTED))
-                    .child(match self.vim.mode() {
-                        Mode::Normal => "NORMAL",
-                        Mode::Insert => "INSERT",
-                        Mode::Visual => "VISUAL",
-                        Mode::VisualLine => "VISUAL LINE",
-                    })
-                    .child(self.pending_keys())
-                    .child(if self.is_dirty() { "[+]" } else { "" })
-                    .child(self.notice.clone().unwrap_or_default())
-                    .child(div().ml_auto().child({
-                        let at = self.buffer.position_of(self.vim.cursor());
-                        format!("{}:{}", at.line + 1, at.column + 1)
-                    })),
             )
     }
 }
