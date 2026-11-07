@@ -126,6 +126,7 @@ line says a new release is available.
 | `Alt+1` | Toggle project tree |
 | `Alt+Shift+\`` | Scroll the project tree to the open file and select it |
 | `Alt+2` | Commit panel: tick files, write a message, **Commit** or **Commit and Push…** (`Amend` folds them into the last commit) |
+| Double click on a commit panel file | Its changes against the last commit, side by side, in a large dialog (`Esc` closes) |
 | `m` / `d` / `y` / `p` | In the tree: move or rename (a popup with the path, Enter applies, Esc closes), delete (asks first), copy, paste (into the selected folder; a taken name gets ` copy`) |
 | `Ctrl+Shift+-` / `Ctrl+Shift+=` | With the tree focused: collapse / expand every folder (the buttons on top of the tree do the same) |
 | `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Navigate back / forward (also the mouse's back and forward buttons) |

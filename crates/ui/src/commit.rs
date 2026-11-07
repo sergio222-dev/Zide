@@ -94,6 +94,11 @@ impl Changes {
         self.changes.len()
     }
 
+    /// The change of the file at `path`.
+    pub fn change(&self, path: &str) -> Option<&FileChange> {
+        self.changes.iter().find(|change| change.path == path)
+    }
+
     /// The tree: directories that hold a single directory and no file are shown as one row, as
     /// `apps/api/src`.
     pub fn rows(&self) -> Vec<Row> {
@@ -429,7 +434,8 @@ impl Workspace {
                         let key = row.key.clone();
                         let foldable = !matches!(row.kind, RowKind::File(_));
                         let (on_check, on_fold) = (workspace.clone(), workspace.clone());
-                        let (check_key, fold_key) = (key.clone(), key);
+                        let on_open = workspace.clone();
+                        let (check_key, fold_key, open_key) = (key.clone(), key.clone(), key);
                         div()
                             .id(("commit-row", index))
                             .w_full()
@@ -440,6 +446,15 @@ impl Workspace {
                             .pl(px(8. + 14. * row.depth as f32))
                             .pr(px(8.))
                             .whitespace_nowrap()
+                            .when(!foldable, |d| {
+                                d.on_click(move |event, window, cx| {
+                                    if event.click_count() == 2 {
+                                        on_open.update(cx, |this, cx| {
+                                            this.show_diff(&open_key, window, cx)
+                                        });
+                                    }
+                                })
+                            })
                             .child(
                                 div()
                                     .id(("commit-fold", index))

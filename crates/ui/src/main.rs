@@ -18,6 +18,7 @@ mod branches;
 mod chat;
 mod commit;
 mod definition;
+mod diff_view;
 mod file_icon;
 mod fileops;
 mod indent;

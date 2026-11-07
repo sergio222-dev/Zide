@@ -1029,6 +1029,28 @@ fn parse_changes(output: &str) -> Vec<FileChange> {
     changes
 }
 
+/// The patch of `change` against the last commit, whole file included (not only the lines around
+/// the changes) so the viewer can fold what did not change. An untracked file is all additions.
+pub fn diff(root: &Path, change: &FileChange) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--no-color", "--no-ext-diff", "--unified=1000000"]);
+    if change.kind == ChangeKind::Untracked {
+        command.args(["--no-index", "--", "/dev/null", &change.path]);
+    } else {
+        command.args(["HEAD", "-M", "--"]);
+        command.args(change.from.iter().chain([&change.path]));
+    }
+    let output = command.output().map_err(|why| why.to_string())?;
+    // `--no-index` exits with 1 when the files differ
+    match output.status.code() {
+        Some(0 | 1) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+        _ => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+    }
+}
+
 /// Commits `paths` (and nothing else, whatever else is staged) with `message`. `amend` folds them
 /// into the last commit; an empty message then keeps that commit's.
 pub fn commit(root: &Path, paths: &[String], message: &str, amend: bool) -> Result<(), String> {
@@ -1097,6 +1119,29 @@ mod commit_tests {
         );
         assert_eq!(changes[3].from.as_deref(), Some("old.rs"));
         assert!(parse_changes("").is_empty());
+    }
+
+    #[test]
+    fn diff_has_the_whole_file_for_tracked_and_untracked_changes() {
+        let dir = repo("diff");
+        let lines: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        fs::write(dir.join("a.txt"), &lines).unwrap();
+        run(&dir, &["add", "."], false).unwrap();
+        run(&dir, &["commit", "-qm", "first"], false).unwrap();
+        fs::write(dir.join("a.txt"), lines.replace("line 10\n", "ten\n")).unwrap();
+        fs::write(dir.join("new.txt"), "hello\n").unwrap();
+
+        let change = |path: &str, kind| FileChange {
+            path: path.into(),
+            from: None,
+            kind,
+        };
+        let tracked = diff(&dir, &change("a.txt", ChangeKind::Modified)).unwrap();
+        assert!(tracked.contains("-line 10") && tracked.contains("+ten"));
+        assert!(tracked.contains(" line 1\n") && tracked.contains(" line 20\n"));
+        let untracked = diff(&dir, &change("new.txt", ChangeKind::Untracked)).unwrap();
+        assert!(untracked.contains("+hello"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
