@@ -36,6 +36,8 @@ Only Linux x86_64 is published for now.
 - **Branch switcher** (``Ctrl+Shift+` ``, click the branch in the status bar, or Find Action → *Switch Branch*): Recent, Local and
   Remote branches as folder trees (`feat/` holds `feat/*`), searchable; Enter checks out, a remote branch gets a
   tracking local one.
+  Right-click a branch for its menu: *New Branch from…*, *Update* (fast-forward only), *Push…* (asks first, never forced)
+  and *Rename* (the dialog refuses a name that already exists).
 - **Code folding** for blocks, declarations, imports and long comments, with gutter chevrons.
 - **Git blame** in gray after the cursor line: author's last name, date, time and commit summary.
 - **Matching pairs**: the caret on a bracket highlights its partner; on a JSX tag name, the other tag; on the `:` of a Python block, the block's last line.

@@ -2060,6 +2060,7 @@ impl Workspace {
             model: branches::Model::new(cached),
             scroll: UniformListScrollHandle::new(),
             loading: true,
+            menu: None,
             _subscription: subscription,
         };
         popup.reveal_selected();
@@ -2106,12 +2107,18 @@ impl Workspace {
         let Some(popup) = &mut self.branches else {
             return;
         };
+        if let Some(chosen) = popup.menu {
+            return self.branch_menu_key(chosen, event.keystroke.key.as_str(), window, cx);
+        }
         match event.keystroke.key.as_str() {
             "escape" => return self.close_branches_stopping(window, cx),
             "down" => popup.model.move_by(1),
             "up" => popup.model.move_by(-1),
             "pagedown" => popup.model.move_by(10),
             "pageup" => popup.model.move_by(-10),
+            "right" if popup.model.selected_target().is_some() => {
+                return self.open_branch_menu(None, cx);
+            }
             "right" => popup.model.fold(true),
             "left" => popup.model.fold(false),
             "enter" => {
@@ -2135,6 +2142,7 @@ impl Workspace {
         let Some(popup) = &mut self.branches else {
             return;
         };
+        popup.menu = None;
         popup.model.select(row);
         match popup.model.activate() {
             Some(target) => {
@@ -2151,13 +2159,36 @@ impl Workspace {
 
     /// Checks `target` out in the background, then reads the project and the branch again.
     fn switch_branch(&mut self, target: zide_git::Switch, cx: &mut Context<Self>) {
-        self.autosave(cx); // the edits are in the files git is about to change
+        self.git_task(
+            "Could not switch branch",
+            None,
+            move |root| zide_git::switch(&root, &target),
+            cx,
+        );
+    }
+
+    /// Runs `operation` on the repository in the background. When it works, the project and the
+    /// branch are read again (the files may have changed under the editor) and `done` is
+    /// announced; when it does not, git's reason is shown under `failure`.
+    fn git_task(
+        &mut self,
+        failure: &'static str,
+        done: Option<String>,
+        operation: impl FnOnce(PathBuf) -> Result<(), String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.autosave(cx); // the edits are in the files git may be about to change
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    let result = zide_git::switch(&root, &target);
+                    let result = operation(root.clone());
+                    if result.is_ok()
+                        && let Some(found) = zide_git::branches(&root)
+                    {
+                        session::remember_branches(&root, &found);
+                    }
                     (result, zide_git::branch_status(&root))
                 })
                 .await;
@@ -2167,17 +2198,207 @@ impl Workspace {
                     Ok(()) => {
                         this.branch = status;
                         this.rescan(cx);
+                        if let Some(done) = done {
+                            this.notify(Notification::success(done), cx);
+                        }
                         cx.notify();
                     }
-                    Err(why) => {
-                        let note = Notification::error(why).title("Could not switch branch");
-                        this.notify(note, cx);
-                    }
+                    Err(why) => this.notify(Notification::error(why).title(failure), cx),
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Opens the menu of the selected branch (of `row` when given: a right click selects it).
+    fn open_branch_menu(&mut self, row: Option<usize>, cx: &mut Context<Self>) {
+        let Some(popup) = &mut self.branches else {
+            return;
+        };
+        if let Some(row) = row {
+            popup.model.select(row);
+        }
+        if popup.model.selected_target().is_some() {
+            popup.menu = Some(0);
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    /// The keys while a branch's menu is open: they are the menu's, not the switcher's.
+    fn branch_menu_key(
+        &mut self,
+        chosen: usize,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(popup) = &mut self.branches else {
+            return;
+        };
+        let entries = popup
+            .model
+            .selected_target()
+            .map(|target| branches::menu_entries(&target))
+            .unwrap_or_default();
+        match key {
+            "down" => popup.menu = Some((chosen + 1).min(entries.len().saturating_sub(1))),
+            "up" => popup.menu = Some(chosen.saturating_sub(1)),
+            "left" | "escape" => popup.menu = None,
+            "enter" => {
+                if let Some((_, action)) = entries.into_iter().nth(chosen) {
+                    self.branch_action(action, window, cx);
+                }
+            }
+            _ => {}
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// An entry of a branch's context menu.
+    fn branch_action(
+        &mut self,
+        action: branches::BranchAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use branches::BranchAction as A;
+        let existing = self
+            .branches
+            .as_ref()
+            .map(|popup| popup.model.local_names())
+            .unwrap_or_default();
+        self.close_branches(window, cx);
+        match action {
+            A::NewFrom(start) => {
+                let from = start.clone();
+                self.ask_branch_name(
+                    "New Branch",
+                    "Create",
+                    String::new(),
+                    existing,
+                    move |this, name, cx| {
+                        let done = format!("Created '{name}' from '{from}'");
+                        this.git_task(
+                            "Could not create the branch",
+                            Some(done),
+                            {
+                                let from = from.clone();
+                                move |root| zide_git::create_branch(&root, &name, &from)
+                            },
+                            cx,
+                        );
+                    },
+                    window,
+                    cx,
+                );
+            }
+            A::Rename(old) => {
+                let initial = old.clone();
+                self.ask_branch_name(
+                    "Rename Branch",
+                    "Rename",
+                    initial,
+                    existing,
+                    move |this, name, cx| {
+                        let done = format!("Renamed '{old}' to '{name}'");
+                        let old = old.clone();
+                        this.git_task(
+                            "Could not rename the branch",
+                            Some(done),
+                            move |root| zide_git::rename_branch(&root, &old, &name),
+                            cx,
+                        );
+                    },
+                    window,
+                    cx,
+                );
+            }
+            A::Update(name) => {
+                let checked_out = self.branch.as_ref().is_some_and(|b| b.name == name);
+                let done = format!("Updated '{name}'");
+                self.git_task(
+                    "Could not update the branch",
+                    Some(done),
+                    move |root| zide_git::update_branch(&root, &name, checked_out),
+                    cx,
+                );
+            }
+            A::Push(name) => self.confirm_push(name, window, cx),
+        }
+    }
+
+    /// Asks for a branch name in a dialog, and runs `then` with it when it is a good one.
+    #[allow(clippy::too_many_arguments)]
+    fn ask_branch_name(
+        &mut self,
+        title: &'static str,
+        ok_text: &'static str,
+        initial: String,
+        existing: Vec<String>,
+        then: impl Fn(&mut Self, String, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.root.clone();
+        let view = cx.new(|cx| branches::NameDialog::new(root, existing, &initial, window, cx));
+        let workspace = cx.entity();
+        let then = std::rc::Rc::new(then);
+        let first = std::cell::Cell::new(true);
+        window.open_alert_dialog(cx, move |alert, window, cx| {
+            if first.replace(false) {
+                view.update(cx, |dialog, cx| dialog.focus(window, cx));
+            }
+            let (view, workspace, then) = (view.clone(), workspace.clone(), then.clone());
+            alert
+                .title(title)
+                .child(view.clone())
+                .ok_text(ok_text)
+                .show_cancel(true)
+                .on_ok(move |_, _, cx| {
+                    // a name that is not good keeps the dialog open, with the reason in it
+                    let Some(name) = view.update(cx, |dialog, cx| dialog.submit(cx)) else {
+                        return false;
+                    };
+                    workspace.update(cx, |this, cx| then(this, name, cx));
+                    true
+                })
+        });
+    }
+
+    /// Pushing publishes commits: it is confirmed, and says where they go.
+    fn confirm_push(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let remote = match zide_git::push_remote(&self.root, &name) {
+            Ok(remote) => remote,
+            Err(why) => {
+                let note = Notification::error(why).title("Could not push the branch");
+                return self.notify(note, cx);
+            }
+        };
+        let workspace = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (workspace, name, remote) = (workspace.clone(), name.clone(), remote.clone());
+            alert
+                .title("Push Branch")
+                .description(format!("Push '{name}' to '{remote}'?"))
+                .ok_text("Push")
+                .show_cancel(true)
+                .on_ok(move |_, _, cx| {
+                    let (name, remote) = (name.clone(), remote.clone());
+                    workspace.update(cx, |this, cx| {
+                        let done = format!("Pushed '{name}' to '{remote}'");
+                        this.git_task(
+                            "Could not push the branch",
+                            Some(done),
+                            move |root| zide_git::push_branch(&root, &name, &remote),
+                            cx,
+                        );
+                    });
+                    true
+                })
+        });
     }
 
     fn close_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3545,6 +3766,9 @@ fn main() {
             KeyBinding::new("shift-f3", FindPrevious, Some("Workspace")),
             KeyBinding::new("ctrl-shift-f", FindInFiles, Some("Workspace")),
             KeyBinding::new("ctrl-shift-`", SwitchBranch, Some("Workspace")),
+            // some layouts report Shift+` as the shifted character
+            KeyBinding::new("ctrl-~", SwitchBranch, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-~", SwitchBranch, Some("Workspace")),
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
             KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
