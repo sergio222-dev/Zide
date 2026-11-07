@@ -6,7 +6,7 @@ mod images;
 mod menu;
 mod sessions;
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -84,8 +84,12 @@ pub struct Chat {
     /// The rendered Markdown of each assistant text block, by block index.
     markdown: HashMap<usize, Entity<TextViewState>>,
     scroll: ScrollHandle,
-    /// Pictures pasted and not sent yet.
-    images: Vec<Arc<gpui_kit::Image>>,
+    /// Pictures pasted and not sent yet, with the number they are shown as.
+    images: Vec<images::Numbered>,
+    /// The number the next picture gets: they count up through the whole conversation.
+    next_image: u32,
+    /// The pictures sent with each message, by the index of its block.
+    sent_images: HashMap<usize, Vec<images::Numbered>>,
     /// The highlighted entry of the `/` and `@` menu, among the matches.
     menu_selected: usize,
     /// Esc closed the menu; typing opens it again.
@@ -136,6 +140,8 @@ impl Chat {
             markdown: HashMap::new(),
             scroll: ScrollHandle::new(),
             images: Vec::new(),
+            next_image: 1,
+            sent_images: HashMap::new(),
             menu_selected: 0,
             menu_dismissed: false,
             notice: None,
@@ -296,18 +302,18 @@ impl Workspace {
         match sent {
             Some(Ok(())) => {
                 chat.notice = None;
-                let shown = images::shown(&text, pictures.len());
                 chat.title.get_or_insert_with(|| {
-                    shown
-                        .lines()
-                        .next()
-                        .unwrap_or_default()
-                        .chars()
-                        .take(60)
-                        .collect()
+                    match text.lines().next().filter(|line| !line.is_empty()) {
+                        Some(line) => line.chars().take(60).collect(),
+                        None => "Image".to_owned(),
+                    }
                 });
-                chat.transcript.user_message(&shown);
-                chat.images.clear();
+                let at = chat.transcript.blocks().len();
+                chat.transcript.user_message(&text);
+                let sent = std::mem::take(&mut chat.images);
+                if !sent.is_empty() {
+                    chat.sent_images.insert(at, sent);
+                }
                 chat.input
                     .update(cx, |state, cx| state.set_value("", window, cx));
                 chat.scroll.scroll_to_bottom();
@@ -697,7 +703,6 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .children(images)
                             .children(menu)
                             .child(
                                 div()
@@ -707,6 +712,7 @@ impl Workspace {
                                     .bg(rgb(theme::POPUP))
                                     .px_3()
                                     .py_2()
+                                    .children(images)
                                     .child(Textarea::new(&chat.input)),
                             )
                             .child(
@@ -737,11 +743,19 @@ impl Workspace {
     ) -> AnyElement {
         match block {
             Block::User(text) => div()
+                .flex()
+                .flex_col()
+                .gap_2()
                 .rounded_md()
                 .bg(rgb(theme::POPUP))
                 .px_3()
                 .py_2()
-                .child(text.clone())
+                .children((!text.is_empty()).then(|| text.clone()))
+                .children(
+                    chat.sent_images
+                        .get(&index)
+                        .map(|sent| images::sent_view(sent)),
+                )
                 .into_any_element(),
             Block::Text(text) => match chat.markdown.get(&index) {
                 Some(state) => div()

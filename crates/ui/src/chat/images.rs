@@ -23,15 +23,11 @@ fn media_type(format: ImageFormat) -> Option<&'static str> {
     }
 }
 
-/// How the message appears in the history once sent.
-pub(super) fn shown(text: &str, images: usize) -> String {
-    match (images, text.is_empty()) {
-        (0, _) => text.to_owned(),
-        (1, true) => "[image]".to_owned(),
-        (n, true) => format!("[{n} images]"),
-        (1, false) => format!("[image]\n{text}"),
-        (n, false) => format!("[{n} images]\n{text}"),
-    }
+/// A picture and the number it is shown as: `Image #3`.
+#[derive(Clone)]
+pub(super) struct Numbered {
+    number: u32,
+    image: Arc<Image>,
 }
 
 impl Chat {
@@ -39,14 +35,41 @@ impl Chat {
     pub(super) fn pictures(&self) -> Vec<Picture> {
         self.images
             .iter()
-            .filter_map(|image| {
+            .filter_map(|picture| {
                 Some(Picture {
-                    media_type: media_type(image.format)?,
-                    bytes: image.bytes.clone(),
+                    media_type: media_type(picture.image.format)?,
+                    bytes: picture.image.bytes.clone(),
                 })
             })
             .collect()
     }
+}
+
+/// The pictures of a sent message, under its text.
+pub(super) fn sent_view(sent: &[Numbered]) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .gap_2()
+        .children(sent.iter().map(|picture| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    img(picture.image.clone())
+                        .max_w(px(360.))
+                        .max_h(px(180.))
+                        .object_fit(ObjectFit::Contain)
+                        .rounded_md(),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme::DIM))
+                        .child(format!("Image #{}", picture.number)),
+                )
+        }))
 }
 
 impl Workspace {
@@ -74,7 +97,12 @@ impl Workspace {
             chat.notice = Some("That image is over 5 MB, the most Claude takes.".to_owned());
         } else {
             chat.notice = None;
-            chat.images.push(Arc::new(image));
+            let number = chat.next_image;
+            chat.next_image += 1;
+            chat.images.push(Numbered {
+                number,
+                image: Arc::new(image),
+            });
         }
         true
     }
@@ -89,32 +117,26 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The thumbnails waiting to be sent, to draw above the input.
+    /// The chips of the pictures waiting to be sent, to draw inside the input box.
     pub(super) fn images_view(&self, cx: &mut Context<Self>) -> Option<Div> {
         let chat = self.claude.as_ref()?.active();
         if chat.images.is_empty() {
             return None;
         }
-        let thumbs = chat.images.iter().enumerate().map(|(index, image)| {
+        let chips = chat.images.iter().enumerate().map(|(index, picture)| {
             div()
-                .relative()
-                .flex_none()
-                .child(
-                    img(image.clone())
-                        .h(px(56.))
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(theme::CONTROL_BORDER)),
-                )
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .rounded_md()
+                .bg(rgb(theme::TREE_SELECTED))
+                .text_sm()
+                .text_color(rgb(theme::TEXT))
+                .child(format!("Image #{}", picture.number))
                 .child(
                     div()
                         .id(SharedString::from(format!("image-remove-{index}")))
-                        .absolute()
-                        .top_0()
-                        .right_0()
-                        .px_1()
-                        .rounded_md()
-                        .bg(rgb(theme::POPUP))
                         .text_color(rgb(theme::MUTED))
                         .cursor_pointer()
                         .child("×")
@@ -123,7 +145,7 @@ impl Workspace {
                         ),
                 )
         });
-        Some(div().flex().gap_2().py_1().children(thumbs))
+        Some(div().flex().flex_wrap().gap_1().pb_1().children(chips))
     }
 }
 
@@ -131,7 +153,7 @@ impl Workspace {
 mod tests {
     use gpui_kit::ImageFormat;
 
-    use super::{media_type, shown};
+    use super::media_type;
 
     #[test]
     fn only_the_formats_claude_takes_have_a_media_type() {
@@ -141,14 +163,5 @@ mod tests {
         assert_eq!(media_type(ImageFormat::Webp), Some("image/webp"));
         assert_eq!(media_type(ImageFormat::Bmp), None);
         assert_eq!(media_type(ImageFormat::Svg), None);
-    }
-
-    #[test]
-    fn the_history_says_how_many_pictures_went_with_the_message() {
-        assert_eq!(shown("hi", 0), "hi");
-        assert_eq!(shown("", 1), "[image]");
-        assert_eq!(shown("", 3), "[3 images]");
-        assert_eq!(shown("look", 1), "[image]\nlook");
-        assert_eq!(shown("look", 2), "[2 images]\nlook");
     }
 }
