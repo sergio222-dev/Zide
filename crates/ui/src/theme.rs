@@ -52,3 +52,10 @@ pub const ICON_FOLDER: u32 = 0xe5c07b;
 pub const ICON_CODE: u32 = 0x61afef;
 pub const ICON_DATA: u32 = 0x98c379;
 pub const ICON_MEDIA: u32 = 0xc678dd;
+
+/// Success marks (a tool that finished well).
+pub const OK: u32 = 0x98c379;
+/// A chat that is thinking.
+pub const WORKING: u32 = 0xe5a14e;
+/// A chat that waits for the user to allow something.
+pub const NEEDS_USER: u32 = 0x61afef;

@@ -15,6 +15,7 @@ use std::{
 };
 
 mod branches;
+mod chat;
 mod definition;
 mod file_icon;
 mod indent;
@@ -73,6 +74,7 @@ actions!(
         FindInFiles,
         RecentFiles,
         ToggleProjectTree,
+        ToggleClaudeChat,
         ToggleMarkdownPreview,
         NavigateBack,
         NavigateForward,
@@ -196,6 +198,41 @@ fn action_registry() -> Vec<ActionDef> {
             closes_popup: true,
             state: None,
             run: |ws, _, cx| ws.toggle_tree(cx),
+        },
+        ActionDef {
+            name: "Toggle Claude Chat",
+            synonyms: &["claude", "ai", "assistant", "chat"],
+            action: Some(Box::new(ToggleClaudeChat)),
+            closes_popup: true,
+            state: None,
+            run: |ws, window, cx| ws.toggle_claude(window, cx),
+        },
+        ActionDef {
+            name: "Claude: Resume Session",
+            synonyms: &["claude", "history", "sessions", "continue", "resume"],
+            action: None,
+            closes_popup: true,
+            state: None,
+            run: |ws, window, cx| ws.claude_history(window, cx),
+        },
+        ActionDef {
+            name: "Claude: Bare Mode",
+            synonyms: &["claude", "test", "minimal", "cheap", "bare"],
+            action: None,
+            closes_popup: false,
+            state: Some(|ws| ws.claude_bare),
+            run: |ws, _, cx| {
+                ws.claude_bare = !ws.claude_bare;
+                cx.notify();
+            },
+        },
+        ActionDef {
+            name: "Claude: New Chat",
+            synonyms: &["claude", "new", "clear", "session"],
+            action: None,
+            closes_popup: true,
+            state: None,
+            run: |ws, window, cx| ws.claude_new(window, cx),
         },
         ActionDef {
             name: "Toggle Markdown Preview",
@@ -442,6 +479,16 @@ struct Workspace {
     /// The project tree on the left.
     tree: Tree,
     tree_visible: bool,
+    /// The Claude chat, created the first time it is opened, and whether it fills the editor area.
+    claude: Option<chat::Chats>,
+    /// Whether a supported `claude` is installed, once known.
+    claude_installed: bool,
+    claude_open: bool,
+    /// Chats started from now on run `claude` with none of the user's configuration, which
+    /// makes a test turn cheap; see `zide_claude::Options::minimal`.
+    claude_bare: bool,
+    /// Sees the chat's keys before the input box turns them into its own actions.
+    _claude_keys: Subscription,
     /// The checked-out branch and how far it is from its upstream, `None` outside a repository.
     branch: Option<zide_git::BranchStatus>,
     /// The branch switcher, while it is open.
@@ -496,6 +543,19 @@ impl Workspace {
     fn new(root: PathBuf, window: &Window, cx: &mut Context<Self>) -> Self {
         // file-system changes arrive on a watcher thread; a foreground task reacts to them
         let (changes_tx, changes_rx) = async_channel::unbounded::<Change>();
+        // asking `claude` for its version starts a process: not on the UI thread
+        cx.spawn(async move |this, cx| {
+            let version = cx
+                .background_executor()
+                .spawn(async { zide_claude::installed() })
+                .await;
+            this.update(cx, |this, cx| {
+                this.claude_installed = version.is_some_and(zide_claude::Version::is_supported);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         // the branch moves with commits, checkouts and fetches, none of which the watcher reports
         let git_root = root.clone();
         cx.spawn(async move |this, cx| {
@@ -549,7 +609,19 @@ impl Workspace {
         .detach();
 
         let registry = action_registry();
+        // The input box binds the arrows, Tab and Ctrl+V to actions, and actions run before
+        // the key listeners, so only an interceptor sees those keys first.
+        let this = cx.weak_entity();
+        let claude_keys = cx.intercept_keystrokes(move |event, window, cx| {
+            this.update(cx, |this, cx| {
+                if this.claude_open && this.popup.is_none() && this.branches.is_none() {
+                    this.claude_key(&event.keystroke, window, cx);
+                }
+            })
+            .ok();
+        });
         let mut workspace = Self {
+            _claude_keys: claude_keys,
             focus: cx.focus_handle(),
             font_size: viewer::DEFAULT_FONT_SIZE,
             minimap: true,
@@ -557,6 +629,10 @@ impl Workspace {
             meter: meter::FrameMeter::from_env(),
             tree: Tree::new(),
             tree_visible: false,
+            claude: None,
+            claude_installed: false,
+            claude_bare: false,
+            claude_open: false,
             branch: None,
             branches: None,
             md_preview: false,
@@ -2822,6 +2898,11 @@ impl Workspace {
             )
             .on_action(cx.listener(|this, _: &ToggleProjectTree, _, cx| this.toggle_tree(cx)))
             .on_action(
+                cx.listener(|this, _: &ToggleClaudeChat, window, cx| {
+                    this.toggle_claude(window, cx)
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &ToggleMarkdownPreview, _, cx| this.toggle_md_preview(cx)),
             )
             .on_action(cx.listener(|this, _: &NavigateBack, _, cx| this.navigate(true, cx)))
@@ -2866,7 +2947,10 @@ impl Workspace {
                     return this.branches_key(event, window, cx);
                 }
                 let Some(popup) = &mut this.popup else {
-                    this.editor_key(event, window, cx);
+                    // the chat's keys are seen earlier, by the interceptor
+                    if !this.claude_open {
+                        this.editor_key(event, window, cx);
+                    }
                     return;
                 };
                 match event.keystroke.key.as_str() {
@@ -2881,7 +2965,9 @@ impl Workspace {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(
+            .child(if self.claude_open {
+                self.claude_view(window, cx)
+            } else {
                 div()
                     .flex()
                     .flex_1()
@@ -2953,12 +3039,18 @@ impl Workspace {
                             .border_l_1()
                             .border_color(rgb(theme::BORDER))
                             .child(view)
-                    })),
-            )
+                    }))
+            })
             .child(statusbar::render(
                 self.viewer.as_ref().map(Viewer::status),
                 self.branch.as_ref(),
                 cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
+                self.claude_installed.then(|| {
+                    self.claude
+                        .as_ref()
+                        .map_or(zide_claude::Overall::Off, chat::Chats::overall)
+                }),
+                cx.listener(|this, _, window, cx| this.toggle_claude(window, cx)),
             ));
         if let Some(branches) = &self.branches {
             root = root.child(branches::render(branches, cx));
@@ -3835,6 +3927,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-~", SwitchBranch, Some("Workspace")),
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
+            KeyBinding::new("alt-2", ToggleClaudeChat, Some("Workspace")),
             KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
             KeyBinding::new("ctrl-alt-left", NavigateBack, Some("Workspace")),
             KeyBinding::new("ctrl-alt-right", NavigateForward, Some("Workspace")),
