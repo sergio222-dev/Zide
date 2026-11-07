@@ -104,6 +104,7 @@ pub struct Transcript {
     turn_open: bool,
     alive: bool,
     usage: Option<Usage>,
+    context_window: Option<u64>,
     cost_usd: f64,
     /// The model and effort of the latest reply, from a stored conversation or a running one.
     model: Option<String>,
@@ -118,6 +119,7 @@ impl Default for Transcript {
             turn_open: false,
             alive: true,
             usage: None,
+            context_window: None,
             cost_usd: 0.0,
             model: None,
             effort: None,
@@ -156,6 +158,11 @@ impl Transcript {
         if let Some(effort) = effort {
             self.effort = Some(effort.to_owned());
         }
+    }
+
+    /// How many tokens the model's context holds, once a turn has said so.
+    pub fn context_window(&self) -> Option<u64> {
+        self.context_window
     }
 
     pub fn usage(&self) -> Option<Usage> {
@@ -252,6 +259,9 @@ impl Transcript {
                 }
             }
             Event::Usage(usage) => self.usage = Some(usage),
+            Event::ContextWindow(tokens) => self.context_window = Some(tokens),
+            // account-wide, so the workspace keeps it, not a conversation
+            Event::Limits(_) => {}
             Event::PermissionRequest {
                 request_id,
                 tool_name,

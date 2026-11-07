@@ -22,6 +22,29 @@ pub struct Usage {
     pub output_tokens: u64,
 }
 
+/// How much of a usage limit is spent, and when it starts over.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Window {
+    /// From 0 to 1.
+    pub utilization: f64,
+    /// Seconds since the Unix epoch.
+    pub resets_at: u64,
+}
+
+/// The account's usage limits, as the CLI last reported them.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Limits {
+    pub five_hour: Option<Window>,
+    pub seven_day: Option<Window>,
+}
+
+fn parse_window(value: &Value) -> Option<Window> {
+    Some(Window {
+        utilization: value["utilization"].as_f64()?,
+        resets_at: value["resetsAt"].as_u64().unwrap_or(0),
+    })
+}
+
 /// The part of the stream a client cares about. Lines that carry nothing a chat shows
 /// (hooks, status, rate limits, protocol bookkeeping) produce no event.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +74,10 @@ pub enum Event {
         is_error: bool,
     },
     Usage(Usage),
+    /// The account's usage limits.
+    Limits(Limits),
+    /// How many tokens the model's context holds, reported when a turn ends.
+    ContextWindow(u64),
     /// The turn is over.
     Result {
         text: String,
@@ -210,12 +237,36 @@ pub fn parse_events(line: &str) -> Vec<Event> {
                 }
             }]
         }
-        "result" => vec![Event::Result {
-            text: text(&value["result"]),
-            is_error: value["is_error"].as_bool().unwrap_or(false),
-            cost_usd: value["total_cost_usd"].as_f64().unwrap_or(0.0),
-            terminal_reason: value["terminal_reason"].as_str().map(str::to_owned),
-        }],
+        "rate_limit_event" => {
+            let windows = &value["rate_limit_info"]["unifiedWindows"];
+            let limits = Limits {
+                five_hour: parse_window(&windows["five_hour"]),
+                seven_day: parse_window(&windows["seven_day"]),
+            };
+            if limits == Limits::default() {
+                Vec::new()
+            } else {
+                vec![Event::Limits(limits)]
+            }
+        }
+        "result" => {
+            let window = value["modelUsage"].as_object().and_then(|models| {
+                models
+                    .values()
+                    .filter_map(|m| m["contextWindow"].as_u64())
+                    .max()
+            });
+            window
+                .map(Event::ContextWindow)
+                .into_iter()
+                .chain([Event::Result {
+                    text: text(&value["result"]),
+                    is_error: value["is_error"].as_bool().unwrap_or(false),
+                    cost_usd: value["total_cost_usd"].as_f64().unwrap_or(0.0),
+                    terminal_reason: value["terminal_reason"].as_str().map(str::to_owned),
+                }])
+                .collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -308,6 +359,33 @@ mod tests {
     fn assistant_text_only_is_not_an_event() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(parse_events(line), vec![]);
+    }
+
+    #[test]
+    fn a_rate_limit_event_carries_both_windows() {
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":0.77,"resetsAt":100,"status":"allowed"},"seven_day":{"utilization":0.5,"resetsAt":200}}}}"#;
+        assert_eq!(
+            one(line),
+            Event::Limits(Limits {
+                five_hour: Some(Window {
+                    utilization: 0.77,
+                    resets_at: 100
+                }),
+                seven_day: Some(Window {
+                    utilization: 0.5,
+                    resets_at: 200
+                }),
+            })
+        );
+        assert!(parse_events(r#"{"type":"rate_limit_event"}"#).is_empty());
+    }
+
+    #[test]
+    fn a_result_reports_the_context_window() {
+        let line = r#"{"type":"result","result":"x","modelUsage":{"m":{"contextWindow":1000000}}}"#;
+        let events = parse_events(line);
+        assert_eq!(events[0], Event::ContextWindow(1_000_000));
+        assert!(matches!(events[1], Event::Result { .. }));
     }
 
     #[test]
