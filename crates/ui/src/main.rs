@@ -79,6 +79,7 @@ actions!(
         FindInFiles,
         RecentFiles,
         ToggleProjectTree,
+        RevealOpenFile,
         ToggleClaudeChat,
         ToggleCommitPanel,
         ToggleMarkdownPreview,
@@ -118,6 +119,8 @@ const MAX_SYMBOL_RESULTS: usize = 200;
 const MAX_RECENT: usize = 50;
 /// Height of a row of the project tree, in pixels.
 const TREE_ROW_HEIGHT: f32 = 22.;
+/// The width of the project tree panel.
+const TREE_WIDTH: f32 = 260.;
 const MAX_TEXT_RESULTS: usize = 1000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -212,6 +215,14 @@ fn action_registry() -> Vec<ActionDef> {
             closes_popup: true,
             state: None,
             run: |ws, window, cx| ws.toggle_commit(window, cx),
+        },
+        ActionDef {
+            name: "Select Opened File in Project Tree",
+            synonyms: &["reveal", "locate", "scroll to file", "show in tree"],
+            action: Some(Box::new(RevealOpenFile)),
+            closes_popup: true,
+            state: None,
+            run: |ws, _, cx| ws.reveal_open_file(cx),
         },
         ActionDef {
             name: "Toggle Claude Chat",
@@ -1647,7 +1658,7 @@ impl Workspace {
         let Some(row) = rows.get(row) else { return };
         let handle = self.tree_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.width);
-        let viewport = if viewport > 0. { viewport } else { 260. };
+        let viewport = if viewport > 0. { viewport } else { TREE_WIDTH };
         let icon_x = ICON_AT + 14. * row.depth as f32;
         let right = icon_x + 20. + CHAR * row.name.chars().count() as f32 + 8.;
         let max = f32::from(handle.max_offset().x);
@@ -1679,6 +1690,18 @@ impl Workspace {
                 self.scroll_tree_to_selection();
             }
         }
+        cx.notify();
+    }
+
+    /// Alt+Shift+`: shows the tree scrolled to the file open in the editor, selected (IntelliJ's
+    /// *Select Opened File*). The keyboard stays where it was.
+    fn reveal_open_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path().to_string()) else {
+            return;
+        };
+        self.tree_visible = true;
+        self.tree.reveal(&path);
+        self.scroll_tree_to_selection();
         cx.notify();
     }
 
@@ -1885,13 +1908,15 @@ impl Workspace {
                         (true, false) => Some(theme::TREE_SELECTED),
                         _ => None,
                     };
-                    let line = div()
-                        .id(("tree-row", index))
-                        .w_full()
-                        .h(px(TREE_ROW_HEIGHT))
+                    // The row is as wide as the list, so its highlight spans it. What is in it is
+                    // centered in the width of the panel; a name too long for that overflows to
+                    // the right and the list scrolls sideways to it.
+                    let content = div()
                         .flex()
                         .items_center()
+                        .justify_center()
                         .gap_1()
+                        .min_w(px(TREE_WIDTH))
                         .pl(px(8. + 14. * row.depth as f32))
                         .pr(px(16.))
                         .whitespace_nowrap()
@@ -1918,7 +1943,14 @@ impl Workspace {
                                     |d, kind| d.text_color(rgb(commit::kind_color(*kind))),
                                 )
                                 .child(row.name.clone()),
-                        )
+                        );
+                    let line = div()
+                        .id(("tree-row", index))
+                        .w_full()
+                        .h(px(TREE_ROW_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .child(content)
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             workspace.update(cx, |this, cx| {
                                 this.tree_focused = true;
@@ -1955,7 +1987,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .flex_shrink_0()
-            .w(px(260.))
+            .w(px(TREE_WIDTH))
             .h_full()
             .border_r_1()
             .border_color(rgb(theme::BORDER))
@@ -3032,6 +3064,7 @@ impl Workspace {
                     this.toggle_commit(window, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &RevealOpenFile, _, cx| this.reveal_open_file(cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleClaudeChat, window, cx| {
                     this.toggle_claude(window, cx)
@@ -4072,6 +4105,10 @@ fn main() {
             KeyBinding::new("ctrl-shift-~", SwitchBranch, Some("Workspace")),
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
+            KeyBinding::new("alt-shift-`", RevealOpenFile, Some("Workspace")),
+            // some layouts report Shift+` as the shifted character
+            KeyBinding::new("alt-~", RevealOpenFile, Some("Workspace")),
+            KeyBinding::new("alt-shift-~", RevealOpenFile, Some("Workspace")),
             KeyBinding::new("alt-2", ToggleCommitPanel, Some("Workspace")),
             KeyBinding::new("alt-3", ToggleClaudeChat, Some("Workspace")),
             KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
