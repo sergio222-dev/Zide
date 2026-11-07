@@ -12,7 +12,7 @@ use crate::markdown::TextView;
 use crate::{Workspace, theme};
 
 /// Monospace for code and output; GPUI falls back to its default font when it is missing.
-const MONO: &str = "JetBrains Mono";
+pub(super) const MONO: &str = "JetBrains Mono";
 
 /// Lines of output shown before the rest is folded away.
 const OUTPUT_LINES: usize = 30;

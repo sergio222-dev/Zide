@@ -15,7 +15,9 @@ use std::collections::{HashMap, HashSet};
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
+use zide_claude::agents::{self, Agent, Kind};
 use zide_claude::history::{self, SessionInfo};
 use zide_claude::{
     Block, Defaults, Event, Limits, Options, Overall, Permission, Resolution, Session, Status,
@@ -38,6 +40,9 @@ pub struct Chats {
     limits: Option<Limits>,
     /// The list of earlier conversations, while it is open.
     sessions: Option<sessions::Sessions>,
+    /// The live agents of the project (interactive and background), as `claude agents` last
+    /// listed them.
+    agents: Vec<Agent>,
 }
 
 impl Chats {
@@ -55,6 +60,7 @@ impl Chats {
             defaults,
             limits: None,
             sessions: None,
+            agents: Vec::new(),
         };
         chats.add(window, cx);
         chats
@@ -134,6 +140,9 @@ pub struct Chat {
     notice: Option<String>,
     /// The name of the conversation: the stored session's title, or the first thing said.
     title: Option<String>,
+    /// The conversation belongs to another process (a background agent, another window): while
+    /// this chat has no process of its own, it follows the stored session as it grows.
+    tail: bool,
     _submit: Subscription,
 }
 
@@ -145,7 +154,7 @@ impl Chat {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
                 .placeholder(
-                    "Message Claude. Enter sends, Shift+Enter adds a line, Esc interrupts.",
+                    "Message Claude. Enter sends, Shift+Enter adds a line, Esc stops Claude.",
                 )
                 .submit_on_enter(true)
         });
@@ -197,6 +206,7 @@ impl Chat {
             menu_dismissed: false,
             notice: None,
             title: None,
+            tail: false,
             _submit: submit,
         }
     }
@@ -224,7 +234,9 @@ impl Chat {
 
     /// Whether nothing was said here: a stored conversation can take its place.
     fn is_empty(&self) -> bool {
-        self.session.is_none() && self.transcript.blocks().is_empty()
+        self.session.is_none()
+            && self.transcript.session_id().is_none()
+            && self.transcript.blocks().is_empty()
     }
 
     /// Gives every assistant text block its Markdown, after a stored conversation is loaded.
@@ -291,10 +303,165 @@ impl Workspace {
             let commands = crate::session::claude_commands(&self.root);
             let defaults = zide_claude::defaults(&self.root);
             self.claude = Some(Chats::new(commands, defaults, window, cx));
+            self.watch_agents(cx);
         }
         self.claude_open = true;
+        self.refresh_agents(cx);
         self.focus_active_chat(window, cx);
         cx.notify();
+    }
+
+    /// Keeps the list of agents current while the panel is showing: `claude` is asked in the
+    /// background, every few seconds.
+    fn watch_agents(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AGENTS_EVERY).await;
+                let shown = this.update(cx, |this, cx| {
+                    if this.claude_open {
+                        this.refresh_agents(cx);
+                    }
+                });
+                if shown.is_err() {
+                    break; // the workspace is gone
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Asks `claude agents` now; the list changes only when the answer does. The chats that
+    /// follow another process re-read their session too.
+    fn refresh_agents(&mut self, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        let followed: Vec<(u64, String)> = self
+            .claude
+            .iter()
+            .flat_map(|chats| chats.list.iter())
+            .filter(|chat| chat.tail && chat.session.is_none())
+            .filter_map(|chat| Some((chat.id, chat.transcript.session_id()?.to_owned())))
+            .collect();
+        let project = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let (agents, stored) = cx
+                .background_executor()
+                .spawn(async move {
+                    let stored: Vec<_> = followed
+                        .into_iter()
+                        .map(|(id, session)| (id, history::load(&project, &session)))
+                        .collect();
+                    (agents::list(&root), stored)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let Some(chats) = &mut this.claude else {
+                    return;
+                };
+                if chats.agents != agents {
+                    chats.agents = agents;
+                    cx.notify();
+                }
+                for (id, loaded) in stored {
+                    let Some(chat) = chats.find(id) else {
+                        continue;
+                    };
+                    // a message of ours started a process meanwhile: that one is the truth
+                    let Ok(transcript) = loaded else {
+                        continue;
+                    };
+                    if chat.session.is_none()
+                        && transcript.blocks().len() != chat.transcript.blocks().len()
+                    {
+                        let follow = chat.at_bottom();
+                        chat.transcript = transcript;
+                        chat.markdown.clear();
+                        chat.rebuild_markdown(cx);
+                        if follow {
+                            chat.scroll.scroll_to_bottom();
+                        }
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Shows what an agent is doing: the chat that already follows its session, else a new one
+    /// that reads the session from disk and keeps reading it. Sending a message there continues
+    /// the same session with `--resume`.
+    fn claude_open_agent(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chats) = &mut self.claude else {
+            return;
+        };
+        let Some(agent) = chats.agents.get(index).cloned() else {
+            return;
+        };
+        if let Some(at) = chats
+            .list
+            .iter()
+            .position(|chat| chat.transcript.session_id() == Some(agent.session_id.as_str()))
+        {
+            return self.claude_activate(at, window, cx);
+        }
+        chats.add(window, cx);
+        let id = chats.active().id;
+        chats.active_mut().tail = true;
+        let session = SessionInfo {
+            id: agent.session_id,
+            title: agent.name,
+            modified: std::time::UNIX_EPOCH + std::time::Duration::from_millis(agent.started_at),
+        };
+        self.load_session(id, session, cx);
+        self.focus_active_chat(window, cx);
+        cx.notify();
+    }
+
+    /// The cross on a background agent: `claude rm`. What `claude` refuses (a worktree with
+    /// unpushed commits, say) is shown and the agent stays.
+    fn claude_remove_agent(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(agent) = self
+            .claude
+            .as_ref()
+            .and_then(|c| c.agents.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let id = agent.id.clone();
+            let removed = cx
+                .background_executor()
+                .spawn(async move { agents::remove(&id) })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                match removed {
+                    Ok(_) => {
+                        let open = this.claude.as_mut().and_then(|chats| {
+                            chats.agents.retain(|a| a.id != agent.id);
+                            chats
+                                .list
+                                .iter()
+                                .find(|chat| {
+                                    chat.transcript.session_id() == Some(agent.session_id.as_str())
+                                })
+                                .map(|chat| chat.id)
+                        });
+                        if let Some(id) = open {
+                            this.claude_close(id, window, cx);
+                        }
+                    }
+                    Err(why) => this.notify(
+                        Notification::error(why).title("Could not remove the agent"),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn focus_active_chat(&self, window: &mut Window, cx: &mut App) {
@@ -374,19 +541,52 @@ impl Workspace {
         if key != "escape" {
             return;
         }
+        // Esc presses Stop while there is something to stop; otherwise it leaves the panel
         let busy = self.claude.as_ref().is_some_and(|c| c.active().busy());
         if busy {
-            if let Some(session) = self
-                .claude
-                .as_mut()
-                .and_then(|c| c.active_mut().session.as_mut())
-            {
-                let _ = session.interrupt();
-            }
+            self.claude_interrupt();
         } else {
             self.toggle_claude(window, cx);
         }
         cx.stop_propagation();
+    }
+
+    /// The button beside the input: Stop while Claude works (Esc presses it), else Send.
+    fn send_or_stop(&self, chat: &Chat, cx: &mut Context<Self>) -> Button {
+        let id = chat.id;
+        if chat.busy() {
+            Button::new("claude-stop")
+                .label("■ Stop")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.claude_interrupt();
+                    cx.notify();
+                }))
+        } else {
+            Button::new("claude-send")
+                .primary()
+                .label("Send")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let text = this
+                        .claude
+                        .as_mut()
+                        .and_then(|c| c.find(id))
+                        .map(|chat| chat.input.read(cx).value().to_string());
+                    if let Some(text) = text {
+                        this.claude_send(id, text, window, cx);
+                    }
+                }))
+        }
+    }
+
+    /// Stops the turn in progress of the active chat. A message that waits starts right after.
+    fn claude_interrupt(&mut self) {
+        if let Some(session) = self
+            .claude
+            .as_mut()
+            .and_then(|c| c.active_mut().session.as_mut())
+        {
+            let _ = session.interrupt();
+        }
     }
 
     fn claude_send(&mut self, id: u64, text: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -394,7 +594,8 @@ impl Workspace {
         let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
             return;
         };
-        if (text.is_empty() && chat.images.is_empty()) || chat.busy() {
+        // while Claude works the message is queued by the CLI; a pending question comes first
+        if (text.is_empty() && chat.images.is_empty()) || chat.status() == Status::NeedsUser {
             return;
         }
         if chat.session.is_none()
@@ -589,9 +790,24 @@ impl Workspace {
         if !chats.active().is_empty() {
             chats.add(window, cx);
         }
-        let chat = chats.active_mut();
+        let id = chats.active().id;
+        self.load_session(id, session, cx);
+        self.focus_active_chat(window, cx);
+        cx.notify();
+    }
+
+    /// Fills chat `id` with a stored conversation, read in the background. The chat knows the
+    /// session at once, so what is sent next continues it even while it loads.
+    fn load_session(&mut self, id: u64, session: SessionInfo, cx: &mut Context<Self>) {
+        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
+            return;
+        };
         chat.title = Some(session.title.clone());
-        let id = chat.id;
+        chat.transcript.apply(Event::Init {
+            session_id: session.id.clone(),
+            commands: Vec::new(),
+            model: None,
+        });
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let stored = session.id.clone();
@@ -613,6 +829,8 @@ impl Workspace {
                         chat.rebuild_markdown(cx);
                         chat.scroll.scroll_to_bottom();
                     }
+                    // an agent that has not said anything has no file yet: an empty chat
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => {
                         chat.notice = Some(format!("Could not open the session: {error}"));
                     }
@@ -622,8 +840,6 @@ impl Workspace {
             .ok();
         })
         .detach();
-        self.focus_active_chat(window, cx);
-        cx.notify();
     }
 
     fn claude_decide(&mut self, id: u64, request_id: &str, allow: bool, cx: &mut Context<Self>) {
@@ -659,6 +875,12 @@ impl Workspace {
 
     /// The panel with the open chats and how each stands.
     fn claude_panel(&self, chats: &Chats, cx: &mut Context<Self>) -> Div {
+        let open = |agent: &Agent| {
+            chats
+                .list
+                .iter()
+                .any(|chat| chat.transcript.session_id() == Some(agent.session_id.as_str()))
+        };
         let rows =
             chats
                 .list
@@ -714,6 +936,99 @@ impl Workspace {
                         )
                 })
                 .collect::<Vec<_>>();
+        let agent_row = |index: usize, agent: &Agent, cx: &mut Context<Self>| {
+            let background = agent.kind == Kind::Background;
+            let (color, label) = agent_style(agent);
+            let shown = chats.active().transcript.session_id() == Some(agent.session_id.as_str());
+            div()
+                .id(SharedString::from(format!(
+                    "agent-row-{}",
+                    agent.session_id
+                )))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .cursor_pointer()
+                .bg(rgb(if shown {
+                    theme::TREE_SELECTED
+                } else {
+                    theme::BACKGROUND
+                }))
+                .hover(|row| row.bg(rgb(theme::TREE_SELECTED)))
+                .on_click(
+                    cx.listener(move |this, _, window, cx| {
+                        this.claude_open_agent(index, window, cx)
+                    }),
+                )
+                .child(div().flex_none().size_2().rounded_full().bg(rgb(color)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_color(rgb(theme::STRONG))
+                                .child(agent.name.clone()),
+                        )
+                        .child(div().text_xs().text_color(rgb(color)).child(label)),
+                )
+                .children(background.then(|| {
+                    div()
+                        .id(SharedString::from(format!("agent-rm-{}", agent.id)))
+                        .flex_none()
+                        .px_1()
+                        .text_color(rgb(theme::DIM))
+                        .hover(|close| close.text_color(rgb(theme::STRONG)))
+                        .child("×")
+                        // on mouse down so the row under it never sees a click
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.claude_remove_agent(index, window, cx)
+                            }),
+                        )
+                }))
+        };
+        // live agents of other windows and terminals, that no chat here follows yet
+        let others = chats
+            .agents
+            .iter()
+            .enumerate()
+            .filter(|(_, agent)| agent.kind == Kind::Interactive && !open(agent))
+            .map(|(index, agent)| agent_row(index, agent, cx))
+            .collect::<Vec<_>>();
+        let background_count = chats
+            .agents
+            .iter()
+            .filter(|agent| agent.kind == Kind::Background)
+            .count();
+        let backgrounds = chats
+            .agents
+            .iter()
+            .enumerate()
+            .filter(|(_, agent)| agent.kind == Kind::Background)
+            .map(|(index, agent)| agent_row(index, agent, cx))
+            .collect::<Vec<_>>();
+        let background_section = (!backgrounds.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .border_t_1()
+                        .border_b_1()
+                        .border_color(rgb(theme::BORDER))
+                        .text_color(rgb(theme::MUTED))
+                        .child(format!("Background ({background_count})")),
+                )
+                .children(backgrounds)
+        });
         div()
             .flex()
             .flex_col()
@@ -744,7 +1059,9 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .children(rows),
+                    .children(rows)
+                    .children(others)
+                    .children(background_section),
             )
     }
 
@@ -775,6 +1092,11 @@ impl Workspace {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
+        let background_count = chats
+            .agents
+            .iter()
+            .filter(|agent| agent.kind == Kind::Background)
+            .count();
         let ended = chat.status() == Status::Inactive && !chat.is_empty();
         // a running process keeps the mode it started with; any other starts with the toggle's
         let bare = if chat.session.is_some() {
@@ -876,7 +1198,19 @@ impl Workspace {
                                     .px_3()
                                     .py_2()
                                     .children(images)
-                                    .child(Textarea::new(&chat.input)),
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_end()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .child(Textarea::new(&chat.input)),
+                                            )
+                                            .child(self.send_or_stop(chat, cx)),
+                                    ),
                             )
                             .child(
                                 div()
@@ -893,7 +1227,11 @@ impl Workspace {
                                     .gap_2()
                                     .text_xs()
                                     .text_color(rgb(theme::DIM))
-                                    .child(footer(chat.status(), &chat.transcript))
+                                    .child(footer(
+                                        chat.status(),
+                                        &chat.transcript,
+                                        background_count,
+                                    ))
                                     // loud on purpose: this chat is not running with the user's setup
                                     .children(bare.then(|| {
                                         div()
@@ -1051,6 +1389,31 @@ fn summary(input: &Value) -> String {
 }
 
 /// The color and the words a chat's state is shown with.
+/// How often the background agents are asked for while the panel shows.
+const AGENTS_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The dot color and words for a background agent: busy, waiting for the user, or the state
+/// `claude` reports when it is idle.
+fn agent_style(agent: &Agent) -> (u32, String) {
+    match (agent.status.as_str(), agent.state.as_deref()) {
+        (_, Some("blocked")) => (theme::NEEDS_USER, "Needs you".to_owned()),
+        ("busy", _) => (theme::WORKING, "Working".to_owned()),
+        ("idle", None) => (theme::OK, "Ready".to_owned()),
+        (_, state) => (
+            theme::DIM,
+            capitalized(state.unwrap_or(agent.status.as_str())),
+        ),
+    }
+}
+
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 fn status_style(status: Status) -> (u32, &'static str) {
     match status {
         Status::Inactive => (theme::DIM, "Not running"),
@@ -1091,14 +1454,20 @@ fn thinking(status: Status) -> impl IntoElement {
         )
 }
 
-fn footer(status: Status, transcript: &Transcript) -> String {
+fn footer(status: Status, transcript: &Transcript, background: usize) -> String {
     let state = match status {
         Status::Inactive => "Not running",
         Status::Idle => "Ready",
-        Status::Working => "Working. Esc interrupts",
+        Status::Working => "Working. Esc stops it",
         Status::NeedsUser => "Waiting for you",
     };
     let mut parts = vec![state.to_owned()];
+    if transcript.queued() > 0 {
+        parts.push(format!("{} queued", transcript.queued()));
+    }
+    if background > 0 {
+        parts.push(format!("{background} in background"));
+    }
     if let Some(usage) = transcript.usage() {
         parts.push(format!("context {}k", usage.context_tokens / 1000));
     }
@@ -1110,7 +1479,42 @@ fn footer(status: Status, transcript: &Transcript) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::hidden_blocks;
+    use zide_claude::agents::Agent;
+
+    use super::{agent_style, hidden_blocks};
+    use crate::theme;
+
+    fn agent(status: &str, state: Option<&str>) -> Agent {
+        Agent {
+            kind: zide_claude::agents::Kind::Background,
+            id: "i".into(),
+            session_id: "s".into(),
+            name: "n".into(),
+            status: status.into(),
+            state: state.map(str::to_owned),
+            started_at: 0,
+        }
+    }
+
+    #[test]
+    fn an_agent_shows_what_it_does_or_waits_for() {
+        assert_eq!(
+            agent_style(&agent("busy", None)),
+            (theme::WORKING, "Working".into())
+        );
+        assert_eq!(
+            agent_style(&agent("idle", Some("blocked"))),
+            (theme::NEEDS_USER, "Needs you".into())
+        );
+        assert_eq!(
+            agent_style(&agent("idle", None)),
+            (theme::OK, "Ready".into())
+        );
+        assert_eq!(
+            agent_style(&agent("idle", Some("done"))),
+            (theme::DIM, "Done".into())
+        );
+    }
 
     #[test]
     fn only_the_last_blocks_are_drawn() {

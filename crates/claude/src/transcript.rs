@@ -101,7 +101,8 @@ pub enum Block {
 pub struct Transcript {
     blocks: Vec<Block>,
     session_id: Option<String>,
-    turn_open: bool,
+    /// Messages sent that have no result yet: the first is being answered, the rest wait.
+    turns: usize,
     alive: bool,
     usage: Option<Usage>,
     context_window: Option<u64>,
@@ -116,7 +117,7 @@ impl Default for Transcript {
         Transcript {
             blocks: Vec::new(),
             session_id: None,
-            turn_open: false,
+            turns: 0,
             alive: true,
             usage: None,
             context_window: None,
@@ -179,19 +180,25 @@ impl Transcript {
             Status::Inactive
         } else if self.blocks.iter().any(is_pending) {
             Status::NeedsUser
-        } else if self.turn_open {
+        } else if self.turns > 0 {
             Status::Working
         } else {
             Status::Idle
         }
     }
 
-    /// Records what the user sent, which the stream does not echo back, and opens the turn.
+    /// Records what the user sent, which the stream does not echo back, and opens a turn. A
+    /// message sent while another is being answered waits its turn: the CLI queues it.
     /// Sending means there is a live process, even when an earlier one had exited.
     pub fn user_message(&mut self, text: &str) {
         self.push_user(text);
-        self.turn_open = true;
+        self.turns += 1;
         self.alive = true;
+    }
+
+    /// How many sent messages wait for the one being answered.
+    pub fn queued(&self) -> usize {
+        self.turns.saturating_sub(1)
     }
 
     /// A message from a stored conversation: shown, but it opens no turn.
@@ -288,7 +295,7 @@ impl Transcript {
                 cost_usd,
                 terminal_reason,
             } => {
-                self.turn_open = false;
+                self.turns = self.turns.saturating_sub(1);
                 self.cost_usd = cost_usd;
                 self.cancel_pending();
                 // Local commands (`/context`, `/cost`) answer without streaming: the result
@@ -314,7 +321,7 @@ impl Transcript {
             }
             Event::Exit => {
                 self.alive = false;
-                self.turn_open = false;
+                self.turns = 0;
                 self.cancel_pending();
             }
         }
@@ -399,6 +406,18 @@ mod tests {
         t.apply(done());
         assert_eq!(t.status(), Status::Idle);
         assert_eq!(t.cost_usd(), 0.25);
+    }
+
+    #[test]
+    fn a_message_sent_mid_turn_waits_and_the_turn_ends_with_the_last_result() {
+        let mut t = Transcript::new();
+        t.user_message("one");
+        t.user_message("two");
+        assert_eq!((t.status(), t.queued()), (Status::Working, 1));
+        t.apply(done());
+        assert_eq!((t.status(), t.queued()), (Status::Working, 0));
+        t.apply(done());
+        assert_eq!(t.status(), Status::Idle);
     }
 
     #[test]
