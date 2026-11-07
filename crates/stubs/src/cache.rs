@@ -7,7 +7,10 @@ use std::{
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -100,9 +103,17 @@ impl StubStore {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let temporary = path.with_extension("tmp");
+        // each save has its own temporary file: two that overlap would rename each other's
+        static SAVES: AtomicU64 = AtomicU64::new(0);
+        let temporary = path.with_extension(format!(
+            "{}-{}.tmp",
+            std::process::id(),
+            SAVES.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::write(&temporary, bytes)?;
-        fs::rename(&temporary, path)
+        fs::rename(&temporary, path).inspect_err(|_| {
+            let _ = fs::remove_file(&temporary);
+        })
     }
 }
 
@@ -126,6 +137,28 @@ mod tests {
 
     fn build(files: &Arc<FileIndex>, root: &Path, cache: Option<&StubCache>) -> StubStore {
         StubStore::build(files.clone(), root, cache, &AtomicBool::new(false)).unwrap()
+    }
+
+    #[test]
+    fn saves_that_overlap_do_not_fail() {
+        // two indexings can finish together: they must not share the temporary file
+        let (root, files) = project("overlap");
+        let store = Arc::new(build(&files, &root, None));
+        let path = root.join("cache/stubs.bin");
+        let saves: Vec<_> = (0..8)
+            .map(|_| {
+                let (store, path) = (store.clone(), path.clone());
+                std::thread::spawn(move || {
+                    (0..20)
+                        .try_for_each(|_| store.save(&path))
+                        .map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        for save in saves {
+            assert_eq!(save.join().unwrap(), Ok(()));
+        }
+        assert_eq!(StubCache::load(&path).unwrap().len(), 2);
     }
 
     #[test]

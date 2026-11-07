@@ -108,6 +108,9 @@ zide --version
 Zide updates itself: run **Update Zide** from the Actions tab (double-Shift) when the status
 line says a new release is available.
 
+From the Actions tab, **Close Project** goes back to the welcome screen, **Recent Projects** lists
+the projects opened before (Enter opens one in this window) and **Open** picks a folder.
+
 ### Shortcuts
 
 | Keys | Action |
@@ -124,6 +127,12 @@ line says a new release is available.
 | `Alt+F7` | Find Usages |
 | `gd` / `Ctrl+B` | Go to Definition |
 | `Alt+1` | Toggle project tree |
+| `Alt+Shift+\`` | Scroll the project tree to the open file and select it |
+| `Alt+2` | Commit panel: tick files, write a message, **Commit** or **Commit and Push…** (`Amend` folds them into the last commit) |
+| Commit panel `j`/`k`, `Space`, `Enter` | Move over the files, tick or untick one, open its changes (`Tab` or `i` goes to the message, `Alt+Enter` commits, `Esc` back to the files or out) |
+| Double click on a commit panel file | Its changes against the last commit, side by side, in a large dialog (`Esc` closes, double `Space` opens search) |
+| `a` / `m` / `d` / `y` / `p` | In the tree: new file (a name ending with `/` makes a folder), move or rename (a popup with the path, Enter applies, Esc closes), delete (asks first), copy, paste (into the selected folder; a taken name gets ` copy`) |
+| `Ctrl+Shift+-` / `Ctrl+Shift+=` | With the tree focused: collapse / expand every folder (the buttons on top of the tree do the same) |
 | `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Navigate back / forward (also the mouse's back and forward buttons) |
 | `Ctrl+Shift+M` | Toggle Markdown preview (`.md` files) |
 | `Ctrl+H` / `Ctrl+L` | Focus tree / editor |
@@ -133,7 +142,7 @@ line says a new release is available.
 | `Ctrl+Alt+L` | Reformat code |
 | `Alt+C` / `Alt+W` / `Alt+R` | Toggle case / whole word / regex in the find panel |
 
-In the Claude chat (`Alt+2` toggles it): `Alt+Up` / `Alt+Down` switch between open chats,
+In the Claude chat (`Alt+3` toggles it): `Alt+Up` / `Alt+Down` switch between open chats,
 `Alt+I` focuses the message input, `Alt+H` opens (or closes) the list of earlier conversations, `Esc` interrupts a running turn (or closes the chat when idle),
 `Ctrl+V` pastes an image, and `/` and `@` open the command and file menus. Earlier conversations
 are also listed by **Claude: Resume Session** in Find Action (`Ctrl+Shift+A`).

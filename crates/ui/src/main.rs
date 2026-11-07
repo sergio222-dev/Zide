@@ -16,8 +16,11 @@ use std::{
 
 mod branches;
 mod chat;
+mod commit;
 mod definition;
+mod diff_view;
 mod file_icon;
+mod fileops;
 mod indent;
 mod markdown;
 mod meter;
@@ -29,10 +32,12 @@ mod session;
 mod statusbar;
 mod sticky;
 mod theme;
+mod tree_ops;
 mod usages;
 mod viewer;
 mod welcome;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::WindowExt;
@@ -42,6 +47,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tag::Tag;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use viewer::{Effect, FindStatus, FormatRequest, HighlightKey, Viewer};
 use welcome::{OpenProject, Welcome};
@@ -74,7 +80,10 @@ actions!(
         FindInFiles,
         RecentFiles,
         ToggleProjectTree,
+        RevealOpenFile,
         ToggleClaudeChat,
+        ToggleCommitPanel,
+        CommitNow,
         ToggleMarkdownPreview,
         NavigateBack,
         NavigateForward,
@@ -112,6 +121,8 @@ const MAX_SYMBOL_RESULTS: usize = 200;
 const MAX_RECENT: usize = 50;
 /// Height of a row of the project tree, in pixels.
 const TREE_ROW_HEIGHT: f32 = 22.;
+/// The width of the project tree panel.
+const TREE_WIDTH: f32 = 260.;
 const MAX_TEXT_RESULTS: usize = 1000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -122,6 +133,8 @@ enum Tab {
     Actions,
     /// Files opened in this session (Ctrl+E); not part of the Tab cycle.
     Recent,
+    /// Projects opened before, from the Actions tab; not part of the Tab cycle.
+    Projects,
 }
 
 impl Tab {
@@ -130,7 +143,7 @@ impl Tab {
             Tab::Files => Tab::Symbols,
             Tab::Symbols => Tab::Text,
             Tab::Text => Tab::Actions,
-            Tab::Actions | Tab::Recent => Tab::Files,
+            Tab::Actions | Tab::Recent | Tab::Projects => Tab::Files,
         }
     }
 }
@@ -198,6 +211,22 @@ fn action_registry() -> Vec<ActionDef> {
             closes_popup: true,
             state: None,
             run: |ws, window, cx| ws.toggle_tree(window, cx),
+        },
+        ActionDef {
+            name: "Toggle Commit Panel",
+            synonyms: &["commit", "git", "changes", "stage"],
+            action: Some(Box::new(ToggleCommitPanel)),
+            closes_popup: true,
+            state: None,
+            run: |ws, window, cx| ws.toggle_commit(window, cx),
+        },
+        ActionDef {
+            name: "Select Opened File in Project Tree",
+            synonyms: &["reveal", "locate", "scroll to file", "show in tree"],
+            action: Some(Box::new(RevealOpenFile)),
+            closes_popup: true,
+            state: None,
+            run: |ws, _, cx| ws.reveal_open_file(cx),
         },
         ActionDef {
             name: "Toggle Claude Chat",
@@ -363,6 +392,28 @@ fn action_registry() -> Vec<ActionDef> {
             run: |_, _, cx| cx.emit(OpenRequested),
         },
         ActionDef {
+            name: "Recent Projects",
+            synonyms: &["open recent", "switch project", "projects", "history"],
+            action: None,
+            closes_popup: false,
+            state: None,
+            run: |ws, _, cx| ws.show_tab(Tab::Projects, cx),
+        },
+        ActionDef {
+            name: "Close Project",
+            synonyms: &[
+                "close folder",
+                "welcome",
+                "dashboard",
+                "home",
+                "start screen",
+            ],
+            action: None,
+            closes_popup: true,
+            state: None,
+            run: |_, _, cx| cx.emit(CloseRequested),
+        },
+        ActionDef {
             name: "Quit",
             synonyms: &["exit", "close ide"],
             action: None,
@@ -406,6 +457,8 @@ struct Popup {
     /// Where the Text rows came from, beside the count (e.g. a language server).
     note: String,
     actions: Arc<Vec<ActionHit>>,
+    /// The Projects rows: the projects opened before that match the query.
+    projects: Arc<Vec<PathBuf>>,
     /// Draws the Actions rows; the query, matching and selection stay Zide's.
     commands: Entity<CommandState>,
     symbols: Arc<Vec<SymbolHit>>,
@@ -425,6 +478,7 @@ impl Popup {
             Tab::Text => self.text.len(),
             Tab::Actions => self.actions.len(),
             Tab::Recent => self.files.len(),
+            Tab::Projects => self.projects.len(),
         }
     }
 
@@ -466,6 +520,16 @@ struct OpenRequested;
 
 impl EventEmitter<OpenRequested> for Workspace {}
 
+/// The user asked for "Close Project": the [`Shell`] goes back to the welcome screen.
+struct CloseRequested;
+
+impl EventEmitter<CloseRequested> for Workspace {}
+
+/// The user chose a project from "Recent Projects": the [`Shell`] swaps it in.
+struct ProjectRequested(PathBuf);
+
+impl EventEmitter<ProjectRequested> for Workspace {}
+
 struct Workspace {
     focus: FocusHandle,
     /// Editor font size, changed with Ctrl+wheel and shared by every file.
@@ -474,6 +538,8 @@ struct Workspace {
     minimap: bool,
     /// When the last Space was pressed in Normal mode: two in a row open the popup.
     last_space: Option<Instant>,
+    /// The diff of a commit panel file is on screen, in a dialog.
+    diff_open: bool,
     /// The frame-rate overlay, when started with `ZIDE_FPS=1`.
     meter: Option<meter::FrameMeter>,
     /// The project tree on the left.
@@ -484,6 +550,14 @@ struct Workspace {
     /// Whether a supported `claude` is installed, once known.
     claude_installed: bool,
     claude_open: bool,
+    commit: Option<commit::CommitPanel>,
+    commit_open: bool,
+    /// What git says of each changed file, for the colors of the project tree.
+    /// The entry the tree copied (`y`), for `p`.
+    tree_clipboard: Option<String>,
+    /// A path the next scan selects in the tree (the one just moved or pasted).
+    tree_reveal: Option<String>,
+    git_status: Arc<std::collections::HashMap<String, zide_git::ChangeKind>>,
     /// Chats started from now on run `claude` with none of the user's configuration, which
     /// makes a test turn cheap; see `zide_claude::Options::minimal`.
     claude_bare: bool,
@@ -586,6 +660,7 @@ impl Workspace {
                     Change::Contents => {
                         let previous = this.symbols.clone();
                         this.index_symbols(previous, cx);
+                        this.refresh_commit(cx);
                     }
                 });
                 if reacted.is_err() {
@@ -626,6 +701,7 @@ impl Workspace {
             font_size: viewer::DEFAULT_FONT_SIZE,
             minimap: true,
             last_space: None,
+            diff_open: false,
             meter: meter::FrameMeter::from_env(),
             tree: Tree::new(),
             tree_visible: false,
@@ -633,6 +709,11 @@ impl Workspace {
             claude_installed: false,
             claude_bare: false,
             claude_open: false,
+            commit: None,
+            commit_open: false,
+            tree_clipboard: None,
+            tree_reveal: None,
+            git_status: Arc::default(),
             branch: None,
             branches: None,
             md_preview: false,
@@ -718,11 +799,15 @@ impl Workspace {
                 if let Some(viewer) = &this.viewer {
                     this.tree.reveal(viewer.path()); // the file restored at startup
                 }
+                if let Some(path) = this.tree_reveal.take() {
+                    this.tree.reveal(&path);
+                }
                 this.replace_index(FileIndex::new(paths));
                 this._watcher = watcher.ok();
                 // the old store indexes the old file list: keep it only to reuse its stubs
                 let previous = this.symbols.take();
                 this.index_symbols(previous, cx);
+                this.refresh_commit(cx);
                 this.search_again(cx);
             })
             .ok();
@@ -889,6 +974,7 @@ impl Workspace {
             text_status: String::new(),
             note: String::new(),
             actions: Arc::default(),
+            projects: Arc::default(),
             commands,
             symbols: Arc::default(),
             options: TextOptions::default(),
@@ -1234,7 +1320,21 @@ impl Workspace {
     /// Alt+Down / Alt+Up in the editor.
     /// Ctrl+minus / plus (Ctrl+Shift for all of them): `command` is a `z` fold command.
     fn fold(&mut self, command: char, cx: &mut Context<Self>) {
-        if self.popup.is_some() || self.tree_focused {
+        if self.popup.is_some() {
+            cx.propagate();
+            return;
+        }
+        if self.tree_focused && self.tree_visible {
+            // the tree has no regions to fold: the *All* commands open or close every folder
+            match command {
+                'R' => self.tree.expand_all(),
+                'M' => self.tree.collapse_all(),
+                _ => return cx.propagate(),
+            }
+            self.scroll_tree_to_selection();
+            return cx.notify();
+        }
+        if self.tree_focused {
             cx.propagate();
             return;
         }
@@ -1592,26 +1692,20 @@ impl Workspace {
         }
     }
 
-    /// A row whose name is cut off on the right scrolls sideways so its icon sits at the left
-    /// edge; a row that fits shows the tree from the left again. Text width is estimated.
+    /// Scrolls the tree sideways so the icon of `row` sits in the middle of the panel, as far as
+    /// the width of the tree allows (a tree that fits does not scroll).
     fn scroll_tree_sideways(&self, row: usize) {
-        const CHAR: f32 = 7.5; // approximate advance of one character
         const ICON_AT: f32 = 24.; // chevron column + gap, after the indent
+        const ICON: f32 = 16.;
         let rows = self.tree.shared_rows();
         let Some(row) = rows.get(row) else { return };
         let handle = self.tree_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.width);
-        let viewport = if viewport > 0. { viewport } else { 260. };
-        let icon_x = ICON_AT + 14. * row.depth as f32;
-        let right = icon_x + 20. + CHAR * row.name.chars().count() as f32 + 8.;
+        let viewport = if viewport > 0. { viewport } else { TREE_WIDTH };
+        let icon_middle = ICON_AT + 14. * row.depth as f32 + ICON / 2.;
         let max = f32::from(handle.max_offset().x);
-        let x = if right > viewport {
-            -icon_x.min(max)
-        } else {
-            0.
-        };
         let mut offset = handle.offset();
-        offset.x = px(x);
+        offset.x = px(-(icon_middle - viewport / 2.).clamp(0., max));
         handle.set_offset(offset);
     }
 
@@ -1621,6 +1715,8 @@ impl Workspace {
         if self.claude_open {
             return self.toggle_claude(window, cx);
         }
+        self.autosave(cx);
+        self.leave_commit_list();
         match (self.tree_visible, self.tree_focused) {
             (true, true) => {
                 self.tree_visible = false;
@@ -1631,6 +1727,22 @@ impl Workspace {
                 self.tree_focused = true;
                 self.scroll_tree_to_selection();
             }
+        }
+        cx.notify();
+    }
+
+    /// Alt+Shift+`: shows the tree scrolled to the file open in the editor, selected and centered
+    /// (IntelliJ's *Select Opened File*). The keyboard stays where it was.
+    fn reveal_open_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path().to_string()) else {
+            return;
+        };
+        self.tree_visible = true;
+        self.tree.reveal(&path);
+        if let Some(row) = self.tree.selected() {
+            // in the middle of the panel, when the tree is long enough to scroll
+            self.tree_scroll.scroll_to_item(row, ScrollStrategy::Center);
+            self.scroll_tree_sideways(row);
         }
         cx.notify();
     }
@@ -1722,10 +1834,13 @@ impl Workspace {
 
     /// Ctrl+H / Ctrl+L: moves the focus to the project tree (showing it if hidden) or back to
     /// the editor.
-    fn focus_tree(&mut self, tree: bool, cx: &mut Context<Self>) {
+    fn focus_tree(&mut self, tree: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.is_some() || (!tree && self.viewer.is_none()) {
             return;
         }
+        self.autosave(cx); // leaving a panel is a save
+        self.leave_commit_list();
+        self.focus.focus(window, cx); // the commit message gives the keyboard back
         if tree {
             self.tree_visible = true;
             self.scroll_tree_to_selection();
@@ -1735,7 +1850,7 @@ impl Workspace {
     }
 
     /// Keys while the tree has the focus: Vim motions, arrows and Enter.
-    fn tree_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn tree_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         use zide_vim::Key;
         let pending_g = std::mem::take(&mut self.tree_g);
         let outcome = match (event.keystroke.key.as_str(), vim_key(event)) {
@@ -1773,6 +1888,26 @@ impl Workspace {
                 self.tree_focused = false;
                 TreeOutcome::None
             }
+            (_, Some(Key::Char('m'))) => {
+                self.tree_move(window, cx);
+                TreeOutcome::None
+            }
+            (_, Some(Key::Char('d'))) => {
+                self.tree_delete(window, cx);
+                TreeOutcome::None
+            }
+            (_, Some(Key::Char('y'))) => {
+                self.tree_copy();
+                TreeOutcome::None
+            }
+            (_, Some(Key::Char('p'))) => {
+                self.tree_paste(cx);
+                TreeOutcome::None
+            }
+            (_, Some(Key::Char('a'))) => {
+                self.tree_new(window, cx);
+                TreeOutcome::None
+            }
             _ => TreeOutcome::None,
         };
         self.apply_tree_outcome(outcome, cx);
@@ -1802,6 +1937,7 @@ impl Workspace {
         let rows = self.tree.shared_rows();
         let selected = self.tree.selected();
         let focused = self.tree_focused;
+        let git_status = self.git_status.clone();
         let workspace = cx.entity();
         // the widest row sets the scrollable width (an indent step is about two characters)
         let widest = rows
@@ -1844,7 +1980,15 @@ impl Workspace {
                                 .flex_shrink_0()
                                 .text_color(rgb(color))
                         })
-                        .child(div().flex_shrink_0().child(row.name.clone()))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .when_some(
+                                    git_status.get(&row.path).filter(|_| !row.dir),
+                                    |d, kind| d.text_color(rgb(commit::kind_color(*kind))),
+                                )
+                                .child(row.name.clone()),
+                        )
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             workspace.update(cx, |this, cx| {
                                 this.tree_focused = true;
@@ -1863,10 +2007,25 @@ impl Workspace {
         .with_width_from_item(widest)
         .track_scroll(&self.tree_scroll)
         .size_full();
+        let (expand, collapse) = (cx.entity(), cx.entity());
+        let tool = |id: &'static str, icon: IconName| {
+            div()
+                .id(id)
+                .p_1()
+                .rounded(px(3.))
+                .text_color(rgb(theme::MUTED))
+                .hover(|d| {
+                    d.bg(rgb(theme::TREE_SELECTED))
+                        .text_color(rgb(theme::STRONG))
+                })
+                .child(Icon::new(icon).size_4())
+        };
         div()
             .id("project-tree")
+            .flex()
+            .flex_col()
             .flex_shrink_0()
-            .w(px(260.))
+            .w(px(TREE_WIDTH))
             .h_full()
             .border_r_1()
             .border_color(rgb(theme::BORDER))
@@ -1874,11 +2033,54 @@ impl Workspace {
             .text_color(rgb(theme::TEXT))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_1()
+                    .px_2()
+                    .h(px(26.))
+                    .flex_shrink_0()
+                    .child(tool("tree-expand-all", IconName::ChevronsUpDown).on_click(
+                        move |_, _, cx| {
+                            expand.update(cx, |this, cx| {
+                                this.tree.expand_all();
+                                cx.notify();
+                            })
+                        },
+                    ))
+                    .child(
+                        tool("tree-collapse-all", IconName::ChevronsDownUp).on_click(
+                            move |_, _, cx| {
+                                collapse.update(cx, |this, cx| {
+                                    this.tree.collapse_all();
+                                    this.scroll_tree_to_selection();
+                                    cx.notify();
+                                })
+                            },
+                        ),
+                    ),
+            )
+            .child(
+                div()
                     .relative()
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
                     .child(list)
                     .child(Scrollbar::new(&self.tree_scroll)),
             )
+    }
+
+    /// Registers a Space; true when it is the second of a double tap.
+    fn space_twice(&mut self) -> bool {
+        let now = Instant::now();
+        let double = self
+            .last_space
+            .take()
+            .is_some_and(|t| now.duration_since(t) <= DoubleShiftDetector::DEFAULT_INTERVAL);
+        if !double {
+            self.last_space = Some(now);
+        }
+        double
     }
 
     fn editor_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1894,27 +2096,25 @@ impl Workspace {
             }
             return; // the input handles its own keys
         }
+        if self.commit_open && self.commit.as_ref().is_some_and(|panel| panel.list_focused) {
+            self.commit_key(event, window, cx);
+            cx.stop_propagation();
+            return;
+        }
         let m = event.keystroke.modifiers;
         let plain = !(m.control || m.alt || m.platform || m.shift);
         let in_tree = self.tree_focused && self.tree_visible;
         let idle = in_tree || self.viewer.as_ref().is_none_or(Viewer::awaits_command);
         if event.keystroke.key == "space" && plain && idle {
-            let now = Instant::now();
-            let double = self
-                .last_space
-                .take()
-                .is_some_and(|t| now.duration_since(t) <= DoubleShiftDetector::DEFAULT_INTERVAL);
-            if double {
+            if self.space_twice() {
                 self.open_popup(window, cx);
-            } else {
-                self.last_space = Some(now);
             }
             cx.stop_propagation();
             return;
         }
         self.last_space = None;
         if in_tree {
-            self.tree_key(event, cx);
+            self.tree_key(event, window, cx);
             cx.stop_propagation();
             return;
         }
@@ -1964,6 +2164,13 @@ impl Workspace {
         if self.popup.as_ref().is_some_and(|p| p.tab == Tab::Actions) {
             return self.run_selected_action(window, cx);
         }
+        if let Some(popup) = self.popup.as_ref().filter(|p| p.tab == Tab::Projects) {
+            if let Some(project) = popup.projects.get(popup.selected).cloned() {
+                self.close_popup(window, cx);
+                cx.emit(ProjectRequested(project));
+            }
+            return;
+        }
         let (Some(popup), Some(index)) = (&self.popup, &self.index) else {
             return;
         };
@@ -1980,7 +2187,7 @@ impl Workspace {
                 let symbol = self.symbols.as_ref()?.symbol(hit.entry);
                 Some((symbol.file, Some(symbol.node.line)))
             }),
-            Tab::Actions => None,
+            Tab::Actions | Tab::Projects => None,
         };
         if let Some((file, line)) = target {
             let path = index.paths()[file].clone();
@@ -2328,6 +2535,8 @@ impl Workspace {
                 let (result, status) = outcome;
                 match result {
                     Ok(()) => {
+                        this.commit_finished(true, cx);
+                        this.refresh_git(cx); // the gutter compares with the new HEAD
                         this.branch = status;
                         this.rescan(cx);
                         if let Some(done) = done {
@@ -2335,7 +2544,10 @@ impl Workspace {
                         }
                         cx.notify();
                     }
-                    Err(why) => this.notify(Notification::error(why).title(failure), cx),
+                    Err(why) => {
+                        this.commit_finished(false, cx);
+                        this.notify(Notification::error(why).title(failure), cx)
+                    }
                 }
             })
             .ok();
@@ -2552,6 +2764,12 @@ impl Workspace {
     /// never waits and never shows stale hits.
     fn search_again(&mut self, cx: &mut Context<Self>) {
         self.cancel_running_search();
+        if let Some(popup) = self.popup.as_mut().filter(|p| p.tab == Tab::Projects) {
+            // a short list read from disk: matched here, and it does not wait for the index
+            popup.projects = Arc::new(matching_projects(&self.root, &popup.query));
+            popup.select(0);
+            return cx.notify();
+        }
         let (Some(popup), Some(index)) = (&mut self.popup, self.index.clone()) else {
             cx.notify();
             return;
@@ -2626,6 +2844,7 @@ impl Workspace {
                     self.search_symbols(query, symbols, generation, cancel, cx);
                 }
             }
+            Tab::Projects => {}
             Tab::Actions => {
                 popup.actions = Arc::new(search_actions(&self.action_texts, &query, usize::MAX));
                 popup.select(0);
@@ -2808,6 +3027,7 @@ impl Workspace {
         match (&self.index, popup.tab) {
             (_, Tab::Actions) => format!("{} actions", popup.actions.len()),
             (_, Tab::Recent) => format!("{} recent files", popup.files.len()),
+            (_, Tab::Projects) => format!("{} recent projects", popup.projects.len()),
             (None, _) => format!("Indexing {}…", self.root.display()),
             (Some(_), Tab::Symbols) => match &self.symbols {
                 None => "Indexing symbols…".into(),
@@ -2904,6 +3124,12 @@ impl Workspace {
                 cx.listener(|this, _: &ToggleProjectTree, window, cx| this.toggle_tree(window, cx)),
             )
             .on_action(
+                cx.listener(|this, _: &ToggleCommitPanel, window, cx| {
+                    this.toggle_commit(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &RevealOpenFile, _, cx| this.reveal_open_file(cx)))
+            .on_action(
                 cx.listener(|this, _: &ToggleClaudeChat, window, cx| {
                     this.toggle_claude(window, cx)
                 }),
@@ -2927,8 +3153,12 @@ impl Workspace {
                 cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
-            .on_action(cx.listener(|this, _: &FocusTree, _, cx| this.focus_tree(true, cx)))
-            .on_action(cx.listener(|this, _: &FocusEditor, _, cx| this.focus_tree(false, cx)))
+            .on_action(
+                cx.listener(|this, _: &FocusTree, window, cx| this.focus_tree(true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusEditor, window, cx| this.focus_tree(false, window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &ExtendSelection, _, cx| this.change_selection(true, cx)),
             )
@@ -2943,18 +3173,43 @@ impl Workspace {
             .on_action(
                 cx.listener(|this, _: &PreviousMethod, _, cx| this.jump_to_method(false, cx)),
             )
-            .on_action(cx.listener(|this, _: &SwitchTab, _, cx| {
+            .on_action(cx.listener(|this, _: &SwitchTab, window, cx| {
                 if this.popup.is_some() {
                     this.switch_tab(cx);
+                } else {
+                    this.commit_tab(window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &CommitNow, window, cx| this.commit_now(window, cx)))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if window.has_active_dialog(cx) {
+                    // typing in a dialog is not for the editor or the tree; only the diff gives
+                    // way to the search popup
+                    let plain = event.keystroke.modifiers == Modifiers::default();
+                    if this.diff_open
+                        && event.keystroke.key == "space"
+                        && plain
+                        && this.space_twice()
+                    {
+                        window.close_all_dialogs(cx);
+                        this.diff_open = false;
+                        this.open_popup(window, cx);
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                this.diff_open = false;
                 if this.branches.is_some() {
                     return this.branches_key(event, window, cx);
                 }
                 let Some(popup) = &mut this.popup else {
                     // the chat's keys are seen earlier, by the interceptor
-                    if !this.claude_open {
+                    if this.commit_open && this.commit_focused(window, cx) {
+                        if event.keystroke.key == "escape" {
+                            this.focus_commit_list(window, cx); // out of the message, onto the files
+                            cx.stop_propagation();
+                        }
+                    } else if !this.claude_open {
                         this.editor_key(event, window, cx);
                     }
                     return;
@@ -2980,6 +3235,9 @@ impl Workspace {
                     .min_h_0()
                     .w_full()
                     .children(self.tree_visible.then(|| self.project_tree(cx)))
+                    .children(
+                        (self.commit_open && self.commit.is_some()).then(|| self.commit_view(cx)),
+                    )
                     .child(match &self.viewer {
                         Some(viewer) => div()
                             .flex()
@@ -3021,6 +3279,7 @@ impl Workspace {
                                                 && viewer.click(row, at)
                                             {
                                                 this.tree_focused = false; // keys are the editor's
+                                                this.leave_commit_list();
                                                 cx.notify();
                                             }
                                         });
@@ -3107,6 +3366,7 @@ impl Workspace {
         );
         let selected = popup.selected;
         let rows = match (popup.tab, &self.index) {
+            (Tab::Projects, _) => Some(project_items(&popup.projects)),
             (Tab::Actions, _) => Some(action_items(&popup.actions, &self.registry, self)),
             (Tab::Files | Tab::Recent, Some(index)) => Some(file_items(index, &popup.files)),
             (Tab::Text, Some(index)) => Some(text_items(index, &popup.text)),
@@ -3397,6 +3657,42 @@ fn action_items(
         .collect()
 }
 
+/// The projects opened before that match every word of `query` (in the name or the location),
+/// leaving out the one open.
+fn matching_projects(open: &Path, query: &str) -> Vec<PathBuf> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    projects::recent()
+        .into_iter()
+        .filter(|project| project != open)
+        .filter(|project| {
+            let text = format!(
+                "{} {}",
+                projects::title(project),
+                projects::location(project)
+            );
+            let text = text.to_lowercase();
+            words.iter().all(|word| text.contains(word))
+        })
+        .collect()
+}
+
+fn project_items(projects: &[PathBuf]) -> Vec<CommandItem> {
+    projects
+        .iter()
+        .map(|project| {
+            let (title, location) = (projects::title(project), projects::location(project));
+            CommandItem::new().child(move |_, _| {
+                div().flex().flex_1().gap_2().child(title.clone()).child(
+                    div()
+                        .ml_auto()
+                        .text_color(rgb(theme::MUTED))
+                        .child(location.clone()),
+                )
+            })
+        })
+        .collect()
+}
+
 fn file_items(index: &FileIndex, hits: &[FileHit]) -> Vec<CommandItem> {
     hits.iter()
         .map(|hit| {
@@ -3586,6 +3882,9 @@ fn popup_frame(
                 .flex()
                 .gap_1()
                 .children((tab == Tab::Recent).then(|| tab_label("Recent files", Tab::Recent)))
+                .children(
+                    (tab == Tab::Projects).then(|| tab_label("Recent projects", Tab::Projects)),
+                )
                 .child(tab_label("Files", Tab::Files))
                 .child(tab_label("Symbols", Tab::Symbols))
                 .child(tab_label("Text", Tab::Text))
@@ -3621,7 +3920,8 @@ enum Content {
 }
 
 impl Shell {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// The welcome screen, and what listens to it.
+    fn welcome(window: &mut Window, cx: &mut Context<Self>) -> (Entity<Welcome>, Subscription) {
         let welcome = cx.new(|cx| Welcome::new(window, cx));
         let opened = cx.subscribe_in(
             &welcome,
@@ -3630,6 +3930,22 @@ impl Shell {
                 this.show_workspace(event.0.clone(), window, cx)
             },
         );
+        (welcome, opened)
+    }
+
+    /// Closes the project (saving it first) and goes back to the welcome screen.
+    fn close_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.autosave(cx);
+        let (welcome, opened) = Self::welcome(window, cx);
+        self._opened = opened;
+        self._activation = None;
+        self._workspace_requests = Vec::new();
+        self.content = Content::Welcome(welcome);
+        cx.notify();
+    }
+
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (welcome, opened) = Self::welcome(window, cx);
         let updates = cx.spawn(async move |this, cx| {
             loop {
                 if this
@@ -3848,6 +4164,19 @@ impl Shell {
                 window,
                 |this, _, _: &OpenRequested, window, cx| this.open_folder(window, cx),
             ),
+            cx.subscribe_in(
+                &workspace,
+                window,
+                |this, _, _: &CloseRequested, window, cx| this.close_project(window, cx),
+            ),
+            cx.subscribe_in(
+                &workspace,
+                window,
+                |this, _, event: &ProjectRequested, window, cx| {
+                    this.autosave(cx);
+                    this.show_workspace(event.0.clone(), window, cx)
+                },
+            ),
         ];
         workspace.read(cx).focus.clone().focus(window, cx);
         self.content = Content::Workspace(workspace);
@@ -3896,6 +4225,10 @@ fn apply_palette(cx: &mut App) {
     // the selected row, like the active tab chip
     colors.accent = rgb(theme::ACTIVE_BG).into();
     colors.accent_foreground = rgb(theme::STRONG).into();
+    // the diff dialog: the editor's background, with Zide's green and red for what changed
+    colors.background = rgb(theme::BACKGROUND).into();
+    colors.success = rgb(theme::OK).into();
+    colors.danger = rgb(theme::ERROR).into();
     // shortcuts, paths, hints
     colors.muted_foreground = rgb(theme::MUTED).into();
 }
@@ -3933,7 +4266,13 @@ fn main() {
             KeyBinding::new("ctrl-shift-~", SwitchBranch, Some("Workspace")),
             KeyBinding::new("ctrl-e", RecentFiles, Some("Workspace")),
             KeyBinding::new("alt-1", ToggleProjectTree, Some("Workspace")),
-            KeyBinding::new("alt-2", ToggleClaudeChat, Some("Workspace")),
+            KeyBinding::new("alt-shift-`", RevealOpenFile, Some("Workspace")),
+            // some layouts report Shift+` as the shifted character
+            KeyBinding::new("alt-~", RevealOpenFile, Some("Workspace")),
+            KeyBinding::new("alt-shift-~", RevealOpenFile, Some("Workspace")),
+            KeyBinding::new("alt-2", ToggleCommitPanel, Some("Workspace")),
+            KeyBinding::new("alt-enter", CommitNow, Some("Workspace")),
+            KeyBinding::new("alt-3", ToggleClaudeChat, Some("Workspace")),
             KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
             KeyBinding::new("ctrl-alt-left", NavigateBack, Some("Workspace")),
             KeyBinding::new("ctrl-alt-right", NavigateForward, Some("Workspace")),

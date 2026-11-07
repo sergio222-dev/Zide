@@ -193,6 +193,30 @@ impl Tree {
         self.activate()
     }
 
+    /// Expands every folder, as IntelliJ's *Expand All*.
+    pub fn expand_all(&mut self) {
+        self.expanded = self
+            .children
+            .values()
+            .flatten()
+            .filter(|entry| entry.dir)
+            .map(|entry| entry.path.clone())
+            .collect();
+        self.rebuild_rows();
+    }
+
+    /// Collapses every folder, as IntelliJ's *Collapse All*. The selection, if it was inside one,
+    /// moves to the top folder that held it.
+    pub fn collapse_all(&mut self) {
+        self.expanded.clear();
+        if let Some(selected) = &mut self.selected
+            && let Some((top, _)) = selected.split_once('/')
+        {
+            *selected = top.to_string();
+        }
+        self.rebuild_rows();
+    }
+
     /// Expands the folders above `path` and selects it (IntelliJ's *Select Opened File*).
     pub fn reveal(&mut self, path: &str) {
         let mut rest = path;

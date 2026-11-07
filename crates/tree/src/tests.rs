@@ -154,3 +154,16 @@ fn half_a_page_moves_half_the_visible_rows_and_stops_at_the_ends() {
     t.move_half_page(0, true); // nothing laid out yet: still one row
     assert_eq!(t.selected(), Some(1));
 }
+
+#[test]
+fn expand_all_opens_every_folder_and_collapse_all_closes_them_keeping_the_selection_visible() {
+    let mut t = tree(&["a/b/c.rs", "a/d.rs", "z.rs"], &["a", "a/b"]);
+    t.expand_all();
+    assert_eq!(names(&t), ["a", " b", "  c.rs", " d.rs", "z.rs"]);
+    t.select(2); // a/b/c.rs
+    t.collapse_all();
+    assert_eq!(names(&t), ["a", "z.rs"]);
+    assert_eq!(t.selected(), Some(0));
+    t.expand_all();
+    assert_eq!(t.rows().len(), 5);
+}
