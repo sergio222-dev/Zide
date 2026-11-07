@@ -11,6 +11,13 @@ S5. Tests use fixtures captured from the real CLI (2.1.319), trimmed and without
 S7. Phase 2: Alt+2 toggles a full-screen chat that replaces the editor area; it shows the history (Markdown for the assistant's text, a line per tool call, Allow/Deny for permissions), has a multi-line input (Enter sends, Shift+Enter adds a line, no vim), Esc interrupts a running turn and closes the view when idle. The session belongs to the Workspace, so a turn keeps running with the chat closed. Questions are denied on arrival with a plain-text reply until phase 4.
 S6. No vim in the chat input box, the chat is a full-screen view on Alt+2 and the status bar shows the Claude icon with the colors above (later phases, out of scope here).
 
+S8. Sessions: "habria que agregar a la interfaz la lista de sesiones, las sessiones se podran continuar como hace --resume." A list of the project's earlier sessions in the chat; picking one continues it (`--resume`).
+S9. Slash menu: "una lista de comandos o skills como hace hoy claude code con la barra /".
+S10. File mentions: "agregar archivos como con el @".
+S11. Images: "agregar imagenes (ctrl+v)".
+S12. Output formatting, after the above: "el formateo de la salida de la respuesta de claude usando gpui-kit en las tablas tal vez, folding de la salida, etc."
+S13. The status bar icon (phase 3) is postponed: "no vi el icono de claude, lo podemos dejar para mas adelante".
+
 ## Tasks
 - [x] T1 (S1) Spike cherry-picked onto feat/claude-chat (72b0468, 4e7c532), `cli` module (`installed()`, `MIN_VERSION` = 2.1.319, the release the fixture came from), live test stays `#[ignore]`. 8c451a8.
 - [x] T2 (S2, S5) Rich `Event` and `parse_events` (one line can yield several events; subagent messages left out), fixture `tests/fixtures/read-turn.jsonl` from a real turn. 8c451a8.
@@ -18,6 +25,12 @@ S6. No vim in the chat input box, the chat is a full-screen view on Alt+2 and th
 - [x] T4 (S2) Session emits `Event::Exit` when the process ends; example updated. 8c451a8. Not observed: the live test was not re-run (it costs about $1); Exit and the new parser are covered by unit tests and the real-capture fixture only.
 
 - [x] T5 (S7) `crates/ui/src/chat.rs`: `Chat` state, `ToggleClaudeChat` (Alt+2, also in the Actions list), session pump into the UI executor, history and input rendering, permission buttons, key gate so editor keys do not swallow typing. Route: inline (explorer mapped the UI first).
+- [ ] T6 (S8) Session list and resume (next). Sessions live where the CLI keeps them; the list shows title/first prompt and date, picking one respawns with `Options::resume` and shows its history.
+- [ ] T7 (S9) `/` menu with commands and skills.
+- [ ] T8 (S10) `@` file mentions (reuse the matcher/file index).
+- [ ] T9 (S11) Paste images with Ctrl+V.
+- [ ] T10 (S12) Output formatting: tables, folding of long output and tool results, tool cards and diffs, the AskUserQuestion UI.
+- [ ] T11 (S13) Status bar icon and the four colors (postponed).
 
 Route declaration: all inline. No Writer trigger: one coherent unit in one crate, each task depends on the previous API.
 
@@ -29,3 +42,4 @@ L4 (2026-11-07) Verification: `cargo test -p zide-claude` 38 unit + 3 fixture te
 L5 (2026-11-07) Explorer map of crates/ui: actions at main.rs `actions!`, bindings in `cx.bind_keys`, `Workspace::view` builds the middle row (tree + viewer + preview) that the chat replaces, channels are `async_channel` plus `cx.spawn`, multi-line input is gpui-component `TextareaState` (`submit_on_enter`, `InputEvent::PressEnter{shift}`), Markdown via `TextView`/`TextViewState` (one state per assistant text block, `set_text` on each delta). Child modules of the crate root can `impl Workspace` and read its private fields.
 L6 (2026-11-07) Verification: `cargo build -p zide-ui`, `cargo clippy -p zide-ui -p zide-claude --all-targets` clean, tests pass, the app starts and runs 10s without panics. Not observed: Alt+2, sending a message, streaming render, Allow/Deny, Esc interrupt: they need a person at the keyboard (and a real turn costs ~$0.6).
 L7 (2026-11-07) User: "para los test no se podria usar claude --bare? para reducir el consumo/context". `--bare` only accepts ANTHROPIC_API_KEY/apiKeyHelper (the user logs in with claude.ai OAuth), so it cannot work here. Measured instead, same prompt and fixture dir: full config = cache_creation 143,638 + cache_read 143,466 tokens, $0.59; with `--setting-sources "" --strict-mcp-config --disable-slash-commands --tools Read` = 2,214 + 5,411 tokens, $0.0106 (about 55x cheaper). Gotcha: `--tools` is variadic and swallows a trailing prompt argument. Added `Options::minimal`; the ignored live test uses it and passes in 3s (interrupt, parser and session verified against the real CLI).
+L8 (2026-11-07) After trying phase 2: "se ve bien, aunque no vi el icono de claude, lo podemos dejar para mas adelante, habria que agregar a la interfaz la lista de sesiones, las sessiones se podran continuar como hace --resume. a futuro agregar una lista de comandos o skills como hace hoy claude code con la barra /, y anotar tambien para hacer el agregar archivos como con el @, y por ultimo agregar imagenes (ctrl+v). Luego nos concentraremos en el formateo de la salida de la respuesta de claude usando gpui-kit en las tablas tal vez, folding de la salida, etc."
