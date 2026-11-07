@@ -254,10 +254,11 @@ impl Workspace {
 
     /// A ring that fills with the context; its panel has the window and the plan's limits.
     fn context_menu(&self, chat: &Chat, chats: &Chats, now: u64) -> Popover {
-        let share = gauges::context_share(&chat.transcript).unwrap_or(0.0);
+        let share = gauges::context_share(&chat.transcript, &chats.defaults).unwrap_or(0.0);
         let color = gauges::color(share);
         let transcript = chat.transcript.clone();
         let limits = chats.limits;
+        let defaults = chats.defaults.clone();
         Popover::new("claude-context-panel")
             .anchor(Anchor::BottomRight)
             .appearance(false)
@@ -270,9 +271,12 @@ impl Workspace {
                 ),
             )
             .content(move |_, _, _| {
-                panel(300.)
-                    .p_4()
-                    .child(gauges::report(&transcript, limits.as_ref(), now))
+                panel(300.).p_4().child(gauges::report(
+                    &transcript,
+                    &defaults,
+                    limits.as_ref(),
+                    now,
+                ))
             })
     }
 }

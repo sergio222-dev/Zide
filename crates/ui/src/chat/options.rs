@@ -251,6 +251,7 @@ mod tests {
         Defaults {
             model: Some("sonnet".into()),
             effort: Some("medium".into()),
+            ..Defaults::default()
         }
     }
 

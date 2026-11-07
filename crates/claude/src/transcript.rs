@@ -104,6 +104,8 @@ pub struct Transcript {
     /// Messages sent that have no result yet: the first is being answered, the rest wait.
     turns: usize,
     alive: bool,
+    /// The CLI is compacting the conversation.
+    compacting: bool,
     usage: Option<Usage>,
     context_window: Option<u64>,
     cost_usd: f64,
@@ -119,6 +121,7 @@ impl Default for Transcript {
             session_id: None,
             turns: 0,
             alive: true,
+            compacting: false,
             usage: None,
             context_window: None,
             cost_usd: 0.0,
@@ -162,6 +165,11 @@ impl Transcript {
     }
 
     /// How many tokens the model's context holds, once a turn has said so.
+    /// Whether the conversation is being compacted right now.
+    pub fn compacting(&self) -> bool {
+        self.compacting
+    }
+
     pub fn context_window(&self) -> Option<u64> {
         self.context_window
     }
@@ -265,6 +273,7 @@ impl Transcript {
                     });
                 }
             }
+            Event::Compacting(on) => self.compacting = on,
             Event::Usage(usage) => self.usage = Some(usage),
             Event::ContextWindow(tokens) => self.context_window = Some(tokens),
             // account-wide, so the workspace keeps it, not a conversation
@@ -296,6 +305,7 @@ impl Transcript {
                 terminal_reason,
             } => {
                 self.turns = self.turns.saturating_sub(1);
+                self.compacting = false;
                 self.cost_usd = cost_usd;
                 self.cancel_pending();
                 // Local commands (`/context`, `/cost`) answer without streaming: the result
@@ -591,6 +601,24 @@ mod tests {
         };
         assert_eq!(p.resolution, Some(Resolution::Cancelled));
         assert_eq!(t.blocks().last(), Some(&Block::Interrupted));
+    }
+
+    #[test]
+    fn compacting_lasts_until_it_ends_or_the_turn_does() {
+        let mut t = Transcript::new();
+        t.user_message("hi");
+        t.apply(Event::Compacting(true));
+        assert!(t.compacting());
+        t.apply(Event::Compacting(false));
+        assert!(!t.compacting());
+        t.apply(Event::Compacting(true));
+        t.apply(Event::Result {
+            text: String::new(),
+            is_error: false,
+            cost_usd: 0.0,
+            terminal_reason: None,
+        });
+        assert!(!t.compacting());
     }
 
     #[test]

@@ -1,10 +1,10 @@
 //! What is left of the context and of the account's usage limits, as bars in the panel the ring
-//! under the input opens. The CLI does not say when it compacts the conversation by
-//! itself, so the context bar shows how full the window is, not the distance to that point.
+//! under the input opens. The context bar counts up to where the CLI compacts the conversation
+//! by itself when the settings say (`autoCompactWindow`), else to the end of the window.
 
 use gpui_kit::component::progress::Progress;
 use gpui_kit::*;
-use zide_claude::{Limits, Transcript, Window as Usage};
+use zide_claude::{Defaults, Limits, Transcript, Window as Usage};
 
 use crate::theme;
 
@@ -62,18 +62,38 @@ fn bar(id: &'static str, label: &str, right: String, used: f64) -> Div {
         )
 }
 
-/// How full the context window is, 0 to 1, when the window is known.
-pub(super) fn context_share(transcript: &Transcript) -> Option<f64> {
-    let (usage, window) = (transcript.usage()?, transcript.context_window()?);
-    Some(usage.context_tokens as f64 / window as f64)
+/// What the context bar counts up to: where the conversation compacts by itself if that comes
+/// first, else the end of the window. `None` while the window is not known.
+pub(super) fn limit(transcript: &Transcript, defaults: &Defaults) -> Option<u64> {
+    let window = transcript.context_window()?;
+    Some(match defaults.compact_at(transcript.model()) {
+        Some(compact) if compact > 0 => compact.min(window),
+        _ => window,
+    })
+}
+
+/// How full the context is, 0 to 1, when its limit is known.
+pub(super) fn context_share(transcript: &Transcript, defaults: &Defaults) -> Option<f64> {
+    let (usage, limit) = (transcript.usage()?, limit(transcript, defaults)?);
+    Some(usage.context_tokens as f64 / limit as f64)
 }
 
 /// What the small ring under the input opens: the context window, then the plan's limits.
-pub(super) fn report(transcript: &Transcript, limits: Option<&Limits>, now: u64) -> Div {
-    let context = match (transcript.usage(), transcript.context_window()) {
+pub(super) fn report(
+    transcript: &Transcript,
+    defaults: &Defaults,
+    limits: Option<&Limits>,
+    now: u64,
+) -> Div {
+    let label = if defaults.compact_at(transcript.model()).is_some() {
+        "Until auto-compact"
+    } else {
+        "Context window"
+    };
+    let context = match (transcript.usage(), limit(transcript, defaults)) {
         (Some(usage), Some(window)) => bar(
             "claude-context",
-            "Context window",
+            label,
             format!("{} / {}", tokens(usage.context_tokens), tokens(window)),
             usage.context_tokens as f64 / window as f64,
         ),

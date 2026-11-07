@@ -1251,7 +1251,7 @@ impl Workspace {
                             .children(blocks)
                             .children(
                                 matches!(shown, Status::Working | Status::NeedsUser)
-                                    .then(|| thinking(shown)),
+                                    .then(|| thinking(shown, chat.transcript.compacting())),
                             )
                             .children(chat.notice.iter().map(|notice| {
                                 div().text_color(rgb(theme::ERROR)).child(notice.clone())
@@ -1481,9 +1481,11 @@ fn hidden_blocks(total: usize, shown: usize) -> usize {
 }
 
 /// The sign that Claude has not answered yet: a pulsing orange dot and what it is doing.
-fn thinking(status: Status) -> impl IntoElement {
+fn thinking(status: Status, compacting: bool) -> impl IntoElement {
     let (label, color) = match status {
         Status::NeedsUser => ("Waiting for you", theme::NEEDS_USER),
+        // what the CLI does by itself when the context is full, in blue like a question
+        _ if compacting => ("Auto-compacting…", theme::NEEDS_USER),
         _ => ("Thinking…", theme::WORKING),
     };
     div()
