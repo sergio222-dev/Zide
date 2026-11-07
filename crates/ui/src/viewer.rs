@@ -161,14 +161,19 @@ struct Selection {
 }
 
 impl Selection {
-    /// The display bytes of `row` that are selected, if any.
-    fn on_line(&self, row: usize, line: &Line) -> Option<Range<usize>> {
+    /// Whether the selection reaches `row`, even when the row is empty.
+    fn covers_row(&self, row: usize) -> bool {
         let last_row = if self.end.column == 0 && self.end.line > self.start.line {
             self.end.line - 1
         } else {
             self.end.line
         };
-        if row < self.start.line || row > last_row {
+        (self.start.line..=last_row).contains(&row)
+    }
+
+    /// The display bytes of `row` that are selected, if any.
+    fn on_line(&self, row: usize, line: &Line) -> Option<Range<usize>> {
+        if !self.covers_row(row) {
             return None;
         }
         if self.linewise {
@@ -1829,6 +1834,7 @@ impl Viewer {
                 end: self.buffer.position_of(range.end),
                 linewise,
             });
+        let linewise_selection = selection.filter(|s| s.linewise);
         let matches = self
             .find
             .as_ref()
@@ -1926,9 +1932,21 @@ impl Viewer {
                             colors = paint(&colors, range, rgb(color).into());
                         }
                     }
+                    // Visual Line paints the whole row (below), an empty one included; the
+                    // characterwise selection paints its text
+                    let selection = selection.filter(|s| !s.linewise);
                     if let Some(range) = selection.and_then(|s| s.on_line(row, line)) {
                         colors = paint(&colors, range, rgb(theme::SELECTION).into());
                     }
+                    let line_band = linewise_selection.filter(|s| s.covers_row(row)).map(|_| {
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px((12. * digits as f32 + 28.) * scale))
+                            .right_0()
+                            .h(px(row_height))
+                            .bg(rgb(theme::SELECTION))
+                    });
                     // The caret is drawn on the cell grid, so it is as wide on a space or
                     // a thin letter as on any other character.
                     let gutter = (12. * digits as f32 + 28.) * scale;
@@ -1976,6 +1994,7 @@ impl Viewer {
                             click(row, event.position, cx)
                         })
                         .children(bands)
+                        .children(line_band)
                         .child(
                             div()
                                 .relative()
@@ -3279,6 +3298,46 @@ mod tests {
         assert_eq!(selection.on_line(2, &line), Some(0..6));
         assert_eq!(selection.on_line(3, &line), Some(0..1));
         assert_eq!(selection.on_line(4, &line), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn visual_line_on_an_empty_line_selects_that_row() {
+        for (text, keys, row) in [("a\n\nb\n", "jV", 1), ("a\n\n", "jV", 1), ("\n", "V", 0)] {
+            let (dir, name) = temp_file("vline", text);
+            let mut viewer = Viewer::open(&dir, &name);
+            type_keys(&mut viewer, keys);
+            let (range, linewise) = viewer
+                .vim
+                .selection(&viewer.buffer)
+                .unwrap_or_else(|| panic!("no selection for {text:?}"));
+            assert!(linewise);
+            let selection = Selection {
+                start: viewer.buffer.position_of(range.start),
+                end: viewer.buffer.position_of(range.end),
+                linewise,
+            };
+            assert!(selection.covers_row(row), "{text:?}: {range:?}");
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_linewise_selection_reaches_empty_rows() {
+        let selection = Selection {
+            start: Position { line: 1, column: 0 },
+            end: Position { line: 4, column: 0 },
+            linewise: true,
+        };
+        assert!(!selection.covers_row(0));
+        assert!([1, 2, 3].into_iter().all(|row| selection.covers_row(row)));
+        assert!(!selection.covers_row(4));
+        // one empty line selected by itself
+        let single = Selection {
+            start: Position { line: 2, column: 0 },
+            end: Position { line: 2, column: 0 },
+            linewise: true,
+        };
+        assert!(single.covers_row(2));
     }
 
     #[::core::prelude::v1::test]
