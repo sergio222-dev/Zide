@@ -97,6 +97,8 @@ pub struct Chat {
     effort: Option<String>,
     model_select: options::Dropdown,
     effort_select: options::Dropdown,
+    /// The running process was started in bare mode.
+    bare: bool,
     /// The dropdowns show something else than `model` and `effort`.
     dropdowns_stale: bool,
     _dropdowns: Vec<Subscription>,
@@ -171,6 +173,7 @@ impl Chat {
             model_select,
             effort_select,
             dropdowns_stale: false,
+            bare: false,
             _dropdowns: dropdowns,
             session: None,
             input,
@@ -379,6 +382,7 @@ impl Workspace {
 
     /// Starts `claude` for a chat, continuing its conversation if one was running before.
     fn start_claude(&mut self, id: u64, cx: &mut Context<Self>) -> std::io::Result<()> {
+        let bare = self.claude_bare;
         let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
             return Ok(());
         };
@@ -387,10 +391,12 @@ impl Workspace {
             resume: resume.as_deref(),
             model: chat.model.as_deref(),
             effort: chat.effort.as_deref(),
+            minimal: bare,
             ..Options::default()
         };
         let (session, events) = Session::spawn(&self.root, options)?;
         chat.session = Some(session);
+        chat.bare = bare;
         chat.run += 1;
         let run = chat.run;
 
@@ -802,12 +808,11 @@ impl Workspace {
                                     .children(self.dropdowns_view())
                                     .child(gauges::view(&chat.transcript, limits.as_ref(), now)),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme::DIM))
-                                    .child(footer(chat.status(), &chat.transcript)),
-                            ),
+                            .child(div().text_xs().text_color(rgb(theme::DIM)).child(footer(
+                                chat.status(),
+                                chat.bare,
+                                &chat.transcript,
+                            ))),
                     ),
             )
             .children(popup);
@@ -971,7 +976,7 @@ fn hidden_blocks(total: usize, shown: usize) -> usize {
     total.saturating_sub(shown)
 }
 
-fn footer(status: Status, transcript: &Transcript) -> String {
+fn footer(status: Status, bare: bool, transcript: &Transcript) -> String {
     let state = match status {
         Status::Inactive => "Not running",
         Status::Idle => "Ready",
@@ -979,6 +984,9 @@ fn footer(status: Status, transcript: &Transcript) -> String {
         Status::NeedsUser => "Waiting for you",
     };
     let mut parts = vec![state.to_owned()];
+    if bare {
+        parts.push("bare mode".to_owned());
+    }
     if let Some(usage) = transcript.usage() {
         parts.push(format!("context {}k", usage.context_tokens / 1000));
     }

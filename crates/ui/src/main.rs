@@ -216,6 +216,17 @@ fn action_registry() -> Vec<ActionDef> {
             run: |ws, window, cx| ws.claude_history(window, cx),
         },
         ActionDef {
+            name: "Claude: Bare Mode",
+            synonyms: &["claude", "test", "minimal", "cheap", "bare"],
+            action: None,
+            closes_popup: false,
+            state: Some(|ws| ws.claude_bare),
+            run: |ws, _, cx| {
+                ws.claude_bare = !ws.claude_bare;
+                cx.notify();
+            },
+        },
+        ActionDef {
             name: "Claude: New Chat",
             synonyms: &["claude", "new", "clear", "session"],
             action: None,
@@ -473,6 +484,9 @@ struct Workspace {
     /// Whether a supported `claude` is installed, once known.
     claude_installed: bool,
     claude_open: bool,
+    /// Chats started from now on run `claude` with none of the user's configuration, which
+    /// makes a test turn cheap; see `zide_claude::Options::minimal`.
+    claude_bare: bool,
     /// Sees the chat's keys before the input box turns them into its own actions.
     _claude_keys: Subscription,
     /// The checked-out branch and how far it is from its upstream, `None` outside a repository.
@@ -617,6 +631,7 @@ impl Workspace {
             tree_visible: false,
             claude: None,
             claude_installed: false,
+            claude_bare: false,
             claude_open: false,
             branch: None,
             branches: None,
