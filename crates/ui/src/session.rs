@@ -8,7 +8,7 @@ use std::{
 
 /// Folder inside the project where Zide keeps what it remembers about it, so what a project
 /// costs in space is visible there.
-const FOLDER: &str = ".zide";
+const FOLDER: &str = zide_core::STATE_FOLDER;
 
 /// One small file per kind of fact, in the project's `.zide` folder.
 fn file_for(root: &Path, kind: &str) -> PathBuf {

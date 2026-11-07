@@ -10,7 +10,12 @@ pub struct Scan {
     pub dirs: Vec<String>,
 }
 
-/// Lists the files under `root`, in parallel, honoring `.gitignore` and skipping `.git`.
+/// Folder inside a project where Zide keeps what it remembers about it. It is not part of the
+/// project: it is never listed, and so never watched.
+pub const STATE_FOLDER: &str = ".zide";
+
+/// Lists the files under `root`, in parallel, honoring `.gitignore` and skipping `.git` and
+/// Zide's own folder.
 pub fn scan_files(root: &Path) -> io::Result<Vec<String>> {
     scan_project(root).map(|scan| scan.files)
 }
@@ -27,7 +32,7 @@ pub fn scan_project(root: &Path) -> io::Result<Scan> {
     WalkBuilder::new(root)
         .hidden(false)
         .require_git(false)
-        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_entry(|entry| entry.file_name() != ".git" && entry.file_name() != STATE_FOLDER)
         .build_parallel()
         .run(|| {
             let tx = tx.clone();
@@ -93,6 +98,22 @@ mod tests {
         let mut dirs = scan_project(&dir).unwrap().dirs;
         dirs.sort();
         assert_eq!(dirs, ["src", "src/empty"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn zides_own_folder_is_neither_listed_nor_watched() {
+        // what Zide writes there (the caret of each file...) must not look like a change of the
+        // project: it would reindex everything each time
+        let dir = std::env::temp_dir().join(format!("zide-state-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(STATE_FOLDER)).unwrap();
+        fs::write(dir.join(STATE_FOLDER).join(".gitignore"), "*\n").unwrap();
+        fs::write(dir.join(STATE_FOLDER).join("views"), "x").unwrap();
+        fs::write(dir.join("a.rs"), "").unwrap();
+        let scan = scan_project(&dir).unwrap();
+        assert_eq!(scan.files, ["a.rs"]);
+        assert!(scan.dirs.is_empty(), "{:?}", scan.dirs);
         fs::remove_dir_all(&dir).unwrap();
     }
 
