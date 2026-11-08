@@ -1347,6 +1347,11 @@ pub fn commit_diff(root: &Path, hash: &str, change: &FileChange) -> Result<Strin
     run_raw(root, &args)
 }
 
+/// Starts tracking `path` (a file, or every file under a folder) without committing it.
+pub fn add(root: &Path, path: &str) -> Result<(), String> {
+    run(root, &["--literal-pathspecs", "add", "--", path], false).map(drop)
+}
+
 /// Commits `paths` (and nothing else, whatever else is staged) with `message`. `amend` folds them
 /// into the last commit; an empty message then keeps that commit's.
 pub fn commit(root: &Path, paths: &[String], message: &str, amend: bool) -> Result<(), String> {
@@ -1395,6 +1400,30 @@ mod commit_tests {
             run(&dir, &args, false).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn add_tracks_a_new_file_or_the_files_of_a_folder() {
+        let dir = repo("add");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("one.txt"), "1").unwrap();
+        fs::write(dir.join("src/a.rs"), "a").unwrap();
+        fs::write(dir.join("src/b.rs"), "b").unwrap();
+        let kinds = |dir: &Path| {
+            changes(dir)
+                .into_iter()
+                .map(|c| (c.path, c.kind))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(add(&dir, "one.txt"), Ok(()));
+        assert_eq!(add(&dir, "src"), Ok(()));
+        assert!(
+            kinds(&dir)
+                .iter()
+                .all(|(_, kind)| *kind == ChangeKind::Added)
+        );
+        assert!(add(&dir, "missing.txt").is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

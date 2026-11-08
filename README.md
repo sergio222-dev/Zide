@@ -128,6 +128,7 @@ the projects opened before (Enter opens one in this window) and **Open** picks a
 | `F3` / `Shift+F3` | Next / previous match |
 | `Ctrl+Shift+F` | Find in Files |
 | ``Ctrl+Shift+` `` | Switch Branch |
+| `Ctrl+Alt+A` | Add to Git: start tracking the selected file or folder in the tree (the open file elsewhere) |
 | `Ctrl+Shift+K` | Push dialog: commits to push, their files and diffs (`Tab` switches list, `Enter` opens the diff, `Ctrl+Enter` pushes) |
 | `Alt+F7` | Find Usages |
 | `gd` / `Ctrl+B` | Go to Definition |

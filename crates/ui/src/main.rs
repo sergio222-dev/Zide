@@ -83,6 +83,7 @@ actions!(
         RecentFiles,
         ToggleProjectTree,
         RevealOpenFile,
+        AddToGit,
         ToggleClaudeChat,
         ToggleCommitPanel,
         CommitNow,
@@ -238,6 +239,14 @@ fn action_registry() -> Vec<ActionDef> {
             closes_popup: true,
             state: None,
             run: |ws, _, cx| ws.reveal_open_file(cx),
+        },
+        ActionDef {
+            name: "Add to Git",
+            synonyms: &["track", "stage", "git add", "vcs"],
+            action: Some(Box::new(AddToGit)),
+            closes_popup: true,
+            state: None,
+            run: |ws, _, cx| ws.add_to_git(cx),
         },
         ActionDef {
             name: "Toggle Claude Chat",
@@ -3166,6 +3175,7 @@ impl Workspace {
                 }),
             )
             .on_action(cx.listener(|this, _: &RevealOpenFile, _, cx| this.reveal_open_file(cx)))
+            .on_action(cx.listener(|this, _: &AddToGit, _, cx| this.add_to_git(cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleClaudeChat, window, cx| {
                     this.toggle_claude(window, cx)
@@ -4326,6 +4336,7 @@ fn main() {
             // some layouts report Shift+` as the shifted character
             KeyBinding::new("alt-~", RevealOpenFile, Some("Workspace")),
             KeyBinding::new("alt-shift-~", RevealOpenFile, Some("Workspace")),
+            KeyBinding::new("ctrl-alt-a", AddToGit, Some("Workspace")),
             KeyBinding::new("alt-2", ToggleCommitPanel, Some("Workspace")),
             KeyBinding::new("alt-enter", CommitNow, Some("Workspace")),
             KeyBinding::new("alt-3", ToggleClaudeChat, Some("Workspace")),

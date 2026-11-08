@@ -99,6 +99,37 @@ impl Workspace {
         Some((row.path.clone(), row.dir))
     }
 
+    /// Ctrl+Alt+A: starts tracking in git the selected entry of the tree (a folder adds its
+    /// files); out of the tree, the open file.
+    pub(crate) fn add_to_git(&mut self, cx: &mut Context<Self>) {
+        let path = if self.tree_focused {
+            self.selected_entry().map(|(path, _)| path)
+        } else {
+            self.viewer.as_ref().map(|viewer| viewer.path().to_string())
+        };
+        let Some(path) = path else {
+            return self.notify(Notification::info("Nothing selected to add"), cx);
+        };
+        self.autosave(cx); // a file just created is on disk before git looks for it
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let shown = path.clone();
+            let added = cx
+                .background_executor()
+                .spawn(async move { zide_git::add(&root, &path) })
+                .await;
+            this.update(cx, |this, cx| {
+                match added {
+                    Ok(()) => this.notify(Notification::success(format!("Added {shown}")), cx),
+                    Err(why) => this.notify(Notification::error(why).title("Could not add it"), cx),
+                }
+                this.refresh_commit(cx); // the panel and the tree's colors show it
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// `m`: asks for the new path of the selected entry, and moves it there.
     pub(crate) fn tree_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((from, _)) = self.selected_entry() else {
