@@ -98,15 +98,18 @@ impl Workspace {
                     .child(
                         div()
                             .id(SharedString::from(format!("sent-image-{}", picture.number)))
+                            .flex_none()
                             .w(px(240.))
                             .h(px(160.))
+                            .overflow_hidden()
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.claude_preview(Some(image.clone()), cx)
                             }))
                             .child(
                                 img(picture.image.clone())
-                                    .size_full()
+                                    .w(px(240.))
+                                    .h(px(160.))
                                     .object_fit(ObjectFit::Contain)
                                     .rounded_md(),
                             ),
