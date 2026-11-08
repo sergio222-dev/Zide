@@ -1002,6 +1002,28 @@ impl Workspace {
 
     /// Asks git, off the UI thread, who last changed each line of the open file and what the last
     /// commit had, to mark the lines that differ.
+    /// The window got the focus: git may have changed while it was away (a commit, checkout,
+    /// merge or conflict in a terminal), and its watcher does not report the `.git` folder.
+    fn refresh_on_focus(&mut self, cx: &mut Context<Self>) {
+        self.refresh_commit(cx); // the changes, the tree's colors, the conflict check
+        self.refresh_git(cx); // the gutter compares with HEAD
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move { zide_git::branch_status(&root) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.branch != status {
+                    this.branch = status;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path().to_string()) else {
             return;
@@ -4280,14 +4302,17 @@ impl Shell {
         workspace.update(cx, |workspace, cx| workspace.restore_layout(window, cx));
         let saver = workspace.downgrade();
         self._activation = Some(cx.observe_window_activation(window, move |_, window, cx| {
-            if !window.is_window_active() {
-                saver
-                    .update(cx, |this, cx| {
+            let active = window.is_window_active();
+            saver
+                .update(cx, |this, cx| {
+                    if active {
+                        this.refresh_on_focus(cx);
+                    } else {
                         this.autosave(cx);
                         cx.notify();
-                    })
-                    .ok();
-            }
+                    }
+                })
+                .ok();
         }));
         self._workspace_requests = vec![
             cx.subscribe(&workspace, |this, _, _: &UpdateRequested, cx| {
