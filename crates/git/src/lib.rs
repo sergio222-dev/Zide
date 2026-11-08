@@ -9,6 +9,11 @@ use std::time::Duration;
 use similar::{Algorithm, DiffOp, TextDiff};
 
 pub mod merge;
+mod options;
+pub use options::{
+    Chosen, OTHER_BRANCH, Op, OptionDef, Value, blocked, conflict, def, merge_args, pull_args,
+    rebase_args,
+};
 
 /// How a line of the file differs from the last commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -562,6 +567,135 @@ pub fn push_remote(root: &Path, name: &str) -> Result<String, String> {
     }
 }
 
+/// What a pull can take from: the remotes, their branches, and the pair to start from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullChoices {
+    /// The checked-out branch, which the pull brings up to date.
+    pub current: String,
+    pub remotes: Vec<String>,
+    /// Remote-tracking branches with their remote (`origin/feat/x`).
+    pub branches: Vec<String>,
+    /// The remote the branch tracks, else `origin`, else the first one.
+    pub remote: String,
+    /// The branch it tracks there, else its own name.
+    pub branch: String,
+}
+
+impl PullChoices {
+    /// The branches of `remote`, without the remote's name in front.
+    pub fn branches_of(&self, remote: &str) -> Vec<String> {
+        let prefix = format!("{remote}/");
+        self.branches
+            .iter()
+            .filter_map(|full| full.strip_prefix(&prefix))
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+/// What to pull into the checked-out branch, and from where to start; an error says why there is
+/// nothing to pull (detached HEAD, no remote).
+pub fn pull_choices(root: &Path) -> Result<PullChoices, String> {
+    let found = branches(root).ok_or("This is not a git repository")?;
+    let current = found
+        .current
+        .clone()
+        .ok_or("HEAD is detached: there is no branch to pull into")?;
+    let remotes: Vec<String> = run(root, &["remote"], false)?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    if remotes.is_empty() {
+        return Err("This repository has no remote to pull from".into());
+    }
+    let config = |key: &str| {
+        run(
+            root,
+            &["config", "--get", &format!("branch.{current}.{key}")],
+            false,
+        )
+        .ok()
+    };
+    let tracked = config("remote").filter(|remote| remotes.contains(remote));
+    let remote = tracked
+        .clone()
+        .or_else(|| remotes.iter().find(|r| *r == "origin").cloned())
+        .unwrap_or_else(|| remotes[0].clone());
+    let branch = tracked
+        .and(config("merge"))
+        .map(|merge| {
+            merge
+                .strip_prefix("refs/heads/")
+                .unwrap_or(&merge)
+                .to_string()
+        })
+        .unwrap_or_else(|| current.clone());
+    Ok(PullChoices {
+        current,
+        remotes,
+        branches: found.remote,
+        remote,
+        branch,
+    })
+}
+
+/// The branches a merge or a rebase can take, and the one to start from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchChoices {
+    /// The checked-out branch.
+    pub current: String,
+    /// The other local branches, then the remote-tracking ones (`origin/feat/x`).
+    pub branches: Vec<String>,
+    /// What the current branch tracks, else `main` or `master`, else the first.
+    pub selected: String,
+}
+
+/// The branches to merge or rebase onto; an error says why there are none.
+pub fn branch_choices(root: &Path) -> Result<BranchChoices, String> {
+    let found = branches(root).ok_or("This is not a git repository")?;
+    let current = found
+        .current
+        .clone()
+        .ok_or("HEAD is detached: there is no branch to work on")?;
+    let list: Vec<String> = found
+        .local
+        .iter()
+        .map(|branch| branch.name.clone())
+        .filter(|name| *name != current)
+        .chain(found.remote.iter().cloned())
+        .collect();
+    let upstream = found
+        .local
+        .iter()
+        .find(|branch| branch.name == current)
+        .and_then(|branch| branch.upstream.clone());
+    let selected = upstream
+        .into_iter()
+        .chain(["main".to_string(), "master".to_string()])
+        .find(|name| list.contains(name))
+        .or_else(|| list.first().cloned())
+        .ok_or("There is no other branch")?;
+    Ok(BranchChoices {
+        current,
+        branches: list,
+        selected,
+    })
+}
+
+/// Runs the pull, merge or rebase `op` with the arguments `args` (see [`pull_args`],
+/// [`merge_args`] and [`rebase_args`]) on the checked-out branch. On a conflict git leaves the
+/// operation under way and says so in the error.
+pub fn integrate(root: &Path, op: Op, args: &[String]) -> Result<(), String> {
+    let command = match op {
+        Op::Pull => "pull",
+        Op::Merge => "merge",
+        Op::Rebase => "rebase",
+    };
+    let mut all = vec![command];
+    all.extend(args.iter().map(String::as_str));
+    run(root, &all, op == Op::Pull).map(drop)
+}
+
 /// Pushes the local branch `name` to `remote`, which then tracks it. Never forced.
 pub fn push_branch(root: &Path, name: &str, remote: &str) -> Result<(), String> {
     run(root, &["push", "--set-upstream", remote, name], true).map(drop)
@@ -719,6 +853,93 @@ mod tests {
             ],
         );
         (base, clone)
+    }
+
+    #[test]
+    fn a_pull_starts_from_what_the_branch_tracks_and_brings_the_new_commits() {
+        let (base, clone) = origin_and_clone("pull");
+        let origin = base.join("origin");
+        let head = |dir: &Path| run(dir, &["rev-parse", "HEAD"], false).unwrap();
+
+        let choices = pull_choices(&clone).unwrap();
+        assert_eq!(
+            (choices.remote.as_str(), choices.branch.as_str()),
+            ("origin", "main")
+        );
+        assert_eq!(choices.remotes, ["origin"]);
+        assert_eq!(choices.branches_of("origin"), ["main"]);
+
+        // a branch that tracks nothing starts from origin and its own name
+        git_in(&clone, &["switch", "-q", "-c", "feat/x"]);
+        let choices = pull_choices(&clone).unwrap();
+        assert_eq!(
+            (choices.remote.as_str(), choices.branch.as_str()),
+            ("origin", "feat/x")
+        );
+        git_in(&clone, &["switch", "-q", "main"]);
+
+        git_in(&origin, &["commit", "-q", "--allow-empty", "-m", "second"]);
+        git_in(&clone, &["fetch", "-q", "origin"]);
+        git_in(&clone, &["merge", "-q", "--ff-only", "origin/main"]);
+        let run_pull = |ids: &[&str]| {
+            git_in(&clone, &["reset", "-q", "--hard", "HEAD~1"]); // behind origin again
+            let chosen: Vec<Chosen> = ids
+                .iter()
+                .map(|id| Chosen::of(def(Op::Pull, id).unwrap()))
+                .collect();
+            integrate(&clone, Op::Pull, &pull_args(&chosen, "origin", "main"))
+        };
+        for ids in [&[][..], &["--rebase"], &["--ff-only", "--no-verify"]] {
+            assert_eq!(run_pull(ids), Ok(()), "{ids:?}");
+            assert_eq!(head(&clone), head(&origin), "{ids:?}");
+        }
+        // always a merge commit, or none at all (only staged)
+        assert_eq!(run_pull(&["--no-ff"]), Ok(()));
+        assert!(run(&clone, &["rev-parse", "HEAD^2"], false).is_ok());
+        assert_eq!(run_pull(&["--squash"]), Ok(()));
+        assert_ne!(head(&clone), head(&origin));
+
+        // git's reason is given back when the pull cannot go
+        let gone = pull_args(&[], "origin", "gone");
+        assert!(integrate(&clone, Op::Pull, &gone).is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_merge_and_a_rebase_take_the_other_branch_and_start_from_what_is_tracked() {
+        let (base, clone) = origin_and_clone("merge");
+        let head = |dir: &Path| run(dir, &["rev-parse", "HEAD"], false).unwrap();
+        git_in(&clone, &["switch", "-q", "-c", "feat/x"]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "work"]);
+        let choices = branch_choices(&clone).unwrap();
+        assert_eq!(choices.current, "feat/x");
+        assert_eq!(choices.selected, "main");
+        assert_eq!(choices.branches, ["main", "origin/main"]);
+
+        git_in(&clone, &["switch", "-q", "main"]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "ahead"]);
+        git_in(&clone, &["switch", "-q", "feat/x"]);
+        let merge = merge_args(&[], "main");
+        assert_eq!(integrate(&clone, Op::Merge, &merge), Ok(()));
+        assert!(run(&clone, &["rev-parse", "HEAD^2"], false).is_ok());
+
+        git_in(&clone, &["reset", "-q", "--hard", "HEAD^"]);
+        let rebase = rebase_args(&[], "main");
+        assert_eq!(integrate(&clone, Op::Rebase, &rebase), Ok(()));
+        assert_eq!(
+            head(&clone),
+            run(&clone, &["rev-parse", "feat/x"], false).unwrap()
+        );
+        assert!(run(&clone, &["rev-parse", "HEAD^2"], false).is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_detached_head_has_no_branch_to_pull_into() {
+        let (base, clone) = origin_and_clone("detached");
+        git_in(&clone, &["switch", "-q", "--detach"]);
+        assert!(pull_choices(&clone).unwrap_err().contains("detached"));
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
