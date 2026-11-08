@@ -19,19 +19,25 @@ pub(super) fn color(used: f64) -> u32 {
     }
 }
 
-/// The warning for a context that is filling up, in the colour of the ring: nothing until the ring
-/// turns orange, the share used while it is orange or red, and a plain notice once the limit is
-/// reached.
-pub(super) fn warning(share: f64) -> Option<(u32, String)> {
-    if share < 0.7 {
-        return None;
-    }
-    let text = if share >= 1.0 {
-        "Context full".to_owned()
-    } else {
-        format!("Context {:.0}%", share * 100.0)
-    };
-    Some((color(share), text))
+/// The warning for a usage limit that is nearly spent, in the colour of its bar: nothing until the
+/// bar turns orange, then the share used of the limit that is closest to running out. A limit
+/// whose window already started over says nothing.
+pub(super) fn warning(limits: Option<&Limits>, now: u64) -> Option<(u32, String)> {
+    let limits = limits?;
+    [("Session", limits.five_hour), ("Weekly", limits.seven_day)]
+        .into_iter()
+        .filter_map(|(name, window)| Some((name, window?)))
+        .filter(|(_, window)| window.resets_at == 0 || window.resets_at > now)
+        .filter(|(_, window)| window.utilization >= 0.7)
+        .max_by(|a, b| a.1.utilization.total_cmp(&b.1.utilization))
+        .map(|(name, window)| {
+            let text = if window.utilization >= 1.0 {
+                format!("{name} limit reached")
+            } else {
+                format!("{name} {:.0}%", window.utilization * 100.0)
+            };
+            (color(window.utilization), text)
+        })
 }
 
 /// "850k", "1.2M".
@@ -159,6 +165,8 @@ pub(super) fn report(
 
 #[cfg(test)]
 mod tests {
+    use zide_claude::{Limits, Window as Usage};
+
     use super::{color, resets_in, tokens, warning};
     use crate::theme;
 
@@ -170,20 +178,33 @@ mod tests {
     }
 
     #[test]
-    fn the_warning_starts_when_the_ring_turns_orange() {
-        assert_eq!(warning(0.69), None);
+    fn the_warning_follows_the_usage_limit_closest_to_running_out() {
+        let window = |utilization, resets_at| {
+            Some(Usage {
+                utilization,
+                resets_at,
+            })
+        };
+        let limits = |five_hour, seven_day| Limits {
+            five_hour,
+            seven_day,
+        };
+        assert_eq!(warning(None, 100), None);
+        assert_eq!(warning(Some(&limits(window(0.69, 500), None)), 100), None);
         assert_eq!(
-            warning(0.7),
-            Some((theme::WORKING, "Context 70%".to_owned()))
+            warning(Some(&limits(window(0.7, 500), window(0.4, 500))), 100),
+            Some((theme::WORKING, "Session 70%".to_owned()))
         );
         assert_eq!(
-            warning(0.93),
-            Some((theme::ERROR, "Context 93%".to_owned()))
+            warning(Some(&limits(window(0.75, 500), window(0.93, 500))), 100),
+            Some((theme::ERROR, "Weekly 93%".to_owned()))
         );
         assert_eq!(
-            warning(1.2),
-            Some((theme::ERROR, "Context full".to_owned()))
+            warning(Some(&limits(window(1.0, 500), None)), 100),
+            Some((theme::ERROR, "Session limit reached".to_owned()))
         );
+        // its window started over since: the number is old
+        assert_eq!(warning(Some(&limits(window(0.95, 50), None)), 100), None);
     }
 
     #[test]
