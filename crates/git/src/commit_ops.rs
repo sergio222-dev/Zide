@@ -1,9 +1,11 @@
 //! What the git log offers on a commit: cherry-pick it, revert it, reset the branch to it and tag
 //! it.
 
+use std::fs;
 use std::path::Path;
+use std::process::Command;
 
-use crate::run;
+use crate::{ChangeKind, FileChange, run, run_raw};
 
 /// What `git reset` does to the index and the files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -107,6 +109,99 @@ pub fn check_new_tag_name(root: &Path, name: &str) -> Result<(), String> {
 /// Creates the tag `name` on `hash`.
 pub fn create_tag(root: &Path, name: &str, hash: &str) -> Result<(), String> {
     run(root, &["tag", name, hash], false).map(drop)
+}
+
+/// The changes `hash` made to `files`, as a patch (a merge commit against its first parent).
+fn patch_of(root: &Path, hash: &str, files: &[FileChange]) -> Result<String, String> {
+    let mut args = vec![
+        "--literal-pathspecs",
+        "show",
+        "--format=",
+        "--no-color",
+        "--no-ext-diff",
+        "--binary",
+        "-M",
+        "--diff-merges=first-parent",
+        hash,
+        "--",
+    ];
+    for file in files {
+        args.extend(file.from.iter().map(String::as_str));
+        args.push(&file.path);
+    }
+    run_raw(root, &args)
+}
+
+/// Applies the changes `hash` made to `files` to the working tree, or with `reverse` undoes them
+/// there. Nothing is staged and nothing is committed.
+pub fn apply_changes(
+    root: &Path,
+    hash: &str,
+    files: &[FileChange],
+    reverse: bool,
+) -> Result<(), String> {
+    let patch = patch_of(root, hash, files)?;
+    if patch.trim().is_empty() {
+        return Err("The commit has no changes in those files".into());
+    }
+    let file = std::env::temp_dir().join(format!(
+        "zide-patch-{}-{}.diff",
+        std::process::id(),
+        hash.get(..8).unwrap_or(hash)
+    ));
+    fs::write(&file, patch).map_err(|e| e.to_string())?;
+    let path = file.to_string_lossy().into_owned();
+    let mut args = vec!["apply", "--whitespace=nowarn"];
+    if reverse {
+        args.push("-R");
+    }
+    args.push(&path);
+    let result = run(root, &args, false).map(drop);
+    fs::remove_file(&file).ok();
+    result
+}
+
+/// Puts `files` as they are in `hash` into the working tree (a file the commit deleted is
+/// deleted). Nothing is staged and nothing is committed.
+pub fn get_from_revision(root: &Path, hash: &str, files: &[FileChange]) -> Result<(), String> {
+    // read everything first, so a failure leaves the files as they were
+    let mut writes = Vec::new();
+    for file in files {
+        if file.kind == ChangeKind::Deleted {
+            writes.push((file, None));
+            continue;
+        }
+        let spec = format!("{hash}:{}", file.path);
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["cat-file", "blob", &spec])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("git could not run: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        writes.push((file, Some(out.stdout)));
+    }
+    for (file, content) in writes {
+        let target = root.join(&file.path);
+        match content {
+            Some(bytes) => {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                fs::write(&target, bytes).map_err(|e| format!("{}: {e}", file.path))?;
+            }
+            None => match fs::remove_file(&target) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(format!("{}: {e}", file.path));
+                }
+                _ => {}
+            },
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -256,6 +351,94 @@ mod tests {
                 .unwrap_err()
                 .contains("already exists")
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn change(path: &str, kind: ChangeKind) -> FileChange {
+        FileChange {
+            path: path.into(),
+            from: None,
+            kind,
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_changes_of_some_files_are_applied_or_undone_in_the_working_tree_only() {
+        let dir = repo("files");
+        fs::write(dir.join("b.txt"), "b").unwrap();
+        fs::write(dir.join("c.txt"), "c").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "add b and c"]);
+        fs::write(dir.join("a.txt"), "two").unwrap();
+        fs::write(dir.join("b.txt"), "bb").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "edit a and b"]);
+        let edit = git(&dir, &["rev-parse", "HEAD"]);
+        let a_and_b = [
+            change("a.txt", ChangeKind::Modified),
+            change("b.txt", ChangeKind::Modified),
+        ];
+
+        // revert only a.txt: the files change, the index and the history do not
+        apply_changes(&dir, &edit, &a_and_b[..1], true).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "one");
+        assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "bb");
+        assert_eq!(git(&dir, &["diff", "--name-only"]), "a.txt"); // not staged
+        assert_eq!(git(&dir, &["diff", "--cached", "--name-only"]), "");
+        assert_eq!(subjects(&dir)[0], "edit a and b");
+        // and back again: cherry-picking the same changes
+        apply_changes(&dir, &edit, &a_and_b[..1], false).unwrap();
+        assert_eq!(git(&dir, &["status", "--porcelain"]), "");
+        // two files at once
+        apply_changes(&dir, &edit, &a_and_b, true).unwrap();
+        assert_eq!(git(&dir, &["status", "--porcelain"]).lines().count(), 2);
+        // what does not apply says so and changes nothing
+        assert!(apply_changes(&dir, &edit, &a_and_b, true).is_err());
+        // a file the commit did not touch has nothing to apply
+        assert!(
+            apply_changes(&dir, &edit, &[change("c.txt", ChangeKind::Modified)], true).is_err()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn getting_files_from_a_revision_writes_them_without_staging_and_deletes_removed_ones() {
+        let dir = repo("get");
+        let first = git(&dir, &["rev-parse", "HEAD"]);
+        fs::write(dir.join("a.txt"), "two").unwrap();
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/new.txt"), "new").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "second"]);
+        let second = git(&dir, &["rev-parse", "HEAD"]);
+        git(&dir, &["rm", "-q", "a.txt"]);
+        git(&dir, &["commit", "-q", "-m", "third"]);
+        let third = git(&dir, &["rev-parse", "HEAD"]);
+
+        // the file as it was in the second commit, and a file inside a folder that is gone
+        fs::remove_dir_all(dir.join("sub")).unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "fourth"]);
+        get_from_revision(
+            &dir,
+            &second,
+            &[
+                change("a.txt", ChangeKind::Modified),
+                change("sub/new.txt", ChangeKind::Added),
+            ],
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "two");
+        assert_eq!(fs::read_to_string(dir.join("sub/new.txt")).unwrap(), "new");
+        assert_eq!(git(&dir, &["status", "--porcelain"]), "?? a.txt\n?? sub/");
+        // a file the commit deleted is deleted
+        get_from_revision(&dir, &third, &[change("a.txt", ChangeKind::Deleted)]).unwrap();
+        assert!(!dir.join("a.txt").exists());
+        // a path that is not in that revision stops before touching anything
+        assert!(
+            get_from_revision(&dir, &first, &[change("sub/new.txt", ChangeKind::Added)]).is_err()
+        );
+        assert!(dir.join("sub/new.txt").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 }
