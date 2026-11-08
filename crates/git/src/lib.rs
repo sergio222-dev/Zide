@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use similar::{Algorithm, DiffOp, TextDiff};
 
+pub mod log;
 pub mod merge;
 mod options;
 pub use options::{
@@ -1090,6 +1091,84 @@ mod tests {
         let patch = commit_diff(&clone, &head, &files[0]).unwrap();
         assert!(patch.contains("\n prueba\n+\n"), "{patch}");
         assert!(!patch.contains("-prueba"), "{patch}");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn the_log_lists_merges_filters_by_branch_and_searches_text_author_and_hash() {
+        use log::{LogQuery, Scope, read};
+        let (base, clone) = origin_and_clone("log");
+        git_in(&clone, &["switch", "-q", "-c", "feat/x"]);
+        git_in(
+            &clone,
+            &["commit", "-q", "--allow-empty", "-m", "feature work"],
+        );
+        git_in(&clone, &["switch", "-q", "main"]);
+        git_in(
+            &clone,
+            &["commit", "-q", "--allow-empty", "-m", "main work"],
+        );
+        git_in(
+            &clone,
+            &["merge", "-q", "--no-ff", "-m", "Merge feat/x", "feat/x"],
+        );
+        let subjects = |query: &LogQuery| -> Vec<String> {
+            read(&clone, query, 50)
+                .unwrap()
+                .iter()
+                .map(|e| e.commit.subject.clone())
+                .collect()
+        };
+        let all = LogQuery::default();
+        let mut listed = subjects(&all);
+        assert_eq!(
+            (listed[0].as_str(), listed[3].as_str()),
+            ("Merge feat/x", "first")
+        );
+        listed.sort(); // the two branches come in either order
+        assert_eq!(
+            listed,
+            ["Merge feat/x", "feature work", "first", "main work"]
+        );
+        let merge = &read(&clone, &all, 50).unwrap()[0];
+        assert_eq!(merge.parents.len(), 2);
+        assert!(merge.refs.iter().any(|r| r.name == "main" && r.current));
+        // one ref
+        let only = |scope| {
+            subjects(&LogQuery {
+                scope,
+                text: String::new(),
+            })
+        };
+        assert_eq!(
+            only(Scope::Ref("refs/heads/feat/x".into())),
+            ["feature work", "first"]
+        );
+        assert_eq!(only(Scope::Head).len(), 4);
+        // search: message, author and the start of a hash
+        let text = |text: &str| {
+            subjects(&LogQuery {
+                scope: Scope::All,
+                text: text.into(),
+            })
+        };
+        assert_eq!(text("FEATURE"), ["feature work"]);
+        assert_eq!(text("main work"), ["main work"]);
+        assert_eq!(text("nobody-matches-this"), Vec::<String>::new());
+        let hash = read(&clone, &all, 50)
+            .unwrap()
+            .iter()
+            .find(|e| e.commit.subject == "feature work")
+            .unwrap()
+            .commit
+            .hash
+            .clone();
+        assert_eq!(text(&hash[..8]), ["feature work"]);
+        assert!(
+            log::branches_with(&clone, &hash)
+                .unwrap()
+                .contains(&"feat/x".to_string())
+        );
         fs::remove_dir_all(base).unwrap();
     }
 

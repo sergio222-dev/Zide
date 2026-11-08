@@ -339,6 +339,7 @@ impl Workspace {
             self.claude = Some(chats);
             self.watch_agents(cx);
         }
+        self.log_open = false;
         self.claude_open = true;
         self.refresh_agents(cx);
         self.focus_active_chat(window, cx);

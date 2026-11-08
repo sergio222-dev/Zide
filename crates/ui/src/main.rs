@@ -15,6 +15,7 @@ use std::{
 };
 
 mod branches;
+mod changed_files;
 mod chat;
 mod commit;
 mod conflicts;
@@ -22,6 +23,7 @@ mod definition;
 mod diff_view;
 mod file_icon;
 mod fileops;
+mod gitlog;
 mod gitop;
 mod indent;
 mod layout;
@@ -88,6 +90,7 @@ actions!(
         RevealOpenFile,
         AddToGit,
         ToggleClaudeChat,
+        ToggleGitLog,
         ToggleCommitPanel,
         CommitNow,
         ToggleMarkdownPreview,
@@ -308,6 +311,15 @@ fn action_registry() -> Vec<ActionDef> {
             only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.add_to_git(cx),
+        },
+        ActionDef {
+            name: "Toggle Git Log",
+            synonyms: &["git", "log", "history", "commits", "graph"],
+            action: Some(Box::new(ToggleGitLog)),
+            closes_popup: true,
+            only_when_conflicted: false,
+            state: None,
+            run: |ws, window, cx| ws.toggle_git_log(window, cx),
         },
         ActionDef {
             name: "Toggle Claude Chat",
@@ -655,6 +667,8 @@ struct Workspace {
     /// Whether a supported `claude` is installed, once known.
     claude_installed: bool,
     claude_open: bool,
+    log_open: bool,
+    log: Option<gitlog::LogPanel>,
     /// What was last written as the layout, to write it only when it changes.
     saved_layout: Option<session::Layout>,
     commit: Option<commit::CommitPanel>,
@@ -834,6 +848,8 @@ impl Workspace {
             claude_installed: false,
             claude_bare: false,
             claude_open: false,
+            log_open: false,
+            log: None,
             saved_layout: None,
             commit: None,
             commit_open: false,
@@ -3308,6 +3324,9 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &RevealOpenFile, _, cx| this.reveal_open_file(cx)))
             .on_action(cx.listener(|this, _: &AddToGit, _, cx| this.add_to_git(cx)))
             .on_action(
+                cx.listener(|this, _: &ToggleGitLog, window, cx| this.toggle_git_log(window, cx)),
+            )
+            .on_action(
                 cx.listener(|this, _: &ToggleClaudeChat, window, cx| {
                     this.toggle_claude(window, cx)
                 }),
@@ -3368,6 +3387,8 @@ impl Workspace {
                     this.git_op_tab(window, cx);
                 } else if this.push.is_some() {
                     this.push_switch_pane(cx);
+                } else if this.log_open && this.popup.is_none() {
+                    this.log_tab(window, cx);
                 } else if this.popup.is_some() {
                     this.switch_tab(cx);
                 } else {
@@ -3415,6 +3436,8 @@ impl Workspace {
                             this.focus_commit_list(window, cx); // out of the message, onto the files
                             cx.stop_propagation();
                         }
+                    } else if this.log_open {
+                        this.log_key(event, window, cx);
                     } else if !this.claude_open {
                         this.editor_key(event, window, cx);
                     }
@@ -3432,7 +3455,9 @@ impl Workspace {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(if self.claude_open {
+            .child(if self.log_open {
+                self.log_view(cx)
+            } else if self.claude_open {
                 self.claude_view(window, cx)
             } else {
                 div()
@@ -4504,6 +4529,7 @@ fn main() {
             KeyBinding::new("alt-2", ToggleCommitPanel, Some("Workspace")),
             KeyBinding::new("alt-enter", CommitNow, Some("Workspace")),
             KeyBinding::new("alt-3", ToggleClaudeChat, Some("Workspace")),
+            KeyBinding::new("alt-4", ToggleGitLog, Some("Workspace")),
             KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
             KeyBinding::new("ctrl-alt-left", NavigateBack, Some("Workspace")),
             KeyBinding::new("ctrl-alt-right", NavigateForward, Some("Workspace")),

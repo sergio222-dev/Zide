@@ -17,7 +17,7 @@ use crate::{Workspace, file_icon, theme};
 const ROW_HEIGHT: f32 = 24.;
 /// Where the rows start inside the popup: its padding, the search field and the gap under it.
 const MENU_LIST_TOP: f32 = 52.;
-const SECTIONS: [(&str, &str); 3] = [
+pub(crate) const SECTIONS: [(&str, &str); 3] = [
     ("recent", "Recent"),
     ("local", "Local"),
     ("remote", "Remote"),
@@ -59,6 +59,7 @@ struct Item {
 
 /// The state of the switcher without any UI: what is listed, expanded and selected.
 pub struct Model {
+    sections: &'static [(&'static str, &'static str)],
     data: Branches,
     query: String,
     expanded: HashSet<String>,
@@ -68,10 +69,19 @@ pub struct Model {
 
 impl Model {
     pub fn new(data: Branches) -> Self {
+        Self::with_sections(data, &SECTIONS)
+    }
+
+    /// Lists only `sections` (of recent, local and remote), in that order.
+    pub fn with_sections(
+        data: Branches,
+        sections: &'static [(&'static str, &'static str)],
+    ) -> Self {
         let mut model = Self {
+            sections,
             data: Branches::default(),
             query: String::new(),
-            expanded: SECTIONS.iter().map(|(key, _)| key.to_string()).collect(),
+            expanded: sections.iter().map(|(key, _)| key.to_string()).collect(),
             selected: 0,
             rows: Arc::default(),
         };
@@ -242,7 +252,7 @@ impl Model {
             .collect();
         let filtering = !words.is_empty();
         let mut rows = Vec::new();
-        for (key, label) in SECTIONS {
+        for &(key, label) in self.sections {
             let mut items = self.items(key);
             items.retain(|item| {
                 let name = item.path.to_lowercase();
