@@ -236,6 +236,8 @@ impl Workspace {
                     div().h(size.height * 0.8).child(
                         Diff::new(&state)
                             .header_visible(false)
+                            // one horizontal scroll is shared by both sides, so long lines wrap
+                            .soft_wrap(true)
                             .decorations(decorations.clone()),
                     ),
                 )
