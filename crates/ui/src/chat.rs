@@ -1321,7 +1321,11 @@ impl Workspace {
             }
             Block::Text(text) => match chat.markdown.get(&index) {
                 Some(state) => div()
-                    .child(TextView::new(state).selectable(true))
+                    .child(
+                        TextView::new(state)
+                            .inline_code_style(crate::markdown::inline_code())
+                            .selectable(true),
+                    )
                     .into_any_element(),
                 None => div().child(text.clone()).into_any_element(),
             },

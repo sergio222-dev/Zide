@@ -7,9 +7,17 @@ use std::path::{Path, PathBuf};
 use gpui_kit::component::text::{MarkdownNode, markdown_ast};
 pub use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::{
-    App, Entity, ImageSource, ObjectFit, ParentElement, SharedString, Styled, StyledImage, Window,
-    div, img, px, relative,
+    App, Entity, ImageSource, ObjectFit, ParentElement, SharedString, StyleRefinement, Styled,
+    StyledImage, Window, div, img, px, relative,
 };
+
+/// How the chip behind inline code is sized. With no padding set, the library measures the chip
+/// from the font's cap height, and a font that does not give one (DejaVu Sans Mono, the default
+/// monospace on Linux, has an OS/2 table without it) leaves a thin strip at the baseline that
+/// reads as an underline. Any padding makes it measure from the ascent and descent instead.
+pub fn inline_code() -> StyleRefinement {
+    StyleRefinement::default().py(px(1.))
+}
 
 /// Whether `path` is a Markdown file, so the preview applies to it.
 pub fn is_markdown(path: &str) -> bool {
@@ -70,6 +78,7 @@ pub fn preview(
     let row_root = root.clone();
     let row_current = current.clone();
     TextView::new(state)
+        .inline_code_style(inline_code())
         .selectable(true)
         .scrollable(true)
         .image_source(move |uri| image_source(&root, &current, &uri.to_string()))

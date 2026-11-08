@@ -145,9 +145,11 @@ impl Workspace {
             return div().child(text.to_owned()).into_any_element();
         };
         let part = |n: usize| {
-            chat.report_md
-                .get(&(index, n))
-                .map(|state| TextView::new(state).selectable(true))
+            chat.report_md.get(&(index, n)).map(|state| {
+                TextView::new(state)
+                    .inline_code_style(crate::markdown::inline_code())
+                    .selectable(true)
+            })
         };
         let chat_id = chat.id;
         let sections = report.sections.iter().enumerate().map(|(n, section)| {

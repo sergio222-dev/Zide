@@ -218,6 +218,7 @@ impl Workspace {
         self.popup = None;
         self.branches = None;
         self.conflicts = None;
+        self.git_op = None;
         self.cancel_running_search();
         self.push = Some(PushPopup::default());
         self.focus.focus(window, cx); // the keys are read by the workspace
