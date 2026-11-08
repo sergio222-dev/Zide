@@ -175,10 +175,10 @@ In the Git log (`Alt+4` toggles it): the refs tree on the left (HEAD, Local, Rem
 the ref you pick, and picking it again goes back to every branch. `/` focuses the search box (message,
 author or the start of a hash), `Tab` moves between refs, commits and files, `j` / `k` or the arrows move,
 `Enter` on a file (or a double click) opens that commit's diff, and `Esc` closes the tab.
-The **User** and **Date** buttons (`u` / `d`; `Up`/`Down` move, `Enter` picks, `Esc` closes) narrow the history to
-one author or to the last day, week, month or year, and the **Paths** box (`p`) keeps the commits that touch any of
-the paths typed, separated by spaces. The filters combine with the search and the branch; while any is on, the
-graph is drawn as plain dots because the commits shown are no longer a connected history.
+The **User** button (`u`; `Up`/`Down` move, `Enter` picks, `Esc` closes) narrows the history to one author. **Date**
+(`d`) opens a popup with an *After* and a *Before* date picker (the clear button of each one drops it), and the **Paths**
+box (`p`) keeps the commits that touch any of the paths typed, separated by spaces. The filters combine with the search
+and the branch; while any is on, the graph is drawn as plain dots because the commits shown are no longer a connected history.
 
 Vim fold keys (`za`, `zo`, `zc`, `zM`, `zR`) and scroll keys (`zt`, `zz`, `zb`, `Ctrl+D`,
 `Ctrl+U`) work in normal mode.

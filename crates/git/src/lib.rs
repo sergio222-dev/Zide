@@ -1221,6 +1221,12 @@ mod tests {
         assert_eq!(subjects(&query("", "", &["a.txt", "b.txt"], "")).len(), 2);
         assert!(!subjects(&query("", "5 years ago", &[], "")).contains(&"ancient".to_string()));
         assert!(subjects(&query("", "", &[], "")).contains(&"ancient".to_string()));
+        let until = |until: &str| LogQuery {
+            until: until.into(),
+            ..LogQuery::default()
+        };
+        assert_eq!(subjects(&until("2002-01-01 23:59:59")), ["ancient"]);
+        assert!(!subjects(&until("2002-01-01 23:59:59")).contains(&"touch a".to_string()));
         // the start of a hash still finds its commit, unless the limits leave it out
         let b = read(&clone, &query("ana@x.io", "", &[], ""), 5).unwrap()[0]
             .commit

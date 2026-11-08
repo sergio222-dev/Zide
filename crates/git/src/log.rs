@@ -51,6 +51,8 @@ pub struct LogQuery {
     pub user: String,
     /// Only the commits newer than this, as git reads a date (`7 days ago`). Empty: any.
     pub since: String,
+    /// Only the commits older than this, as git reads a date. Empty: any.
+    pub until: String,
     /// Only the commits that touch one of these paths. Empty: any.
     pub paths: Vec<String>,
 }
@@ -61,6 +63,7 @@ impl LogQuery {
         !self.text.trim().is_empty()
             || !self.user.is_empty()
             || !self.since.is_empty()
+            || !self.until.is_empty()
             || !self.paths.is_empty()
     }
 
@@ -72,6 +75,9 @@ impl LogQuery {
         }
         if !self.since.is_empty() {
             limits.push(format!("--since={}", self.since));
+        }
+        if !self.until.is_empty() {
+            limits.push(format!("--until={}", self.until));
         }
         limits
     }
