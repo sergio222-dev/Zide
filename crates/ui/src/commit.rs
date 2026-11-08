@@ -447,10 +447,10 @@ impl Workspace {
         let in_panel = self.commit_open
             && (self.commit_focused(window, cx)
                 || self.commit.as_ref().is_some_and(|panel| panel.list_focused));
-        let ready = self
-            .commit
-            .as_ref()
-            .is_some_and(|panel| !panel.busy && panel.changes.ticked() > 0 || panel.amend);
+        let merging = self.merging();
+        let ready = self.commit.as_ref().is_some_and(|panel| {
+            !panel.busy && (panel.changes.ticked() > 0 || merging) || panel.amend
+        });
         if in_panel && ready {
             self.commit_selected(false, cx);
         }
@@ -620,8 +620,20 @@ impl Workspace {
         );
     }
 
+    /// A merge is under way: committing concludes it, whether or not any file is listed (the
+    /// merge may leave nothing to change).
+    fn merging(&self) -> bool {
+        self.branch.as_ref().is_some_and(|branch| {
+            branch
+                .progress
+                .as_ref()
+                .is_some_and(|progress| progress.operation == zide_git::Operation::Merge)
+        })
+    }
+
     pub(crate) fn commit_view(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let workspace = cx.entity();
+        let merging = self.merging();
         let panel = self.commit.as_ref().expect("the panel is open");
         let rows = panel.changes.rows();
         let (count, ticked, amend, busy) = (
@@ -632,7 +644,7 @@ impl Workspace {
         );
         let message = panel.message.clone();
         let scroll = panel.scroll.clone();
-        let can_commit = !busy && ticked > 0 || amend;
+        let can_commit = !busy && (ticked > 0 || merging) || amend;
         let selected = panel.changes.selected_row().map(|row| row.key);
         let list_focused = panel.list_focused;
 

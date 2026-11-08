@@ -1783,6 +1783,19 @@ mod commit_tests {
     }
 
     #[test]
+    fn a_merge_that_changes_nothing_is_concluded_without_paths() {
+        let dir = conflicted("empty-merge", "edit");
+        let found = conflicts(&dir).unwrap();
+        // keeping yours leaves the tree as HEAD has it: no file is listed to tick
+        assert_eq!(resolve(&dir, &found.files[0], Side::Yours), Ok(()));
+        assert!(changes(&dir).is_empty());
+        let message = merge_message(&dir).unwrap();
+        assert_eq!(commit(&dir, &[], &message, false), Ok(()));
+        assert!(branch_status(&dir).unwrap().progress.is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn nothing_is_under_way_on_a_plain_branch() {
         let dir = repo("plain");
         assert!(branch_status(&dir).is_none_or(|status| status.progress.is_none()));
