@@ -80,8 +80,10 @@ pub struct Changes {
 }
 
 impl Changes {
-    /// Takes the repository's current changes, keeping what the user ticked.
-    pub fn set_changes(&mut self, changes: Vec<FileChange>) {
+    /// Takes the repository's current changes, keeping what the user ticked. Files git does not
+    /// track are not listed: they are not part of the repository until they are added.
+    pub fn set_changes(&mut self, mut changes: Vec<FileChange>) {
+        changes.retain(|change| change.kind != ChangeKind::Untracked);
         for change in &changes {
             if self.seen.insert(change.path.clone()) {
                 self.checked.insert(change.path.clone());
@@ -322,11 +324,11 @@ fn join(path: &str, name: &str) -> String {
 
 pub(crate) fn kind_color(kind: ChangeKind) -> u32 {
     match kind {
-        // a file git does not track yet is a new file: green like the added ones
-        ChangeKind::Added | ChangeKind::Untracked => theme::OK,
+        ChangeKind::Added => theme::OK,
         ChangeKind::Modified | ChangeKind::Renamed => theme::ICON_CODE,
         ChangeKind::Deleted => theme::CHANGE_REMOVED,
-        ChangeKind::Conflicted => theme::ERROR,
+        // red: git does not track it yet (the project tree shows it; the panel does not list it)
+        ChangeKind::Conflicted | ChangeKind::Untracked => theme::ERROR,
     }
 }
 
@@ -926,9 +928,22 @@ mod tests {
         changes.toggle_check(".atl");
         changes.set_changes(vec![
             change(".atl/a.json", ChangeKind::Modified),
-            change("new.rs", ChangeKind::Untracked),
+            change("new.rs", ChangeKind::Added),
         ]);
         assert_eq!(changes.paths(), ["new.rs"]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn files_git_does_not_track_are_not_listed_to_commit() {
+        let mut changes = Changes::default();
+        changes.set_changes(vec![
+            change("kept.rs", ChangeKind::Modified),
+            change("loose.rs", ChangeKind::Untracked),
+        ]);
+        assert_eq!(changes.count(), 1);
+        assert_eq!(changes.paths(), ["kept.rs"]);
+        assert!(changes.change("loose.rs").is_none());
+        assert_eq!(kind_color(ChangeKind::Untracked), theme::ERROR);
     }
 
     #[::core::prelude::v1::test]
