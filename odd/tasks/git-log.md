@@ -19,3 +19,4 @@ Objective: Alt+4 tab with the commit history (merges included), a branch selecto
 ## Log
 L1 (2026-11-08): "siguiente feature grande: hacer una tab nueva, alt+4, la que muestra el historial de commits, merge, con seleccion de ramas y buscador" (with a screenshot of IntelliJ's Git tool window)
 L2 (2026-11-08): scope question answered: "vamos con la 1 entonces" (core: refs tree + graph list + search + details with files; filters later). The engram mirror is pending (the engram MCP failed to connect this session).
+L3 (2026-11-08): "es agregar esos filtros" — the User, Date and Paths filters left out by S6 are now in (feat/git-log-filters): user list from `git shortlog`, date presets (24h, 7d, 30d, year), paths box; no custom date range.
