@@ -171,6 +171,11 @@ In the Claude chat (`Alt+3` toggles it): `Alt+Up` / `Alt+Down` switch between op
 `Ctrl+V` pastes an image (click one, in the message or above the input, to see it large; `Esc` closes it), and `/` and `@` open the command and file menus. Earlier conversations
 are also listed by **Claude: Resume Session** in Find Action (`Ctrl+Shift+A`).
 
+In the Git log (`Alt+4` toggles it): the refs tree on the left (HEAD, Local, Remote) narrows the history to
+the ref you pick, and picking it again goes back to every branch. `/` focuses the search box (message,
+author or the start of a hash), `Tab` moves between refs, commits and files, `j` / `k` or the arrows move,
+`Enter` on a file (or a double click) opens that commit's diff, and `Esc` closes the tab.
+
 Vim fold keys (`za`, `zo`, `zc`, `zM`, `zR`) and scroll keys (`zt`, `zz`, `zb`, `Ctrl+D`,
 `Ctrl+U`) work in normal mode.
 

@@ -13,8 +13,8 @@ Objective: Alt+4 tab with the commit history (merges included), a branch selecto
 ## Tasks
 - T1 (S3,S4) zide_git::log: entries (hash, parents, refs, author, date, subject), filter (all / ref / query), graph lanes — inline — done
 - T2 (S5) zide_git: details of a commit (refs it is on) — inline — done (log::branches_with, with T1)
-- T3 (S2-S5) ui/gitlog.rs: state, render, search input, keys — inline — pending
-- T4 (S1) Alt+4, action, Find Action entry, README — inline — pending
+- T3 (S2-S5) ui/gitlog.rs: state, render, search input, keys — inline — done
+- T4 (S1) Alt+4, action, Find Action entry, README — inline — done
 
 ## Log
 L1 (2026-11-08): "siguiente feature grande: hacer una tab nueva, alt+4, la que muestra el historial de commits, merge, con seleccion de ramas y buscador" (with a screenshot of IntelliJ's Git tool window)
