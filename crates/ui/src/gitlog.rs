@@ -3,6 +3,8 @@
 //! on top searches the message, the author or the start of a hash; a ref picked in the tree
 //! narrows the history to it, and picking it again goes back to every branch.
 
+use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::calendar::Date;
@@ -19,7 +21,7 @@ use zide_git::{Branches, FileChange, Switch};
 mod menu;
 
 use crate::branches::{Kind, Model, Row};
-use crate::changed_files;
+use crate::changed_files::{self, Picks};
 use crate::{Workspace, file_icon, statusbar, theme};
 
 const ROW_HEIGHT: f32 = 24.;
@@ -125,7 +127,7 @@ pub struct LogPanel {
     /// date popup is for the mouse).
     menu: Option<(Filter, usize)>,
     /// The context menu of a commit, when open.
-    commit_menu: Option<menu::CommitMenu>,
+    context_menu: Option<menu::ContextMenu>,
     /// Counts the pauses in typing: a search waits for its own to end.
     typed: u64,
     refs: Option<Model>,
@@ -141,7 +143,8 @@ pub struct LogPanel {
     selected: usize,
     pub pane: Pane,
     files: Files,
-    file: usize,
+    /// The files picked, and the one the cursor is on.
+    picks: Picks,
     /// The branches that hold the selected commit, once read.
     in_branches: Option<Vec<String>>,
     commit_scroll: UniformListScrollHandle,
@@ -227,7 +230,7 @@ impl LogPanel {
             after_day: String::new(),
             before_day: String::new(),
             preset: 0,
-            commit_menu: None,
+            context_menu: None,
             menu: None,
             typed: 0,
             refs: None,
@@ -240,7 +243,7 @@ impl LogPanel {
             selected: 0,
             pane: Pane::default(),
             files: Files::Loading,
-            file: 0,
+            picks: Picks::default(),
             in_branches: None,
             commit_scroll: UniformListScrollHandle::new(),
             file_scroll: UniformListScrollHandle::new(),
@@ -374,7 +377,7 @@ impl LogPanel {
         let hash = self.selected_entry()?.commit.hash.clone();
         self.files = Files::Loading;
         self.in_branches = None;
-        self.file = 0;
+        self.picks = Picks::default();
         Some(hash)
     }
 
@@ -383,7 +386,7 @@ impl LogPanel {
         if self.selected_entry().map(|e| e.commit.hash.as_str()) != Some(hash) {
             return;
         }
-        self.file = 0;
+        self.picks = Picks::default();
         self.files = match found {
             Ok(mut list) => {
                 changed_files::sort(&mut list);
@@ -400,8 +403,27 @@ impl LogPanel {
         }
     }
 
+    fn picked_files(&self) -> Arc<HashSet<usize>> {
+        Arc::new(self.picks.picked())
+    }
+
+    fn selected_files(&self) -> Vec<FileChange> {
+        let mut picked: Vec<usize> = self.picks.picked().into_iter().collect();
+        picked.sort_unstable();
+        picked
+            .into_iter()
+            .filter_map(|at| self.files().get(at).cloned())
+            .collect()
+    }
+
+    /// A click on file `index`, as [`Picks::click`] reads it.
+    fn click_file(&mut self, index: usize, ctrl: bool, shift: bool) {
+        self.pane = Pane::Files;
+        self.picks.click(index, ctrl, shift);
+    }
+
     fn selected_file(&self) -> Option<&FileChange> {
-        self.files().get(self.file)
+        self.files().get(self.picks.cursor)
     }
 
     fn scope_key(&self) -> Option<String> {
@@ -797,13 +819,13 @@ impl Workspace {
         let Some(panel) = &mut self.log else {
             return;
         };
-        if panel.commit_menu.is_some() {
+        if panel.context_menu.is_some() {
             // the context menu of a commit takes every key
             let down = key == "down" || vim == Some(Key::Char('j'));
             let up = key == "up" || vim == Some(Key::Char('k'));
             cx.stop_propagation();
             return match panel.menu_key(key, down, up) {
-                menu::MenuKey::Run(action) => self.commit_action(action, window, cx),
+                menu::MenuKey::Run(action) => self.menu_action(action, window, cx),
                 _ => cx.notify(),
             };
         }
@@ -862,8 +884,9 @@ impl Workspace {
                         return self.scroll_log();
                     }
                     Pane::Files => {
+                        let to = panel.picks.cursor.saturating_add_signed(delta);
                         let last = panel.files().len().saturating_sub(1);
-                        panel.file = panel.file.saturating_add_signed(delta).min(last);
+                        panel.picks.move_to(to.min(last), modifiers.shift);
                     }
                 }
             }
@@ -873,6 +896,7 @@ impl Workspace {
                 self.select_log_commit(at, cx);
                 return self.scroll_log();
             }
+            "space" if pane == Pane::Files => panel.picks.toggle(),
             "enter" => match pane {
                 Pane::Refs if panel.head_cursor => return self.pick_log_head(cx),
                 Pane::Refs => {
@@ -919,7 +943,7 @@ impl Workspace {
         }
         let root = self.root_name();
         let at = changed_files::rows(panel.files(), &root).iter().position(
-            |row| matches!(row, changed_files::FileRow::File { index, .. } if *index == panel.file),
+            |row| matches!(row, changed_files::FileRow::File { index, .. } if *index == panel.picks.cursor),
         );
         if let Some(at) = at {
             panel
@@ -990,7 +1014,7 @@ impl Workspace {
             .text_color(rgb(theme::TEXT))
             .children(
                 panel
-                    .commit_menu
+                    .context_menu
                     .as_ref()
                     .map(|open| menu::view(open, &workspace)),
             )
@@ -1430,7 +1454,7 @@ fn commits_pane(panel: &LogPanel, workspace: &Entity<Workspace>) -> Div {
                                     .on_mouse_down(MouseButton::Right, move |event, _, cx| {
                                         let at = event.position;
                                         workspace.update(cx, |this, cx| {
-                                            this.open_commit_menu(index, at, cx)
+                                            this.open_context_menu(index, at, cx)
                                         })
                                     })
                                     .child(graph_cell(&graph[index], width))
@@ -1493,21 +1517,27 @@ fn files_pane(panel: &LogPanel, root: &str, workspace: &Entity<Workspace>) -> An
             changed_files::list(
                 "log-files",
                 Arc::new(changed_files::rows(list, root)),
-                panel.file,
+                panel.picked_files(),
                 panel.pane == Pane::Files,
                 &panel.file_scroll,
-                move |index, clicks, window, cx| {
-                    workspace.update(cx, |this, cx| {
-                        if let Some(panel) = &mut this.log {
-                            panel.pane = Pane::Files;
-                            panel.file = index;
-                        }
-                        if clicks == 2 {
-                            this.show_log_diff(window, cx);
-                        }
-                        cx.notify();
-                    })
+                {
+                    let workspace = workspace.clone();
+                    move |index, clicks, modifiers, window, cx| {
+                        workspace.update(cx, |this, cx| {
+                            let ctrl = modifiers.control || modifiers.platform;
+                            if let Some(panel) = &mut this.log {
+                                panel.click_file(index, ctrl, modifiers.shift);
+                            }
+                            if clicks == 2 && !ctrl && !modifiers.shift {
+                                this.show_log_diff(window, cx);
+                            }
+                            cx.notify();
+                        })
+                    }
                 },
+                Some(Rc::new(move |index, at, _, cx| {
+                    workspace.update(cx, |this, cx| this.open_files_menu(index, at, cx))
+                })),
             )
         }
     }

@@ -185,6 +185,11 @@ Right click on a commit opens its menu (`Up`/`Down` and `Enter` work too, `Esc` 
 (created from that commit and checked out) and *New Tag...*. A cherry-pick or revert that clashes leaves its conflicts
 for the resolver, as a merge does.
 
+The files of the selected commit take `Ctrl+click` to add or drop a file, `Shift+click` (or `Shift+Up`/`Down`) for a
+range and `Space` to toggle the one under the cursor. Right click on them opens *Show Diff*, *Revert Selected Changes*
+(undoes them in the working tree), *Cherry-Pick Selected Changes* (applies them) and *Get from Revision* (overwrites the
+files with their version in that commit). None of them commits or stages anything.
+
 Vim fold keys (`za`, `zo`, `zc`, `zM`, `zR`) and scroll keys (`zt`, `zz`, `zb`, `Ctrl+D`,
 `Ctrl+U`) work in normal mode.
 
