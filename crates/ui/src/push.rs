@@ -217,6 +217,7 @@ impl Workspace {
         }
         self.popup = None;
         self.branches = None;
+        self.conflicts = None;
         self.cancel_running_search();
         self.push = Some(PushPopup::default());
         self.focus.focus(window, cx); // the keys are read by the workspace
@@ -400,7 +401,7 @@ impl Workspace {
     }
 
     /// The name of the project's folder.
-    fn root_name(&self) -> String {
+    pub(crate) fn root_name(&self) -> String {
         self.root
             .file_name()
             .map_or_else(|| ".".into(), |name| name.to_string_lossy().into_owned())

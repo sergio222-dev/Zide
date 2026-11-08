@@ -1347,6 +1347,215 @@ pub fn commit_diff(root: &Path, hash: &str, change: &FileChange) -> Result<Strin
     run_raw(root, &args)
 }
 
+/// What is running that stopped on conflicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+/// What one side did to a file that both sides touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edit {
+    Modified,
+    Added,
+    Deleted,
+}
+
+impl Edit {
+    pub fn label(self) -> &'static str {
+        match self {
+            Edit::Modified => "Modified",
+            Edit::Added => "Added",
+            Edit::Deleted => "Deleted",
+        }
+    }
+}
+
+/// Which version of a conflicted file to keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// The current branch's: git's `--ours`.
+    Yours,
+    /// The incoming one: git's `--theirs`.
+    Theirs,
+}
+
+/// A file git could not merge by itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    /// Relative to the repository root, with `/` separators.
+    pub path: String,
+    pub yours: Edit,
+    pub theirs: Edit,
+}
+
+impl Conflict {
+    fn edit(&self, side: Side) -> Edit {
+        match side {
+            Side::Yours => self.yours,
+            Side::Theirs => self.theirs,
+        }
+    }
+}
+
+/// The files in conflict and what produced them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflicts {
+    pub operation: Operation,
+    /// The name of the branch (or commit) that is yours, and of the one that comes in.
+    pub yours: String,
+    pub theirs: String,
+    /// Sorted by path.
+    pub files: Vec<Conflict>,
+}
+
+/// The conflicted files of the repository and what is being merged, rebased, cherry-picked or
+/// reverted. `None` when there is no conflict (or `root` is not a repository).
+pub fn conflicts(root: &Path) -> Option<Conflicts> {
+    let status = run_raw(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=no"],
+    )
+    .ok()?;
+    let files = parse_conflicts(&status);
+    if files.is_empty() {
+        return None;
+    }
+    let git_dir = run(root, &["rev-parse", "--absolute-git-dir"], false).ok()?;
+    let git_dir = Path::new(&git_dir);
+    let read = |name: &str| {
+        std::fs::read_to_string(git_dir.join(name))
+            .ok()
+            .map(|text| text.trim().to_string())
+    };
+    // a name for a commit: the branch that points at it, else its short hash
+    let describe = |rev: &str| {
+        run(
+            root,
+            &[
+                "name-rev",
+                "--name-only",
+                "--no-undefined",
+                "--refs=refs/heads/*",
+                rev,
+            ],
+            false,
+        )
+        .ok()
+        .map(|name| {
+            name.trim_end_matches(|c| c == '^' || c == '~' || char::is_ascii_digit(&c))
+                .to_string()
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| rev.chars().take(7).collect())
+    };
+    let branch = || {
+        run(root, &["symbolic-ref", "--short", "-q", "HEAD"], false)
+            .unwrap_or_else(|_| "HEAD".into())
+    };
+    let rebase_dir = ["rebase-merge", "rebase-apply"]
+        .into_iter()
+        .find(|dir| git_dir.join(dir).is_dir());
+    let (operation, yours, theirs) = if let Some(dir) = rebase_dir {
+        // replaying your commits on top of `onto`: git's "ours" is what they are replayed on
+        let theirs = read(&format!("{dir}/head-name"))
+            .map(|name| name.trim_start_matches("refs/heads/").to_string())
+            .unwrap_or_else(|| "HEAD".into());
+        let yours =
+            read(&format!("{dir}/onto")).map_or_else(|| "HEAD".into(), |onto| describe(&onto));
+        (Operation::Rebase, yours, theirs)
+    } else if let Some(head) = read("MERGE_HEAD") {
+        // `Merge branch 'feature-branch' into main`
+        let named = read("MERGE_MSG")
+            .and_then(|text| {
+                let line = text.lines().next()?.to_string();
+                let start = line.find('\'')? + 1;
+                let end = start + line[start..].find('\'')?;
+                Some(line[start..end].to_string())
+            })
+            .unwrap_or_else(|| describe(&head));
+        (Operation::Merge, branch(), named)
+    } else if let Some(head) = read("CHERRY_PICK_HEAD") {
+        (
+            Operation::CherryPick,
+            branch(),
+            head.chars().take(7).collect(),
+        )
+    } else if let Some(head) = read("REVERT_HEAD") {
+        (Operation::Revert, branch(), head.chars().take(7).collect())
+    } else {
+        // e.g. a stash that was applied: no operation to name
+        (Operation::Merge, branch(), "incoming".into())
+    };
+    Some(Conflicts {
+        operation,
+        yours,
+        theirs,
+        files,
+    })
+}
+
+/// Reads the unmerged entries (`UU`, `AA`, `DU`...) of `git status --porcelain=v1 -z`.
+fn parse_conflicts(status: &str) -> Vec<Conflict> {
+    let mut entries = status.split('\0');
+    let mut files = Vec::new();
+    while let Some(entry) = entries.next() {
+        let (Some(code), Some(path)) = (entry.get(..2), entry.get(3..)) else {
+            continue;
+        };
+        if matches!(code.as_bytes().first(), Some(b'R' | b'C'))
+            || matches!(code.as_bytes().get(1), Some(b'R' | b'C'))
+        {
+            entries.next(); // the path it came from
+        }
+        use Edit::{Added, Deleted, Modified};
+        let (yours, theirs) = match code {
+            "UU" => (Modified, Modified),
+            "AA" => (Added, Added),
+            "DD" => (Deleted, Deleted),
+            "AU" => (Added, Deleted),
+            "UD" => (Modified, Deleted),
+            "UA" => (Deleted, Added),
+            "DU" => (Deleted, Modified),
+            _ => continue,
+        };
+        files.push(Conflict {
+            path: path.to_string(),
+            yours,
+            theirs,
+        });
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
+}
+
+/// Settles `conflict` with the version of one side, over the other's changes, and marks it
+/// resolved. A side that deleted the file deletes it.
+pub fn resolve(root: &Path, conflict: &Conflict, side: Side) -> Result<(), String> {
+    let path = conflict.path.as_str();
+    if conflict.edit(side) == Edit::Deleted {
+        return run(
+            root,
+            &["--literal-pathspecs", "rm", "-f", "-q", "--", path],
+            false,
+        )
+        .map(drop);
+    }
+    let version = match side {
+        Side::Yours => "--ours",
+        Side::Theirs => "--theirs",
+    };
+    run(
+        root,
+        &["--literal-pathspecs", "checkout", version, "--", path],
+        false,
+    )?;
+    run(root, &["--literal-pathspecs", "add", "--", path], false).map(drop)
+}
+
 /// Starts tracking `path` (a file, or every file under a folder) without committing it.
 pub fn add(root: &Path, path: &str) -> Result<(), String> {
     run(root, &["--literal-pathspecs", "add", "--", path], false).map(drop)
@@ -1400,6 +1609,114 @@ mod commit_tests {
             run(&dir, &args, false).unwrap();
         }
         dir
+    }
+
+    /// A repository on `main` and `feature-branch`, with `file.txt` changed on both.
+    fn conflicted(name: &str, theirs: &str) -> std::path::PathBuf {
+        let dir = repo(name);
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap();
+            out.status.success()
+        };
+        git(&["checkout", "-q", "-b", "main"]);
+        fs::write(dir.join("file.txt"), "base\n").unwrap();
+        git(&["add", "."]);
+        assert!(git(&["commit", "-q", "-m", "base"]));
+        git(&["checkout", "-q", "-b", "feature-branch"]);
+        if theirs == "delete" {
+            git(&["rm", "-q", "file.txt"]);
+        } else {
+            fs::write(dir.join("file.txt"), "theirs\n").unwrap();
+        }
+        assert!(git(&["commit", "-q", "-am", "feature"]));
+        git(&["checkout", "-q", "main"]);
+        fs::write(dir.join("file.txt"), "yours\n").unwrap();
+        assert!(git(&["commit", "-q", "-am", "main"]));
+        assert!(
+            !git(&["merge", "feature-branch"]),
+            "the merge must conflict"
+        );
+        dir
+    }
+
+    #[test]
+    fn a_merge_that_conflicts_is_described_and_resolved_by_side() {
+        for (side, kept) in [(Side::Yours, "yours\n"), (Side::Theirs, "theirs\n")] {
+            let dir = conflicted(&format!("merge-{side:?}"), "edit");
+            let found = conflicts(&dir).unwrap();
+            assert_eq!(found.operation, Operation::Merge);
+            assert_eq!(
+                (found.yours.as_str(), found.theirs.as_str()),
+                ("main", "feature-branch")
+            );
+            assert_eq!(
+                found.files,
+                [Conflict {
+                    path: "file.txt".into(),
+                    yours: Edit::Modified,
+                    theirs: Edit::Modified
+                }]
+            );
+            assert_eq!(resolve(&dir, &found.files[0], side), Ok(()));
+            assert_eq!(fs::read_to_string(dir.join("file.txt")).unwrap(), kept);
+            assert!(conflicts(&dir).is_none(), "nothing left in conflict");
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_side_that_deleted_the_file_deletes_it() {
+        let dir = conflicted("deleted", "delete");
+        let found = conflicts(&dir).unwrap();
+        assert_eq!(
+            (found.files[0].yours, found.files[0].theirs),
+            (Edit::Modified, Edit::Deleted)
+        );
+        assert_eq!(resolve(&dir, &found.files[0], Side::Theirs), Ok(()));
+        assert!(!dir.join("file.txt").exists());
+        assert!(conflicts(&dir).is_none());
+        fs::remove_dir_all(dir).unwrap();
+
+        let dir = conflicted("deleted-kept", "delete");
+        let found = conflicts(&dir).unwrap();
+        assert_eq!(resolve(&dir, &found.files[0], Side::Yours), Ok(()));
+        assert_eq!(fs::read_to_string(dir.join("file.txt")).unwrap(), "yours\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_clean_repository_has_no_conflicts() {
+        let dir = repo("no-conflicts");
+        assert!(conflicts(&dir).is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unmerged_codes_say_what_each_side_did() {
+        let status = "UU a\0AA b\0DU c\0UD d\0UA e\0AU f\0DD g\0 M h\0R  new\0old\0";
+        let found = parse_conflicts(status);
+        let table: Vec<_> = found
+            .iter()
+            .map(|c| (c.path.as_str(), c.yours, c.theirs))
+            .collect();
+        use Edit::{Added, Deleted, Modified};
+        assert_eq!(
+            table,
+            [
+                ("a", Modified, Modified),
+                ("b", Added, Added),
+                ("c", Deleted, Modified),
+                ("d", Modified, Deleted),
+                ("e", Deleted, Added),
+                ("f", Added, Deleted),
+                ("g", Deleted, Deleted),
+            ]
+        );
     }
 
     #[test]
