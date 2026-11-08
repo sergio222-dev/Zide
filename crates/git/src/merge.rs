@@ -318,20 +318,17 @@ impl Merge {
             .unwrap_or_default()
     }
 
-    /// Replaces the result of the segment `index` with lines typed by hand. A change that was
-    /// edited counts as settled: the sides that were pending are left out.
+    /// Replaces the result of the segment `index` with lines typed by hand. The change is not
+    /// settled by it: its sides still have to be applied or discarded.
     pub fn set_result(&mut self, index: usize, lines: Vec<String>) {
-        let Some(slot) = self.edited.get_mut(index) else {
-            return;
-        };
-        *slot = Some(lines);
-        if let Some(change) = self.change_mut(index) {
-            for side in [Which::Yours, Which::Theirs] {
-                if change.kind.changed_by(side) && change.handling(side) == Handling::Pending {
-                    change.set(side, Handling::Discarded);
-                }
-            }
+        if let Some(slot) = self.edited.get_mut(index) {
+            *slot = Some(lines);
         }
+    }
+
+    /// The result of the segment `index` was typed over.
+    pub fn is_edited(&self, index: usize) -> bool {
+        matches!(self.edited.get(index), Some(Some(_)))
     }
 
     /// The lines of the result for a segment, as they are now.
@@ -430,19 +427,24 @@ mod tests {
     }
 
     #[test]
-    fn typed_lines_replace_the_result_of_a_segment_and_settle_its_change() {
+    fn typed_lines_replace_the_result_of_a_segment_but_leave_its_change_open() {
         let mut merge = Merge::new("a\nA\nz\n", "a\nC\nz\n", "a\nB\nz\n");
         merge.set_result(1, vec!["mine\n".into(), "too\n".into()]);
         assert_eq!(merge.result(), "a\nmine\ntoo\nz\n");
+        assert!(merge.is_edited(1) && !merge.is_edited(0));
+        assert_eq!(merge.conflicts_left(), 1);
+        merge.discard(1, Which::Yours);
+        merge.discard(1, Which::Theirs);
         assert_eq!(merge.conflicts_left(), 0);
+        assert_eq!(merge.result(), "a\nmine\ntoo\nz\n");
         merge.set_result(0, vec!["first\n".into()]);
         assert_eq!(merge.result(), "first\nmine\ntoo\nz\n");
         assert_eq!(merge.result_lines(1), ["mine\n", "too\n"]);
-        // a change that was typed over is settled: applying what is pending leaves it alone
+        // applying a side puts its lines instead of what was typed
         let mut merge = Merge::new("A\n", "C\n", "B\n");
         merge.set_result(0, vec!["typed\n".into()]);
-        merge.apply_non_conflicting(None);
-        assert_eq!(merge.result(), "typed\n");
+        merge.apply(0, Which::Yours);
+        assert_eq!(merge.result(), "C\n");
     }
 
     #[test]

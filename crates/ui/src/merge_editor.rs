@@ -243,12 +243,19 @@ fn build_rows(merge: &Merge) -> (Vec<Row>, Vec<usize>) {
                 let handled = |side: Which| {
                     change.kind.changed_by(side) && change.handling(side) != Handling::Pending
                 };
+                // the result keeps the color of the change: red while it is a conflict, else green
+                // for lines added, blue for lines replaced, once something was put there
+                let touched = change.handling(Which::Yours) == Handling::Applied
+                    || change.handling(Which::Theirs) == Handling::Applied
+                    || merge.is_edited(index);
                 let mid_tint = if !change.resolved() && change.kind == Kind::Conflict {
                     Some(theme::DIFF_CONFLICT)
-                } else if change.handling(Which::Yours) == Handling::Applied
-                    || change.handling(Which::Theirs) == Handling::Applied
-                {
-                    Some(theme::DIFF_CHANGED)
+                } else if touched {
+                    Some(if change.base.is_empty() {
+                        theme::DIFF_ADDED
+                    } else {
+                        theme::DIFF_CHANGED
+                    })
                 } else {
                     None
                 };
@@ -1318,19 +1325,26 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn typing_in_the_result_settles_the_change_and_can_be_undone() {
+    fn typing_in_the_result_keeps_the_change_open_and_can_be_undone() {
         let mut editor = editor("a\nA\nz\n", "a\nC\nz\n", "a\nB\nz\n");
         assert_eq!(editor.caret, caret_at(1, 0, 0));
         editor.type_text("my ");
         editor.type_text("own ");
         assert_eq!(editor.merge.result(), "a\nmy own A\nz\n");
-        assert!(editor.can_apply());
+        // still a conflict: red, with the arrows of both sides
+        assert!(!editor.can_apply());
         assert_eq!(editor.rows[1].mid.text, "my own A");
-        assert_eq!(editor.rows[1].start_of, Some((1, false, false)));
+        assert_eq!(editor.rows[1].mid.tint, Some(theme::DIFF_CONFLICT));
+        assert_eq!(editor.rows[1].start_of, Some((1, true, true)));
+        editor.discard(1, Which::Yours);
+        editor.discard(1, Which::Theirs);
+        assert!(editor.can_apply());
+        assert_eq!(editor.rows[1].mid.tint, Some(theme::DIFF_CHANGED));
         // two keys typed in a row are one step
         editor.undo();
+        editor.undo();
+        editor.undo();
         assert_eq!(editor.merge.result(), "a\nA\nz\n");
-        assert!(!editor.can_apply());
     }
 
     #[::core::prelude::v1::test]

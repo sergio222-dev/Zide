@@ -366,11 +366,20 @@ impl Workspace {
                                 let (icon, color) = file_icon::for_row(name, false, false);
                                 line.cursor_pointer()
                                     .when(index == selected, |row| row.bg(rgb(theme::TREE_FOCUSED)))
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(move |event, window, cx| {
+                                        let double = event.click_count() == 2;
                                         workspace.update(cx, |this, cx| {
                                             if let Some(popup) = &mut this.conflicts {
                                                 popup.select(index);
                                                 cx.notify();
+                                            }
+                                            // a double click settles the file by hand
+                                            let can_merge =
+                                                this.conflicts.as_ref().is_some_and(|popup| {
+                                                    popup.can_merge() && !popup.busy
+                                                });
+                                            if double && can_merge {
+                                                this.open_merge(window, cx);
                                             }
                                         })
                                     })
