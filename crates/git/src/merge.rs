@@ -252,8 +252,9 @@ impl Merge {
         }
     }
 
-    /// Applies every change only one side made, or both made alike, that is still pending.
-    pub fn apply_non_conflicting(&mut self) {
+    /// Applies the pending changes that only one side made, or both made alike: those of `only`
+    /// when given, else everyone's.
+    pub fn apply_non_conflicting(&mut self, only: Option<Which>) {
         for index in 0..self.segments.len() {
             let Some(change) = self.change_mut(index) else {
                 continue;
@@ -263,7 +264,9 @@ impl Merge {
                 Kind::Theirs => Which::Theirs,
                 Kind::Conflict => continue,
             };
-            self.apply(index, side);
+            if only.is_none_or(|only| only == side || change.kind == Kind::Both) {
+                self.apply(index, side);
+            }
         }
     }
 
@@ -402,7 +405,7 @@ mod tests {
         // yours adds a line after `a`, theirs removes `c`
         let mut merge = Merge::new("a\nb\nc\n", "a\nnew\nb\nc\n", "a\nb\n");
         assert_eq!(kinds(&merge), [Kind::Yours, Kind::Theirs]);
-        merge.apply_non_conflicting();
+        merge.apply_non_conflicting(None);
         assert_eq!(merge.result(), "a\nnew\nb\n");
         assert_eq!(merge.changes_left(), 0);
     }
@@ -428,9 +431,19 @@ mod tests {
     }
 
     #[test]
+    fn non_conflicting_changes_can_be_applied_one_side_at_a_time() {
+        let mut merge = Merge::new("a\nb\nc\nd\n", "A\nb\nc\nd\n", "a\nb\nc\nD\n");
+        merge.apply_non_conflicting(Some(Which::Theirs));
+        assert_eq!(merge.result(), "a\nb\nc\nD\n");
+        assert_eq!(merge.changes_left(), 1);
+        merge.apply_non_conflicting(Some(Which::Yours));
+        assert_eq!(merge.result(), "A\nb\nc\nD\n");
+    }
+
+    #[test]
     fn applying_everything_without_conflicts_is_the_merge_of_both() {
         let mut merge = Merge::new("a\nb\nc\nd\n", "A\nb\nc\nd\n", "a\nb\nc\nD\n");
-        merge.apply_non_conflicting();
+        merge.apply_non_conflicting(None);
         assert_eq!(merge.result(), "A\nb\nc\nD\n");
         assert_eq!(merge.conflicts_left(), 0);
     }

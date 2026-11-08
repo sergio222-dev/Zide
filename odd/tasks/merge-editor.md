@@ -9,9 +9,10 @@ Objective: resolve a conflicted file with three panes (yours | result | theirs) 
 - S5 (from the screenshot): toolbar counter "No changes. 1 conflict.", bottom buttons Accept Left, Accept Right, Apply, Cancel; left is "Changes from <yours>", right "Changes from <theirs>".
 
 ## Tasks
-- T1 (S1,S2,S5) git: stages, line-level three-way merge model with per-change state, resolve_with — inline
-- T2 (S1-S3,S5) ui: merge editor overlay, Merge… button, apply writes the file and stages it — inline
+- T1 (S1,S2,S5) git: stages, line-level three-way merge model with per-change state, resolve_with — inline — done (commit 'three-way merge model')
+- T2 (S1-S3,S5) ui: merge editor overlay, Merge… button, apply writes the file and stages it — inline — done
 - T3 (S4) hand edit of the result — pending
 
 ## Log
 L1 (2026-11-08): "ahora vamos a agregar la ventana de resolve conflict interactiva, en la imagen se muestran 3 paneles, en el medio el resultado y a los costados los cambios, las flechas >> indican la direccion y al hacer click sobre las flechas se agrega los cambios, en casos donde ambos cambios se agreguen se agregan uno abajo del otro, con la cruz se descartan esos cambios, en al segunda imagen se muestra como se ve cuando se descarta un cambio. las adiciones se ven en verde con la flecha y la cruz, las remociones en gris tambien con flecha y cruz. En lo posible se podria editar a mano el panel del medio el cual seria el resultado final"
+L2 (2026-11-08): build, clippy, 49 git + 199 ui tests pass. Not observed: the editor on screen. S4 (hand editing of the result) not done: the panes are aligned rows of a custom list, there is no text editor in the middle; it needs its own task.

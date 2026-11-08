@@ -25,6 +25,7 @@ mod fileops;
 mod indent;
 mod layout;
 mod markdown;
+mod merge_editor;
 mod meter;
 mod minimap;
 mod nav;
@@ -646,6 +647,7 @@ struct Workspace {
     push: Option<push::PushPopup>,
     /// The conflict resolver, while it is open.
     conflicts: Option<conflicts::ConflictsPopup>,
+    merge: Option<merge_editor::MergeEditor>,
     /// The rendered Markdown beside the editor (Ctrl+Shift+M), for `.md` files.
     md_preview: bool,
     md: Option<MdPreview>,
@@ -777,6 +779,7 @@ impl Workspace {
                     && this.branches.is_none()
                     && this.push.is_none()
                     && this.conflicts.is_none()
+                    && this.merge.is_none()
                     && !window.has_active_dialog(cx)
                 {
                     this.claude_key(&event.keystroke, window, cx);
@@ -808,6 +811,7 @@ impl Workspace {
             branches: None,
             push: None,
             conflicts: None,
+            merge: None,
             md_preview: false,
             md: None,
             nav: nav::NavHistory::default(),
@@ -3342,6 +3346,9 @@ impl Workspace {
                     return;
                 }
                 this.diff_open = false;
+                if this.merge.is_some() {
+                    return this.merge_key(event, window, cx);
+                }
                 if this.conflicts.is_some() {
                     return this.conflicts_key(event, window, cx);
                 }
@@ -3474,6 +3481,9 @@ impl Workspace {
         }
         if self.conflicts.is_some() {
             root = root.child(self.conflicts_view(cx));
+        }
+        if self.merge.is_some() {
+            root = root.child(self.merge_view(cx));
         }
 
         let Some(popup) = &self.popup else {

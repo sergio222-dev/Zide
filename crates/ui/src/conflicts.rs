@@ -1,7 +1,7 @@
 //! The conflict resolver: when a merge, rebase, cherry-pick or revert stops on conflicts, a dialog
 //! lists the files in conflict with what each side did to them. *Accept Yours* keeps the current
-//! branch's version of the selected file, *Accept Theirs* the incoming one; *Merge…* will open
-//! the file to settle it by hand. It is reached from Find Action, which offers it only while
+//! branch's version of the selected file, *Accept Theirs* the incoming one; *Merge…* opens
+//! the file in the merge editor to settle it by hand. It is reached from Find Action, which offers it only while
 //! there are conflicts.
 
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use zide_git::{Conflict, Conflicts, Operation, Side};
+use zide_git::{Conflict, Conflicts, Edit, Operation, Side};
 
 use crate::commit::{Check, check_box};
 use crate::{Workspace, file_icon, theme};
@@ -82,6 +82,17 @@ impl ConflictsPopup {
             .and_then(|path| self.data.files.iter().position(|c| c.path == path))
             .unwrap_or_else(|| self.selected.min(self.data.files.len().saturating_sub(1)));
         self.busy = false;
+    }
+
+    /// The names of your side and of theirs.
+    pub fn names(&self) -> (String, String) {
+        (self.data.yours.clone(), self.data.theirs.clone())
+    }
+
+    /// The file can be merged by hand: no side deleted it.
+    pub fn can_merge(&self) -> bool {
+        self.selected_conflict()
+            .is_some_and(|c| c.yours != Edit::Deleted && c.theirs != Edit::Deleted)
     }
 
     pub fn selected_conflict(&self) -> Option<&Conflict> {
@@ -188,32 +199,43 @@ impl Workspace {
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {
-                let (resolved, remaining) = outcome;
-                if let Err(why) = resolved {
-                    this.notify(Notification::error(why).title("Could not resolve it"), cx);
-                }
-                match (remaining, &mut this.conflicts) {
-                    (Some(remaining), Some(popup)) => popup.replace(remaining),
-                    (None, Some(_)) => {
-                        let finish = this.conflicts.as_ref().map(|popup| popup.data.operation);
-                        this.close_conflicts(window, cx);
-                        let done = match finish {
-                            Some(Operation::Merge) => {
-                                "Every conflict is resolved: commit to finish the merge"
-                            }
-                            _ => "Every conflict is resolved",
-                        };
-                        this.notify(Notification::success(done), cx);
-                    }
-                    _ => {}
-                }
-                this.rescan(cx); // the files changed on disk
-                this.refresh_commit(cx);
-                cx.notify();
+                this.finish_resolve(outcome, window, cx)
             })
             .ok();
         })
         .detach();
+    }
+
+    /// What follows settling a file: shows the conflicts git still reports, or closes the dialog
+    /// once there are none.
+    pub(crate) fn finish_resolve(
+        &mut self,
+        outcome: (Result<(), String>, Option<Conflicts>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (resolved, remaining) = outcome;
+        if let Err(why) = resolved {
+            self.notify(Notification::error(why).title("Could not resolve it"), cx);
+        }
+        match (remaining, &mut self.conflicts) {
+            (Some(remaining), Some(popup)) => popup.replace(remaining),
+            (None, Some(_)) => {
+                let finish = self.conflicts.as_ref().map(|popup| popup.data.operation);
+                self.close_conflicts(window, cx);
+                let done = match finish {
+                    Some(Operation::Merge) => {
+                        "Every conflict is resolved: commit to finish the merge"
+                    }
+                    _ => "Every conflict is resolved",
+                };
+                self.notify(Notification::success(done), cx);
+            }
+            _ => {}
+        }
+        self.rescan(cx); // the files changed on disk
+        self.refresh_commit(cx);
+        cx.notify();
     }
 
     /// Keys while the dialog is open: it takes all of them.
@@ -386,7 +408,9 @@ impl Workspace {
         .size_full()
         .track_scroll(&scroll);
 
-        let (yours_button, theirs_button, close_button, group_toggle) = (
+        let can_merge = !busy && popup.can_merge();
+        let (yours_button, theirs_button, close_button, group_toggle, merge_button) = (
+            workspace.clone(),
             workspace.clone(),
             workspace.clone(),
             workspace.clone(),
@@ -468,12 +492,16 @@ impl Workspace {
                                                 })
                                             }),
                                     )
-                                    // settling a file by hand comes next
                                     .child(
                                         Button::new("merge-by-hand")
                                             .primary()
                                             .label("Merge…")
-                                            .disabled(true),
+                                            .disabled(!can_merge)
+                                            .on_click(move |_, window, cx| {
+                                                merge_button.update(cx, |this, cx| {
+                                                    this.open_merge(window, cx)
+                                                })
+                                            }),
                                     ),
                             ),
                     )

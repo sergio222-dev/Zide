@@ -45,7 +45,11 @@ Only Linux x86_64 is published for now.
 - **Conflict resolver** (Find Action → *Resolve Conflicts*, offered only while git reports conflicts): when a merge, rebase,
   cherry-pick or revert stops on conflicts, a dialog lists each file with what both sides did to it. *Accept Yours* keeps
   the current branch's version of the selected file, *Accept Theirs* the incoming one (a side that deleted the file deletes it);
-  the file is then marked resolved. Settling a file by hand (*Merge…*) comes next.
+  the file is then marked resolved. *Merge…* opens the merge editor: yours on the left, theirs on the right and the result
+  (it starts as the common ancestor) in the middle. The arrow of a change (`»` / `«`) puts it in the result — both sides go one
+  under the other — and the cross (`✕`) leaves it out; additions are green, removals gray, replacements blue and changes both
+  sides made red. The toolbar applies every non-conflicting change (`F7` / `Shift+F7` move between changes); *Apply* is enabled
+  once no conflict is left, and writes the result and marks the file resolved. Editing the result by hand is not there yet.
   While a merge, rebase, cherry-pick or revert is unfinished the status bar shows it (`Merging feature-branch`); with a merge, the
   commit panel (`Alt+2`) opens with git's message (`Merge branch 'feature-branch'`) and commits everything staged to conclude it.
 - **Minimap** at the right of the editor: every line as colored bars (folded lines are left out), the visible part
