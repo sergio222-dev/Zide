@@ -142,14 +142,17 @@ fn tool_output(content: &Value) -> String {
     }
 }
 
+/// The usage of a message the model wrote. Messages the CLI makes up itself (the answer to a
+/// local command like `/context`) report all zeros: that is no measure of the context.
 fn parse_usage(usage: &Value) -> Option<Usage> {
     let count = |key: &str| usage[key].as_u64().unwrap_or(0);
-    usage.is_object().then(|| Usage {
+    let usage = Usage {
         context_tokens: count("input_tokens")
             + count("cache_creation_input_tokens")
             + count("cache_read_input_tokens"),
         output_tokens: count("output_tokens"),
-    })
+    };
+    (usage.context_tokens > 0 || usage.output_tokens > 0).then_some(usage)
 }
 
 /// The events one line of the stream stands for: none for noise or text that is not
@@ -461,6 +464,12 @@ mod tests {
             one(line),
             Event::Result { terminal_reason: Some(r), .. } if r == "aborted_streaming"
         ));
+    }
+
+    #[test]
+    fn a_made_up_message_has_no_usage() {
+        let line = r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Context Usage"}],"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#;
+        assert!(parse_events(line).is_empty());
     }
 
     #[test]

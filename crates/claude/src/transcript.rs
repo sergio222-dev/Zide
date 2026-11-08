@@ -291,8 +291,18 @@ impl Transcript {
                 self.turn_open = false;
                 self.cost_usd = cost_usd;
                 self.cancel_pending();
+                // Local commands (`/context`, `/cost`) answer without streaming: the result
+                // is the only place their text comes in
+                let streamed = self
+                    .blocks
+                    .iter()
+                    .rev()
+                    .take_while(|block| !matches!(block, Block::User(_)))
+                    .any(|block| matches!(block, Block::Text(_)));
                 if terminal_reason.as_deref() == Some("aborted_streaming") {
                     self.blocks.push(Block::Interrupted);
+                } else if !is_error && !streamed && !text.is_empty() {
+                    self.blocks.push(Block::Text(text));
                 } else if is_error {
                     let message = if text.is_empty() {
                         "The turn failed.".to_owned()
@@ -408,6 +418,32 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, ["Hello", "<tool>", "Bye"]);
+    }
+
+    #[test]
+    fn a_result_with_text_nobody_streamed_is_shown() {
+        let mut t = Transcript::new();
+        t.user_message("/context");
+        t.apply(Event::Result {
+            text: "## Context Usage".into(),
+            is_error: false,
+            cost_usd: 0.0,
+            terminal_reason: None,
+        });
+        assert_eq!(
+            t.blocks().last(),
+            Some(&Block::Text("## Context Usage".into()))
+        );
+        // an answer that was streamed is not repeated by its result
+        t.user_message("hi");
+        t.apply(Event::TextDelta("hello".into()));
+        t.apply(Event::Result {
+            text: "hello".into(),
+            is_error: false,
+            cost_usd: 0.0,
+            terminal_reason: None,
+        });
+        assert_eq!(t.blocks().len(), 4);
     }
 
     #[test]

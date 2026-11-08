@@ -7,6 +7,7 @@ mod gauges;
 mod images;
 mod menu;
 mod options;
+mod report;
 mod sessions;
 mod tools;
 
@@ -107,6 +108,9 @@ pub struct Chat {
     input: Entity<TextareaState>,
     /// The rendered Markdown of each assistant text block, by block index.
     markdown: HashMap<usize, Entity<TextViewState>>,
+    /// The Markdown of the parts of a `/context` report, by block index and part: the head is
+    /// part 0 and section `n` is part `n + 1`.
+    report_md: HashMap<(usize, usize), Entity<TextViewState>>,
     scroll: ScrollHandle,
     /// How many of the last blocks are drawn; a long conversation is not drawn whole.
     shown: usize,
@@ -180,6 +184,7 @@ impl Chat {
             session: None,
             input,
             markdown: HashMap::new(),
+            report_md: HashMap::new(),
             scroll: ScrollHandle::new(),
             shown: SHOWN_STEP,
             asks: HashMap::new(),
@@ -224,8 +229,33 @@ impl Chat {
 
     /// Gives every assistant text block its Markdown, after a stored conversation is loaded.
     fn rebuild_markdown(&mut self, cx: &mut App) {
-        for (index, block) in self.transcript.blocks().iter().enumerate() {
-            if let Block::Text(text) = block {
+        let texts: Vec<(usize, String)> = self
+            .transcript
+            .blocks()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| match block {
+                Block::Text(text) => Some((index, text.clone())),
+                _ => None,
+            })
+            .collect();
+        for (index, text) in texts {
+            self.build_markdown(index, &text, cx);
+        }
+    }
+
+    /// Makes the Markdown of a text block: one per part for a `/context` report.
+    fn build_markdown(&mut self, index: usize, text: &str, cx: &mut App) {
+        match report::parse(text) {
+            Some(report) => {
+                let parts =
+                    std::iter::once(report.head).chain(report.sections.into_iter().map(|s| s.body));
+                for (part, body) in parts.enumerate() {
+                    let state = cx.new(|cx| TextViewState::markdown(&body, cx));
+                    self.report_md.insert((index, part), state);
+                }
+            }
+            None => {
                 let state = cx.new(|cx| TextViewState::markdown(text, cx));
                 self.markdown.insert(index, state);
             }
@@ -240,9 +270,10 @@ impl Chat {
         };
         match self.markdown.get(&last) {
             Some(state) => state.update(cx, |state, cx| state.set_text(text, cx)),
+            None if self.report_md.contains_key(&(last, 0)) => {}
             None => {
-                let state = cx.new(|cx| TextViewState::markdown(text, cx));
-                self.markdown.insert(last, state);
+                let text = text.clone();
+                self.build_markdown(last, &text, cx);
             }
         }
     }
@@ -907,6 +938,9 @@ impl Workspace {
                         .map(|sent| images::sent_view(sent)),
                 )
                 .into_any_element(),
+            Block::Text(text) if chat.report_md.contains_key(&(index, 0)) => {
+                self.report_view(chat, index, text, cx)
+            }
             Block::Text(text) => match chat.markdown.get(&index) {
                 Some(state) => div()
                     .child(TextView::new(state).selectable(true))
