@@ -19,6 +19,21 @@ pub(super) fn color(used: f64) -> u32 {
     }
 }
 
+/// The warning for a context that is filling up, in the colour of the ring: nothing until the ring
+/// turns orange, the share used while it is orange or red, and a plain notice once the limit is
+/// reached.
+pub(super) fn warning(share: f64) -> Option<(u32, String)> {
+    if share < 0.7 {
+        return None;
+    }
+    let text = if share >= 1.0 {
+        "Context full".to_owned()
+    } else {
+        format!("Context {:.0}%", share * 100.0)
+    };
+    Some((color(share), text))
+}
+
 /// "850k", "1.2M".
 fn tokens(count: u64) -> String {
     if count >= 1_000_000 {
@@ -144,7 +159,7 @@ pub(super) fn report(
 
 #[cfg(test)]
 mod tests {
-    use super::{color, resets_in, tokens};
+    use super::{color, resets_in, tokens, warning};
     use crate::theme;
 
     #[test]
@@ -152,6 +167,23 @@ mod tests {
         assert_eq!(color(0.2), theme::OK);
         assert_eq!(color(0.7), theme::WORKING);
         assert_eq!(color(0.95), theme::ERROR);
+    }
+
+    #[test]
+    fn the_warning_starts_when_the_ring_turns_orange() {
+        assert_eq!(warning(0.69), None);
+        assert_eq!(
+            warning(0.7),
+            Some((theme::WORKING, "Context 70%".to_owned()))
+        );
+        assert_eq!(
+            warning(0.93),
+            Some((theme::ERROR, "Context 93%".to_owned()))
+        );
+        assert_eq!(
+            warning(1.2),
+            Some((theme::ERROR, "Context full".to_owned()))
+        );
     }
 
     #[test]

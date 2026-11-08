@@ -95,6 +95,18 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap_1()
+                            // to the left of the model, in the colour of the context ring
+                            .children(
+                                gauges::context_share(&chat.transcript, &chats.defaults)
+                                    .and_then(gauges::warning)
+                                    .map(|(color, text)| {
+                                        div()
+                                            .px_2()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(color))
+                                            .child(text)
+                                    }),
+                            )
                             .child(self.model_menu(chat, &chats.defaults, cx))
                             .child(self.effort_menu(chat, &chats.defaults, cx))
                             .child(self.context_menu(chat, chats, now)),
