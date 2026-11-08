@@ -67,6 +67,9 @@ pub enum Event {
         name: String,
         input: Value,
     },
+    /// The CLI took up a message the user sent: it answers it, or, when it was sent mid-turn,
+    /// folds it into the turn that is running (which then ends with one result for both).
+    Consumed,
     /// What a tool printed, for the `ToolUse` with the same id.
     ToolResult {
         tool_use_id: String,
@@ -216,6 +219,7 @@ pub fn parse_events(line: &str) -> Vec<Event> {
                 .chain(parse_usage(&message["usage"]).map(Event::Usage))
                 .collect()
         }
+        "user" if value["isReplay"] == true => vec![Event::Consumed],
         "user" => value["message"]["content"]
             .as_array()
             .into_iter()
@@ -382,6 +386,18 @@ mod tests {
     fn assistant_text_only_is_not_an_event() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(parse_events(line), vec![]);
+    }
+
+    #[test]
+    fn a_replayed_prompt_says_the_cli_took_up_the_message() {
+        let line = r#"{"type":"user","isReplay":true,"message":{"role":"user","content":"hi"}}"#;
+        assert_eq!(parse_events(line), [Event::Consumed]);
+        // what a tool printed is not a prompt
+        let result = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"x"}]}}"#;
+        assert!(matches!(
+            parse_events(result)[..],
+            [Event::ToolResult { .. }]
+        ));
     }
 
     #[test]

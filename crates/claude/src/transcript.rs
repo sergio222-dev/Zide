@@ -101,8 +101,11 @@ pub enum Block {
 pub struct Transcript {
     blocks: Vec<Block>,
     session_id: Option<String>,
-    /// Messages sent that have no result yet: the first is being answered, the rest wait.
-    turns: usize,
+    /// Messages sent that the CLI has not taken up yet.
+    waiting: usize,
+    /// A turn is running: from the CLI taking up a message to its result. A message sent
+    /// meanwhile may be folded into it, so it ends with one result for several messages.
+    active: bool,
     alive: bool,
     /// The CLI is compacting the conversation.
     compacting: bool,
@@ -119,7 +122,8 @@ impl Default for Transcript {
         Transcript {
             blocks: Vec::new(),
             session_id: None,
-            turns: 0,
+            waiting: 0,
+            active: false,
             alive: true,
             compacting: false,
             usage: None,
@@ -188,7 +192,7 @@ impl Transcript {
             Status::Inactive
         } else if self.blocks.iter().any(is_pending) {
             Status::NeedsUser
-        } else if self.turns > 0 {
+        } else if self.active || self.waiting > 0 {
             Status::Working
         } else {
             Status::Idle
@@ -200,13 +204,17 @@ impl Transcript {
     /// Sending means there is a live process, even when an earlier one had exited.
     pub fn user_message(&mut self, text: &str) {
         self.push_user(text);
-        self.turns += 1;
+        self.waiting += 1;
         self.alive = true;
     }
 
-    /// How many sent messages wait for the one being answered.
+    /// How many sent messages wait for the turn that is running (or, with none, for the first).
     pub fn queued(&self) -> usize {
-        self.turns.saturating_sub(1)
+        if self.active {
+            self.waiting
+        } else {
+            self.waiting.saturating_sub(1)
+        }
     }
 
     /// A message from a stored conversation: shown, but it opens no turn.
@@ -240,6 +248,10 @@ impl Transcript {
                 if model.is_some() {
                     self.model = model;
                 }
+            }
+            Event::Consumed => {
+                self.waiting = self.waiting.saturating_sub(1);
+                self.active = true;
             }
             Event::TextDelta(chunk) => match self.blocks.last_mut() {
                 Some(Block::Text(text)) => text.push_str(&chunk),
@@ -304,7 +316,11 @@ impl Transcript {
                 cost_usd,
                 terminal_reason,
             } => {
-                self.turns = self.turns.saturating_sub(1);
+                // a result with no turn running answers a message the CLI never reported taking
+                // up (a local command)
+                if !std::mem::take(&mut self.active) {
+                    self.waiting = self.waiting.saturating_sub(1);
+                }
                 self.compacting = false;
                 self.cost_usd = cost_usd;
                 self.cancel_pending();
@@ -331,7 +347,8 @@ impl Transcript {
             }
             Event::Exit => {
                 self.alive = false;
-                self.turns = 0;
+                self.waiting = 0;
+                self.active = false;
                 self.cancel_pending();
             }
         }
@@ -426,6 +443,33 @@ mod tests {
         assert_eq!((t.status(), t.queued()), (Status::Working, 1));
         t.apply(done());
         assert_eq!((t.status(), t.queued()), (Status::Working, 0));
+        t.apply(done());
+        assert_eq!(t.status(), Status::Idle);
+    }
+
+    #[test]
+    fn a_message_folded_into_the_running_turn_does_not_leave_it_working() {
+        let mut t = Transcript::new();
+        t.user_message("one");
+        t.apply(Event::Consumed);
+        t.user_message("two"); // sent while the first is answered
+        assert_eq!((t.status(), t.queued()), (Status::Working, 1));
+        // the CLI takes it up between two tool calls: the turn is still one
+        t.apply(Event::Consumed);
+        assert_eq!((t.status(), t.queued()), (Status::Working, 0));
+        t.apply(done());
+        assert_eq!(t.status(), Status::Idle);
+    }
+
+    #[test]
+    fn a_message_answered_in_its_own_turn_keeps_the_chat_working_until_then() {
+        let mut t = Transcript::new();
+        t.user_message("one");
+        t.apply(Event::Consumed);
+        t.user_message("two");
+        t.apply(done());
+        assert_eq!((t.status(), t.queued()), (Status::Working, 0));
+        t.apply(Event::Consumed);
         t.apply(done());
         assert_eq!(t.status(), Status::Idle);
     }
