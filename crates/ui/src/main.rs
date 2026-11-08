@@ -654,13 +654,16 @@ impl Workspace {
         .detach();
         cx.spawn(async move |this, cx| {
             while let Ok(change) = changes_rx.recv().await {
-                let reacted = this.update(cx, |this, cx| match change {
-                    Change::Files => this.rescan(cx),
-                    // same file list: the symbol indices stay valid and unchanged files are reused
-                    Change::Contents => {
-                        let previous = this.symbols.clone();
-                        this.index_symbols(previous, cx);
-                        this.refresh_commit(cx);
+                let reacted = this.update(cx, |this, cx| {
+                    this.reload_open_file(cx); // an editor that saves by renaming reports Files
+                    match change {
+                        Change::Files => this.rescan(cx),
+                        // same file list: the symbol indices stay valid and unchanged files are reused
+                        Change::Contents => {
+                            let previous = this.symbols.clone();
+                            this.index_symbols(previous, cx);
+                            this.refresh_commit(cx);
+                        }
                     }
                 });
                 if reacted.is_err() {
@@ -881,6 +884,14 @@ impl Workspace {
                 .collect();
         }
         self.index = Some(Arc::new(index));
+    }
+
+    /// Shows what another program wrote to the open file, unless it has unsaved edits.
+    fn reload_open_file(&mut self, cx: &mut Context<Self>) {
+        if self.viewer.as_mut().is_some_and(|viewer| viewer.reload()) {
+            self.refresh_git(cx);
+        }
+        cx.notify();
     }
 
     /// Saves the open file; called whenever the user's attention leaves the editor.
