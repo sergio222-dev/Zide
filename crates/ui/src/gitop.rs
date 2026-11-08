@@ -53,6 +53,8 @@ pub struct OpDialog {
     pub field: Field,
     /// The list of `field`, when open, with the row the keyboard is on.
     open: Option<usize>,
+    /// What was typed to narrow the open list down.
+    filter: String,
     /// Where the text of the option that takes one is typed.
     input: Option<Entity<InputState>>,
 }
@@ -73,6 +75,7 @@ impl OpDialog {
                 Field::Branch
             },
             open: None,
+            filter: String::new(),
             input,
         }
     }
@@ -111,6 +114,40 @@ impl OpDialog {
                 .collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// What the open list of `field` shows: the items that hold what was typed, in any case.
+    pub fn shown(&self, field: Field) -> Vec<String> {
+        let items = self.items(field);
+        if self.filter.is_empty() || field != self.field || self.open.is_none() {
+            return items;
+        }
+        let wanted = self.filter.to_lowercase();
+        items
+            .into_iter()
+            .filter(|item| item.to_lowercase().contains(&wanted))
+            .collect()
+    }
+
+    /// A character typed while a dropdown has the keyboard: opens its list and narrows it down.
+    pub fn type_char(&mut self, c: char) {
+        if self.open.is_none() {
+            self.toggle_list(self.field);
+            if self.open.is_none() {
+                return; // nothing to choose from
+            }
+        }
+        self.filter.push(c);
+        self.open = Some(0);
+    }
+
+    /// Backspace: takes the last typed character back; `false` when nothing was typed.
+    pub fn backspace(&mut self) -> bool {
+        if self.filter.pop().is_none() {
+            return false;
+        }
+        self.open = Some(0);
+        true
     }
 
     fn value(&self, field: Field) -> &str {
@@ -154,6 +191,7 @@ impl OpDialog {
 
     /// Opens the list of `field` on its current value, or closes it.
     pub fn toggle_list(&mut self, field: Field) {
+        self.filter.clear();
         if self.open.is_some() && self.field == field {
             self.open = None;
             return;
@@ -171,6 +209,7 @@ impl OpDialog {
     /// Tab: the keyboard goes to the next field.
     pub fn switch_field(&mut self) {
         self.open = None;
+        self.filter.clear();
         let fields = self.fields();
         let at = fields.iter().position(|f| *f == self.field).unwrap_or(0);
         self.field = fields[(at + 1) % fields.len()];
@@ -181,7 +220,7 @@ impl OpDialog {
         let Some(row) = self.open else {
             return self.toggle_list(self.field);
         };
-        let last = self.items(self.field).len().saturating_sub(1);
+        let last = self.shown(self.field).len().saturating_sub(1);
         self.open = Some(row.saturating_add_signed(delta).min(last));
     }
 
@@ -191,6 +230,7 @@ impl OpDialog {
 
     pub fn close_list(&mut self) {
         self.open = None;
+        self.filter.clear();
     }
 
     pub fn pick_highlighted(&mut self) {
@@ -202,9 +242,11 @@ impl OpDialog {
     /// Takes row `row` of `field` as its value and closes the list. A new remote brings its own
     /// branch: the one with the same name when it has it, else its first.
     pub fn pick(&mut self, field: Field, row: usize) {
+        let item = self.shown(field).get(row).cloned();
         self.open = None;
+        self.filter.clear();
         self.field = field;
-        let Some(item) = self.items(field).get(row).cloned() else {
+        let Some(item) = item else {
             return;
         };
         match field {
@@ -394,10 +436,27 @@ impl Workspace {
             return;
         }
         cx.stop_propagation();
-        let alt = event.keystroke.modifiers.alt;
+        let modifiers = event.keystroke.modifiers;
+        let alt = modifiers.alt;
         let Some(dialog) = &mut self.git_op else {
             return;
         };
+        if dialog.menu.is_none() && !(modifiers.control || alt || modifiers.platform) {
+            // typing narrows the dropdown that has the keyboard down to what matches
+            let typed = match (key, event.keystroke.key_char.as_deref()) {
+                ("backspace", _) => dialog.backspace().then_some(None),
+                (_, Some(text)) if text.chars().count() == 1 && text != " " => {
+                    Some(text.chars().next())
+                }
+                _ => None,
+            };
+            if let Some(c) = typed {
+                if let Some(c) = c {
+                    dialog.type_char(c);
+                }
+                return cx.notify();
+            }
+        }
         match (key, dialog.menu) {
             ("escape", Some(_)) => dialog.menu = None,
             ("escape", None) if dialog.is_list_open() => dialog.close_list(),
@@ -718,7 +777,7 @@ fn field(dialog: &OpDialog, which: Field, width: f32, workspace: &Entity<Workspa
     let focused = dialog.field == which;
     let open = focused.then_some(dialog.open).flatten();
     let items = if open.is_some() {
-        dialog.items(which)
+        dialog.shown(which)
     } else {
         Vec::new()
     };
@@ -744,7 +803,15 @@ fn field(dialog: &OpDialog, which: Field, width: f32, workspace: &Entity<Workspa
                     theme::CONTROL_BORDER
                 }))
                 .text_color(rgb(theme::STRONG))
-                .child(div().truncate().child(dialog.value(which).to_string()))
+                .child(
+                    div()
+                        .truncate()
+                        .child(if open.is_some() && !dialog.filter.is_empty() {
+                            format!("{}|", dialog.filter) // what is being typed, with its caret
+                        } else {
+                            dialog.value(which).to_string()
+                        }),
+                )
                 .child(div().text_color(rgb(theme::DIM)).child("⌄"))
                 .on_click(move |_, _, cx| {
                     toggle.update(cx, |this, cx| {
@@ -780,6 +847,11 @@ fn field(dialog: &OpDialog, which: Field, width: f32, workspace: &Entity<Workspa
                     })
             });
             // deferred: painted over what comes after it (the buttons, the chips)
+            let rows: Vec<AnyElement> = if items.is_empty() {
+                vec![note("No matches", false).into_any_element()]
+            } else {
+                rows.map(IntoElement::into_any_element).collect()
+            };
             d.child(deferred(
                 div()
                     .id(SharedString::from(format!("op-list-{which:?}")))
@@ -848,6 +920,41 @@ mod tests {
         dialog.pick_highlighted();
         assert_eq!(dialog.branch, "main");
         assert!(!dialog.is_list_open());
+    }
+
+    #[test]
+    fn typing_narrows_the_open_list_and_a_pick_takes_the_matching_row() {
+        let mut dialog = pulling();
+        dialog.field = Field::Remote;
+        dialog.type_char('F'); // closed: opens, any case
+        assert!(dialog.is_list_open());
+        assert_eq!(dialog.shown(Field::Remote), ["fork"]);
+        dialog.pick_highlighted();
+        assert_eq!(dialog.remote, "fork");
+        assert!(dialog.filter.is_empty());
+        assert_eq!(dialog.shown(Field::Remote), ["origin", "fork"]);
+    }
+
+    #[test]
+    fn backspace_widens_the_list_again_and_nothing_matching_shows_no_rows() {
+        let mut dialog = pulling();
+        dialog.field = Field::Branch;
+        for c in "zzz".chars() {
+            dialog.type_char(c);
+        }
+        assert!(dialog.shown(Field::Branch).is_empty());
+        assert!(dialog.backspace() && dialog.backspace() && dialog.backspace());
+        assert_eq!(dialog.shown(Field::Branch).len(), 2);
+        assert!(!dialog.backspace()); // nothing left to take back
+    }
+
+    #[test]
+    fn closing_the_list_forgets_what_was_typed() {
+        let mut dialog = pulling();
+        dialog.field = Field::Branch;
+        dialog.type_char('m');
+        dialog.close_list();
+        assert!(dialog.filter.is_empty() && !dialog.is_list_open());
     }
 
     #[test]
