@@ -22,6 +22,7 @@ mod definition;
 mod diff_view;
 mod file_icon;
 mod fileops;
+mod gitop;
 mod indent;
 mod layout;
 mod markdown;
@@ -96,6 +97,9 @@ actions!(
         GoToDefinition,
         SwitchBranch,
         PushCommits,
+        PullBranch,
+        MergeBranch,
+        RebaseBranch,
         ReformatCode,
         ExtendSelection,
         FocusTree,
@@ -207,6 +211,33 @@ fn action_registry() -> Vec<ActionDef> {
             only_when_conflicted: false,
             state: None,
             run: |ws, window, cx| ws.toggle_push(window, cx),
+        },
+        ActionDef {
+            name: "Pull",
+            synonyms: &["pull", "update", "fetch", "git", "download", "incoming"],
+            action: Some(Box::new(PullBranch)),
+            closes_popup: true,
+            only_when_conflicted: false,
+            state: None,
+            run: |ws, window, cx| ws.toggle_git_op(zide_git::Op::Pull, window, cx),
+        },
+        ActionDef {
+            name: "Merge",
+            synonyms: &["merge", "git", "combine", "integrate"],
+            action: Some(Box::new(MergeBranch)),
+            closes_popup: true,
+            only_when_conflicted: false,
+            state: None,
+            run: |ws, window, cx| ws.toggle_git_op(zide_git::Op::Merge, window, cx),
+        },
+        ActionDef {
+            name: "Rebase",
+            synonyms: &["rebase", "git", "replay", "onto"],
+            action: Some(Box::new(RebaseBranch)),
+            closes_popup: true,
+            only_when_conflicted: false,
+            state: None,
+            run: |ws, window, cx| ws.toggle_git_op(zide_git::Op::Rebase, window, cx),
         },
         ActionDef {
             name: "Switch Branch",
@@ -645,6 +676,7 @@ struct Workspace {
     branches: Option<branches::BranchPopup>,
     /// The push dialog (Ctrl+Shift+K), while it is open.
     push: Option<push::PushPopup>,
+    git_op: Option<gitop::OpDialog>,
     /// The conflict resolver, while it is open.
     conflicts: Option<conflicts::ConflictsPopup>,
     merge: Option<merge_editor::MergeEditor>,
@@ -778,6 +810,7 @@ impl Workspace {
                     && this.popup.is_none()
                     && this.branches.is_none()
                     && this.push.is_none()
+                    && this.git_op.is_none()
                     && this.conflicts.is_none()
                     && this.merge.is_none()
                     && !window.has_active_dialog(cx)
@@ -810,6 +843,7 @@ impl Workspace {
             branch: None,
             branches: None,
             push: None,
+            git_op: None,
             conflicts: None,
             merge: None,
             md_preview: false,
@@ -1064,6 +1098,7 @@ impl Workspace {
         self.autosave(cx);
         self.refresh_commit(cx); // what git says now, for the actions that depend on it
         self.push = None;
+        self.git_op = None;
         self.conflicts = None;
         let input = cx.new(|cx| InputState::new(window, cx));
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
@@ -2510,6 +2545,7 @@ impl Workspace {
     fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.popup = None;
         self.push = None;
+        self.git_op = None;
         self.conflicts = None;
         self.cancel_running_search();
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search for branches"));
@@ -3297,6 +3333,15 @@ impl Workspace {
             .on_action(
                 cx.listener(|this, _: &PushCommits, window, cx| this.toggle_push(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &PullBranch, window, cx| {
+                this.toggle_git_op(zide_git::Op::Pull, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &MergeBranch, window, cx| {
+                this.toggle_git_op(zide_git::Op::Merge, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RebaseBranch, window, cx| {
+                this.toggle_git_op(zide_git::Op::Rebase, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
             .on_action(
                 cx.listener(|this, _: &FocusTree, window, cx| this.focus_tree(true, window, cx)),
@@ -3319,7 +3364,9 @@ impl Workspace {
                 cx.listener(|this, _: &PreviousMethod, _, cx| this.jump_to_method(false, cx)),
             )
             .on_action(cx.listener(|this, _: &SwitchTab, window, cx| {
-                if this.push.is_some() {
+                if this.git_op.is_some() {
+                    this.git_op_tab(window, cx);
+                } else if this.push.is_some() {
                     this.push_switch_pane(cx);
                 } else if this.popup.is_some() {
                     this.switch_tab(cx);
@@ -3351,6 +3398,9 @@ impl Workspace {
                 }
                 if this.conflicts.is_some() {
                     return this.conflicts_key(event, window, cx);
+                }
+                if this.git_op.is_some() {
+                    return this.git_op_key(event, window, cx);
                 }
                 if this.push.is_some() {
                     return this.push_key(event, window, cx);
@@ -3478,6 +3528,9 @@ impl Workspace {
         }
         if self.push.is_some() {
             root = root.child(self.push_view(cx));
+        }
+        if self.git_op.is_some() {
+            root = root.child(self.git_op_view(cx));
         }
         if self.conflicts.is_some() {
             root = root.child(self.conflicts_view(cx));
@@ -4437,6 +4490,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-f", FindInFiles, Some("Workspace")),
             KeyBinding::new("ctrl-shift-`", SwitchBranch, Some("Workspace")),
             KeyBinding::new("ctrl-shift-k", PushCommits, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-u", PullBranch, Some("Workspace")),
             // some layouts report Shift+` as the shifted character
             KeyBinding::new("ctrl-~", SwitchBranch, Some("Workspace")),
             KeyBinding::new("ctrl-shift-~", SwitchBranch, Some("Workspace")),

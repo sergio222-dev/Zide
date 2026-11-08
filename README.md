@@ -42,6 +42,10 @@ Only Linux x86_64 is published for now.
   selected commit on the right with its message, author and date under them. `Enter` or a double click on a file opens what
   the commit changed in it, side by side (green added, gray removed, blue replaced); `Ctrl+Enter` or **Push** pushes (never
   forced), and *Push tags* sends the tags too.
+- **Pull, Merge and Rebase dialogs** (`Ctrl+Shift+U` pulls; Find Action → *Pull*, *Merge*, *Rebase*): `git <command>` with the
+  branch taken from a dropdown (`Tab` switches, `Up`/`Down` open and move, `Enter` picks, then `Enter` runs). *Modify options*
+  (`Alt+O`) lists what git accepts, shown as chips once picked; what cannot go with a picked option is dimmed. Options that take
+  text (`-m`, `--onto`) show a box for it; rebase can also pick another branch to rebase.
 - **Conflict resolver** (Find Action → *Resolve Conflicts*, offered only while git reports conflicts): when a merge, rebase,
   cherry-pick or revert stops on conflicts, a dialog lists each file with what both sides did to it. *Accept Yours* keeps
   the current branch's version of the selected file, *Accept Theirs* the incoming one (a side that deleted the file deletes it);
@@ -142,6 +146,7 @@ the projects opened before (Enter opens one in this window) and **Open** picks a
 | `Ctrl+Shift+F` | Find in Files |
 | ``Ctrl+Shift+` `` | Switch Branch |
 | `Ctrl+Alt+A` | Add to Git: start tracking the selected file or folder in the tree (the open file elsewhere) |
+| `Ctrl+Shift+U` | Pull dialog: remote and branch to pull into the current branch (`Tab` switches field, `Enter` pulls, `Alt+O` options) |
 | `Ctrl+Shift+K` | Push dialog: commits to push, their files and diffs (`Tab` switches list, `Enter` opens the diff, `Ctrl+Enter` pushes) |
 | `Alt+F7` | Find Usages |
 | `gd` / `Ctrl+B` | Go to Definition |

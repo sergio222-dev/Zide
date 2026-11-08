@@ -155,6 +155,7 @@ impl Workspace {
                     this.popup = None;
                     this.branches = None;
                     this.push = None;
+                    this.git_op = None;
                     this.conflicts = Some(ConflictsPopup::new(found));
                     this.focus.focus(window, cx); // the keys are read by the workspace
                     cx.notify();
