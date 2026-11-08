@@ -1,4 +1,4 @@
-//! The Claude Code chat: a full-screen view (Alt+3) over one live `claude` session. The
+//! The Claude Code chat: a full-screen view (Alt+2) over one live `claude` session. The
 //! conversation itself is `zide_claude::Transcript`; this module owns the process, turns
 //! its events into UI state and draws the history and the input box.
 
@@ -324,6 +324,15 @@ impl Chat {
 }
 
 impl Workspace {
+    /// Alt+2: shows the chat; from the chat it stays there (Esc, or Alt+1 / Ctrl+K, leaves it).
+    pub(crate) fn open_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.claude_open {
+            self.focus_active_chat(window, cx);
+            return cx.notify();
+        }
+        self.toggle_claude(window, cx);
+    }
+
     pub(crate) fn toggle_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.autosave(cx); // the chat may edit the files, and leaving the editor is a save
         if self.claude_open {

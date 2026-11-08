@@ -313,22 +313,22 @@ fn action_registry() -> Vec<ActionDef> {
             run: |ws, _, cx| ws.add_to_git(cx),
         },
         ActionDef {
-            name: "Toggle Git Log",
+            name: "Open Git Log",
             synonyms: &["git", "log", "history", "commits", "graph"],
             action: Some(Box::new(ToggleGitLog)),
             closes_popup: true,
             only_when_conflicted: false,
             state: None,
-            run: |ws, window, cx| ws.toggle_git_log(window, cx),
+            run: |ws, window, cx| ws.open_git_log(window, cx),
         },
         ActionDef {
-            name: "Toggle Claude Chat",
+            name: "Open Claude Chat",
             synonyms: &["claude", "ai", "assistant", "chat"],
             action: Some(Box::new(ToggleClaudeChat)),
             closes_popup: true,
             only_when_conflicted: false,
             state: None,
-            run: |ws, window, cx| ws.toggle_claude(window, cx),
+            run: |ws, window, cx| ws.open_claude(window, cx),
         },
         ActionDef {
             name: "Claude: Resume Session",
@@ -1891,9 +1891,9 @@ impl Workspace {
 
     /// Alt+1: shows the tree and focuses it; from the tree, hides it again (like IntelliJ).
     fn toggle_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // the tree belongs to the editor: from the chat, Alt+1 goes back to it first
-        if self.claude_open {
-            return self.toggle_claude(window, cx);
+        // the tree belongs to the editor: from the chat or the git log, Alt+1 goes back to it first
+        if self.close_tab(window, cx) {
+            return;
         }
         self.autosave(cx);
         self.leave_commit_list();
@@ -3324,12 +3324,10 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &RevealOpenFile, _, cx| this.reveal_open_file(cx)))
             .on_action(cx.listener(|this, _: &AddToGit, _, cx| this.add_to_git(cx)))
             .on_action(
-                cx.listener(|this, _: &ToggleGitLog, window, cx| this.toggle_git_log(window, cx)),
+                cx.listener(|this, _: &ToggleGitLog, window, cx| this.open_git_log(window, cx)),
             )
             .on_action(
-                cx.listener(|this, _: &ToggleClaudeChat, window, cx| {
-                    this.toggle_claude(window, cx)
-                }),
+                cx.listener(|this, _: &ToggleClaudeChat, window, cx| this.open_claude(window, cx)),
             )
             .on_action(
                 cx.listener(|this, _: &ToggleMarkdownPreview, _, cx| this.toggle_md_preview(cx)),
@@ -4526,10 +4524,10 @@ fn main() {
             KeyBinding::new("alt-~", RevealOpenFile, Some("Workspace")),
             KeyBinding::new("alt-shift-~", RevealOpenFile, Some("Workspace")),
             KeyBinding::new("ctrl-alt-a", AddToGit, Some("Workspace")),
-            KeyBinding::new("alt-2", ToggleCommitPanel, Some("Workspace")),
+            KeyBinding::new("ctrl-k", ToggleCommitPanel, Some("Workspace")),
             KeyBinding::new("alt-enter", CommitNow, Some("Workspace")),
-            KeyBinding::new("alt-3", ToggleClaudeChat, Some("Workspace")),
-            KeyBinding::new("alt-4", ToggleGitLog, Some("Workspace")),
+            KeyBinding::new("alt-2", ToggleClaudeChat, Some("Workspace")),
+            KeyBinding::new("alt-3", ToggleGitLog, Some("Workspace")),
             KeyBinding::new("ctrl-shift-m", ToggleMarkdownPreview, Some("Workspace")),
             KeyBinding::new("ctrl-alt-left", NavigateBack, Some("Workspace")),
             KeyBinding::new("ctrl-alt-right", NavigateForward, Some("Workspace")),

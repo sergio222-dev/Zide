@@ -1,4 +1,4 @@
-//! The commit panel (Alt+2): the changed files as a tree with a check box on each, the message
+//! The commit panel (Ctrl+K): the changed files as a tree with a check box on each, the message
 //! and the buttons that commit what is ticked.
 
 use std::collections::{BTreeMap, HashSet};
@@ -354,12 +354,12 @@ pub(crate) fn check_box(check: Check) -> Div {
 }
 
 impl Workspace {
-    /// Alt+2: opens the panel on the message; from the panel, closes it.
+    /// Ctrl+K: opens the panel on the message; from the panel, closes it.
     pub(crate) fn toggle_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // the panel belongs to the editor: from the chat, Alt+2 goes back to it first (as Alt+1
-        // does for the tree)
-        if self.claude_open {
-            return self.toggle_claude(window, cx);
+        // the panel belongs to the editor: from the chat or the git log, Ctrl+K goes back to it
+        // first (as Alt+1 does for the tree)
+        if self.close_tab(window, cx) {
+            return;
         }
         self.autosave(cx); // what git is about to show is what is on disk
         let in_panel = self.commit_open

@@ -1,4 +1,4 @@
-//! The Git log tab (Alt+4): the refs on the left (HEAD, Local, Remote), the commits in the middle
+//! The Git log tab (Alt+3): the refs on the left (HEAD, Local, Remote), the commits in the middle
 //! with their graph, and on the right the files of the selected commit and its details. The box
 //! on top searches the message, the author or the start of a hash; a ref picked in the tree
 //! narrows the history to it, and picking it again goes back to every branch.
@@ -456,7 +456,27 @@ impl LogPanel {
 }
 
 impl Workspace {
-    /// Alt+4: shows the tab; from the tab, closes it.
+    /// Alt+3: shows the tab; from the tab it stays there (Esc, or Alt+1 / Ctrl+K, leaves it).
+    pub(crate) fn open_git_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.log_open {
+            self.focus.focus(window, cx);
+            return cx.notify();
+        }
+        self.toggle_git_log(window, cx);
+    }
+
+    /// Leaves the chat or the git log, whichever covers the editor; `false` when none does.
+    pub(crate) fn close_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.claude_open {
+            self.toggle_claude(window, cx);
+        } else if self.log_open {
+            self.toggle_git_log(window, cx);
+        } else {
+            return false;
+        }
+        true
+    }
+
     pub(crate) fn toggle_git_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.log_open {
             self.log_open = false;
