@@ -1670,6 +1670,17 @@ mod commit_tests {
     }
 
     #[test]
+    fn the_status_lists_a_conflicted_file_as_conflicted() {
+        let dir = conflicted("status", "edit");
+        let kinds: Vec<_> = changes(&dir)
+            .into_iter()
+            .map(|c| (c.path, c.kind))
+            .collect();
+        assert_eq!(kinds, [("file.txt".to_string(), ChangeKind::Conflicted)]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_side_that_deleted_the_file_deletes_it() {
         let dir = conflicted("deleted", "delete");
         let found = conflicts(&dir).unwrap();

@@ -515,6 +515,10 @@ impl Workspace {
                 .spawn(async move { zide_git::changes(&root) })
                 .await;
             this.update(cx, |this, cx| {
+                let conflicted = |status: &std::collections::HashMap<_, _>| {
+                    status.values().any(|kind| *kind == ChangeKind::Conflicted)
+                };
+                let before = conflicted(&this.git_status);
                 this.git_status = Arc::new(
                     changes
                         .iter()
@@ -523,6 +527,10 @@ impl Workspace {
                 );
                 if let Some(panel) = &mut this.commit {
                     panel.changes.set_changes(changes);
+                }
+                // the actions on offer depend on it (Resolve Conflicts only shows with conflicts)
+                if this.popup.is_some() && before != conflicted(&this.git_status) {
+                    this.search_again(cx);
                 }
                 cx.notify();
             })

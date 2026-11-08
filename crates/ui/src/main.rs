@@ -1036,6 +1036,7 @@ impl Workspace {
 
     fn open_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.autosave(cx);
+        self.refresh_commit(cx); // what git says now, for the actions that depend on it
         self.push = None;
         self.conflicts = None;
         let input = cx.new(|cx| InputState::new(window, cx));
