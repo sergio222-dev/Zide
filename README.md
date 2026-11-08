@@ -38,6 +38,10 @@ Only Linux x86_64 is published for now.
   tracking local one.
   Right-click a branch for its menu: *New Branch from…*, *Update* (fast-forward only), *Push…* (asks first, never forced)
   and *Rename* (the dialog refuses a name that already exists).
+- **Push dialog** (`Ctrl+Shift+K`, or Find Action → *Push Commits*): the commits the remote lacks on the left, the files of the
+  selected commit on the right with its message, author and date under them. `Enter` or a double click on a file opens what
+  the commit changed in it, side by side (green added, gray removed, blue replaced); `Ctrl+Enter` or **Push** pushes (never
+  forced), and *Push tags* sends the tags too.
 - **Minimap** at the right of the editor: every line as colored bars (folded lines are left out), the visible part
   marked, click or drag to jump. Lines added or modified since the last commit are painted green or brown, removed ones
   gray, errors red and the cursor's line blue.
@@ -124,6 +128,7 @@ the projects opened before (Enter opens one in this window) and **Open** picks a
 | `F3` / `Shift+F3` | Next / previous match |
 | `Ctrl+Shift+F` | Find in Files |
 | ``Ctrl+Shift+` `` | Switch Branch |
+| `Ctrl+Shift+K` | Push dialog: commits to push, their files and diffs (`Tab` switches list, `Enter` opens the diff, `Ctrl+Enter` pushes) |
 | `Alt+F7` | Find Usages |
 | `gd` / `Ctrl+B` | Go to Definition |
 | `Alt+1` | Toggle project tree |

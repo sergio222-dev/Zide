@@ -138,21 +138,26 @@ impl BlameLine {
             return UNCOMMITTED_LABEL.into();
         }
         let name = self.author.split_whitespace().next_back().unwrap_or("");
-        let local = self.time + i64::from(self.tz_minutes) * 60;
-        let (year, month, day) = civil_from_days(local.div_euclid(86_400));
-        let minutes = local.rem_euclid(86_400) / 60;
-        let (hour, minute) = (minutes / 60, minutes % 60);
-        let suffix = if hour < 12 { "AM" } else { "PM" };
-        let hour = match hour % 12 {
-            0 => 12,
-            h => h,
-        };
-        format!(
-            "{name}, {month}/{day}/{:02}, {hour}:{minute:02} {suffix} • {}",
-            year.rem_euclid(100),
-            self.summary
-        )
+        let (date, clock) = date_and_time(self.time, self.tz_minutes);
+        format!("{name}, {date}, {clock} • {}", self.summary)
     }
+}
+
+/// `8/21/26` and `10:12 PM` for a Unix time seen from a UTC offset in minutes.
+pub fn date_and_time(time: i64, tz_minutes: i32) -> (String, String) {
+    let local = time + i64::from(tz_minutes) * 60;
+    let (year, month, day) = civil_from_days(local.div_euclid(86_400));
+    let minutes = local.rem_euclid(86_400) / 60;
+    let (hour, minute) = (minutes / 60, minutes % 60);
+    let suffix = if hour < 12 { "AM" } else { "PM" };
+    let hour = match hour % 12 {
+        0 => 12,
+        h => h,
+    };
+    (
+        format!("{month}/{day}/{:02}", year.rem_euclid(100)),
+        format!("{hour}:{minute:02} {suffix}"),
+    )
 }
 
 /// Blame of `relative` (a path under `root`), one entry per line of the file on disk. `None`
@@ -438,6 +443,23 @@ fn run(root: &Path, args: &[&str], network: bool) -> Result<String, String> {
     }
 }
 
+/// Like [`run`] but the output is returned as git wrote it: a patch loses its last line, and a
+/// `-z` list its separators, when trimmed.
+fn run_raw(root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("git could not run: {e}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
 /// Why `name` cannot be the name of a new local branch: empty, taken by one of `existing`, or
 /// not a name git accepts (spaces, `..`, a trailing `/`...).
 pub fn check_new_branch_name(root: &Path, name: &str, existing: &[String]) -> Result<(), String> {
@@ -513,6 +535,11 @@ pub fn push_remote(root: &Path, name: &str) -> Result<String, String> {
 /// Pushes the local branch `name` to `remote`, which then tracks it. Never forced.
 pub fn push_branch(root: &Path, name: &str, remote: &str) -> Result<(), String> {
     run(root, &["push", "--set-upstream", remote, name], true).map(drop)
+}
+
+/// Pushes every tag to `remote`.
+pub fn push_tags(root: &Path, remote: &str) -> Result<(), String> {
+    run(root, &["push", "--tags", remote], true).map(drop)
 }
 
 /// What to check out.
@@ -716,6 +743,107 @@ mod tests {
                 .unwrap_err()
                 .contains("no upstream")
         );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn commit_records_are_read_with_their_body_and_zone() {
+        let output = "aaaaaaaaaaaa\x1fAda Lovelace\x1fada@x.org\x1f1700000000\x1f-0330\x1fsubject\x1fbody line\nsecond\n\x1e\nbbbbbbbbbbbb\x1fB\x1fb@x.org\x1f1\x1f+0200\x1fonly subject\x1f\x1e";
+        let commits = parse_commits(output);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].short_hash(), "aaaaaaaa");
+        assert_eq!(commits[0].author, "Ada Lovelace");
+        assert_eq!(commits[0].tz_minutes, -210);
+        assert_eq!(commits[0].body, "body line\nsecond");
+        assert_eq!(commits[1].subject, "only subject");
+        assert_eq!(commits[1].body, "");
+        assert_eq!(commits[1].tz_minutes, 120);
+        assert!(parse_commits("").is_empty());
+    }
+
+    #[test]
+    fn dates_read_like_the_push_dialog_shows_them() {
+        // 07:53 UTC is 04:53 in a zone 3 hours behind
+        assert_eq!(
+            date_and_time(1_794_037_980, -180),
+            ("11/7/26".to_string(), "4:53 AM".to_string())
+        );
+        assert_eq!(
+            date_and_time(0, 0),
+            ("1/1/70".to_string(), "12:00 AM".to_string())
+        );
+    }
+
+    #[test]
+    fn outgoing_lists_what_the_remote_lacks_and_their_files() {
+        let (base, clone) = origin_and_clone("outgoing");
+        let nothing = outgoing(&clone).unwrap();
+        assert_eq!((nothing.branch.as_str(), nothing.on_remote), ("main", true));
+        assert!(nothing.commits.is_empty());
+
+        fs::write(clone.join("a.txt"), "one\n").unwrap();
+        fs::create_dir_all(clone.join("src")).unwrap();
+        fs::write(clone.join("src/b.rs"), "fn b() {}\n").unwrap();
+        git_in(&clone, &["add", "."]);
+        git_in(&clone, &["commit", "-q", "-m", "first\n\nlonger text"]);
+        fs::write(clone.join("a.txt"), "one\ntwo\n").unwrap();
+        git_in(&clone, &["commit", "-q", "-am", "second"]);
+
+        let found = outgoing(&clone).unwrap();
+        let subjects: Vec<_> = found.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, ["second", "first"]);
+        assert_eq!(found.commits[1].body, "longer text");
+
+        let files = commit_files(&clone, &found.commits[1].hash).unwrap();
+        let listed: Vec<_> = files.iter().map(|f| (f.path.as_str(), f.kind)).collect();
+        assert_eq!(
+            listed,
+            [
+                ("a.txt", ChangeKind::Added),
+                ("src/b.rs", ChangeKind::Added)
+            ]
+        );
+        let modified = commit_files(&clone, &found.commits[0].hash).unwrap();
+        assert_eq!(modified.len(), 1);
+        assert_eq!(modified[0].kind, ChangeKind::Modified);
+        let patch = commit_diff(&clone, &found.commits[0].hash, &modified[0]).unwrap();
+        assert!(patch.contains("+two"), "{patch}");
+
+        // a branch the remote does not have yet: every commit it holds over the remote's
+        git_in(&clone, &["switch", "-q", "-c", "feat/new"]);
+        let fresh = outgoing(&clone).unwrap();
+        assert!(!fresh.on_remote);
+        assert_eq!(fresh.commits.len(), 2);
+
+        // pushing leaves nothing outgoing
+        assert_eq!(push_branch(&clone, "feat/new", "origin"), Ok(()));
+        git_in(&clone, &["tag", "v1"]);
+        assert_eq!(push_tags(&clone, "origin"), Ok(()));
+        assert!(outgoing(&clone).unwrap().commits.is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_final_newline_that_appears_is_not_a_changed_line() {
+        let (base, clone) = origin_and_clone("eol");
+        fs::write(clone.join("t.js"), "prueba").unwrap();
+        git_in(&clone, &["add", "."]);
+        git_in(&clone, &["commit", "-q", "-m", "a"]);
+        fs::write(clone.join("t.js"), "prueba\n\n").unwrap();
+        git_in(&clone, &["commit", "-q", "-am", "b"]);
+        let head = run(&clone, &["rev-parse", "HEAD"], false).unwrap();
+        let files = commit_files(&clone, &head).unwrap();
+        let patch = commit_diff(&clone, &head, &files[0]).unwrap();
+        assert!(patch.contains("\n prueba\n+\n"), "{patch}");
+        assert!(!patch.contains("-prueba"), "{patch}");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn outgoing_refuses_a_detached_head() {
+        let (base, clone) = origin_and_clone("detached");
+        git_in(&clone, &["switch", "-q", "--detach"]);
+        assert!(outgoing(&clone).unwrap_err().contains("detached"));
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -1033,10 +1161,13 @@ fn parse_changes(output: &str) -> Vec<FileChange> {
 /// the changes) so the viewer can fold what did not change. An untracked file is all additions.
 pub fn diff(root: &Path, change: &FileChange) -> Result<String, String> {
     let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--no-color", "--no-ext-diff", "--unified=1000000"]);
+    command.arg("-C").arg(root).args([
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--unified=1000000",
+        "--ignore-space-at-eol",
+    ]);
     if change.kind == ChangeKind::Untracked {
         command.args(["--no-index", "--", "/dev/null", &change.path]);
     } else {
@@ -1049,6 +1180,171 @@ pub fn diff(root: &Path, change: &FileChange) -> Result<String, String> {
         Some(0 | 1) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
         _ => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
     }
+}
+
+/// A commit, as the push dialog lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit {
+    pub hash: String,
+    pub author: String,
+    pub email: String,
+    /// Unix time of the commit, and the author's UTC offset in minutes.
+    pub time: i64,
+    pub tz_minutes: i32,
+    /// The first line of the message.
+    pub subject: String,
+    /// The rest of the message.
+    pub body: String,
+}
+
+impl Commit {
+    pub fn short_hash(&self) -> &str {
+        self.hash.get(..8).unwrap_or(&self.hash)
+    }
+}
+
+/// What pushing the checked-out branch would publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outgoing {
+    pub branch: String,
+    pub remote: String,
+    /// Whether the remote has the branch already; if not, the push creates it.
+    pub on_remote: bool,
+    /// The commits the remote lacks, newest first.
+    pub commits: Vec<Commit>,
+}
+
+/// The commits that a push of the checked-out branch would send.
+pub fn outgoing(root: &Path) -> Result<Outgoing, String> {
+    let branch = run(root, &["symbolic-ref", "--short", "-q", "HEAD"], false)
+        .map_err(|_| "HEAD is detached: there is no branch to push".to_string())?;
+    let remote = push_remote(root, &branch)?;
+    let tracking = format!("refs/remotes/{remote}/{branch}");
+    let on_remote = run(root, &["rev-parse", "--verify", "-q", &tracking], false).is_ok();
+    let format = "--format=%H%x1f%an%x1f%ae%x1f%at%x1f%ad%x1f%s%x1f%b%x1e";
+    let mut args = vec!["log", "--date=format:%z", format];
+    let range;
+    let remotes;
+    if on_remote {
+        range = format!("{remote}/{branch}..HEAD");
+        args.push(&range);
+    } else {
+        // a new branch: whatever no branch of the remote has yet
+        remotes = format!("--remotes={remote}");
+        args.extend(["HEAD", "--not", &remotes]);
+    }
+    let commits = parse_commits(&run(root, &args, false)?);
+    Ok(Outgoing {
+        branch,
+        remote,
+        on_remote,
+        commits,
+    })
+}
+
+/// Reads the `%H|%an|%ae|%at|%ad(%z)|%s|%b` records of [`outgoing`], separated by 0x1f and 0x1e.
+fn parse_commits(output: &str) -> Vec<Commit> {
+    output
+        .split('\x1e')
+        .filter_map(|record| {
+            let mut fields = record.trim_start_matches('\n').splitn(7, '\x1f');
+            let hash = fields.next().filter(|hash| !hash.is_empty())?;
+            let (author, email) = (fields.next()?, fields.next()?);
+            let time = fields.next()?.parse().ok()?;
+            let tz = fields.next()?;
+            let subject = fields.next()?;
+            let body = fields.next().unwrap_or("");
+            Some(Commit {
+                hash: hash.to_string(),
+                author: author.to_string(),
+                email: email.to_string(),
+                time,
+                tz_minutes: parse_offset(tz),
+                subject: subject.to_string(),
+                body: body.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// `+0200` is 120 minutes, `-0330` is -210.
+fn parse_offset(zone: &str) -> i32 {
+    let digits = zone.get(1..).and_then(|d| d.parse::<i32>().ok());
+    let Some(digits) = digits else {
+        return 0;
+    };
+    let minutes = digits / 100 * 60 + digits % 100;
+    if zone.starts_with('-') {
+        -minutes
+    } else {
+        minutes
+    }
+}
+
+/// The files `hash` changed, against its first parent (the whole commit when it has none), sorted
+/// by path.
+pub fn commit_files(root: &Path, hash: &str) -> Result<Vec<FileChange>, String> {
+    let output = run_raw(
+        root,
+        &[
+            "show",
+            "--format=",
+            "--name-status",
+            "-M",
+            "-z",
+            "--diff-merges=first-parent",
+            hash,
+        ],
+    )?;
+    let mut fields = output.split('\0');
+    let mut changes = Vec::new();
+    while let Some(status) = fields.next() {
+        let Some(letter) = status.chars().next() else {
+            continue;
+        };
+        let renamed = matches!(letter, 'R' | 'C');
+        let (from, path) = if renamed {
+            (fields.next(), fields.next())
+        } else {
+            (None, fields.next())
+        };
+        let Some(path) = path else {
+            break;
+        };
+        let kind = match letter {
+            'A' => ChangeKind::Added,
+            'D' => ChangeKind::Deleted,
+            'R' | 'C' => ChangeKind::Renamed,
+            'U' => ChangeKind::Conflicted,
+            _ => ChangeKind::Modified,
+        };
+        changes.push(FileChange {
+            path: path.to_string(),
+            from: from.map(str::to_string),
+            kind,
+        });
+    }
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(changes)
+}
+
+/// The patch of `change` in the commit `hash`, whole file included, like [`diff`].
+pub fn commit_diff(root: &Path, hash: &str, change: &FileChange) -> Result<String, String> {
+    let mut args = vec![
+        "show",
+        "--format=",
+        "--no-color",
+        "--no-ext-diff",
+        "--unified=1000000",
+        "--ignore-space-at-eol",
+        "-M",
+        "--diff-merges=first-parent",
+        hash,
+        "--",
+    ];
+    args.extend(change.from.iter().map(String::as_str));
+    args.push(&change.path);
+    run_raw(root, &args)
 }
 
 /// Commits `paths` (and nothing else, whatever else is staged) with `message`. `amend` folds them

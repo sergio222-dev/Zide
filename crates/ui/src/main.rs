@@ -28,6 +28,7 @@ mod meter;
 mod minimap;
 mod nav;
 mod projects;
+mod push;
 mod rows;
 mod session;
 mod statusbar;
@@ -91,6 +92,7 @@ actions!(
         FindUsages,
         GoToDefinition,
         SwitchBranch,
+        PushCommits,
         ReformatCode,
         ExtendSelection,
         FocusTree,
@@ -188,6 +190,14 @@ fn action_registry() -> Vec<ActionDef> {
             closes_popup: true,
             state: None,
             run: |ws, _, cx| ws.go_to_definition(cx),
+        },
+        ActionDef {
+            name: "Push Commits",
+            synonyms: &["push", "publish", "git", "outgoing", "upload"],
+            action: Some(Box::new(PushCommits)),
+            closes_popup: true,
+            state: None,
+            run: |ws, window, cx| ws.toggle_push(window, cx),
         },
         ActionDef {
             name: "Switch Branch",
@@ -570,6 +580,8 @@ struct Workspace {
     branch: Option<zide_git::BranchStatus>,
     /// The branch switcher, while it is open.
     branches: Option<branches::BranchPopup>,
+    /// The push dialog (Ctrl+Shift+K), while it is open.
+    push: Option<push::PushPopup>,
     /// The rendered Markdown beside the editor (Ctrl+Shift+M), for `.md` files.
     md_preview: bool,
     md: Option<MdPreview>,
@@ -695,7 +707,13 @@ impl Workspace {
         let this = cx.weak_entity();
         let claude_keys = cx.intercept_keystrokes(move |event, window, cx| {
             this.update(cx, |this, cx| {
-                if this.claude_open && this.popup.is_none() && this.branches.is_none() {
+                // the popups and dialogs over the chat own the keys (Esc closes them, not the chat)
+                if this.claude_open
+                    && this.popup.is_none()
+                    && this.branches.is_none()
+                    && this.push.is_none()
+                    && !window.has_active_dialog(cx)
+                {
                     this.claude_key(&event.keystroke, window, cx);
                 }
             })
@@ -723,6 +741,7 @@ impl Workspace {
             git_status: Arc::default(),
             branch: None,
             branches: None,
+            push: None,
             md_preview: false,
             md: None,
             nav: nav::NavHistory::default(),
@@ -951,6 +970,7 @@ impl Workspace {
 
     fn open_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.autosave(cx);
+        self.push = None;
         let input = cx.new(|cx| InputState::new(window, cx));
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -2395,6 +2415,7 @@ impl Workspace {
     /// Opens the branch switcher (the status bar's branch, or the Switch Branch action).
     fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.popup = None;
+        self.push = None;
         self.cancel_running_search();
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search for branches"));
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
@@ -3168,6 +3189,9 @@ impl Workspace {
             .on_action(
                 cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)),
             )
+            .on_action(
+                cx.listener(|this, _: &PushCommits, window, cx| this.toggle_push(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
             .on_action(
                 cx.listener(|this, _: &FocusTree, window, cx| this.focus_tree(true, window, cx)),
@@ -3190,7 +3214,9 @@ impl Workspace {
                 cx.listener(|this, _: &PreviousMethod, _, cx| this.jump_to_method(false, cx)),
             )
             .on_action(cx.listener(|this, _: &SwitchTab, window, cx| {
-                if this.popup.is_some() {
+                if this.push.is_some() {
+                    this.push_switch_pane(cx);
+                } else if this.popup.is_some() {
                     this.switch_tab(cx);
                 } else {
                     this.commit_tab(window, cx);
@@ -3215,6 +3241,9 @@ impl Workspace {
                     return;
                 }
                 this.diff_open = false;
+                if this.push.is_some() {
+                    return this.push_key(event, window, cx);
+                }
                 if this.branches.is_some() {
                     return this.branches_key(event, window, cx);
                 }
@@ -3335,6 +3364,9 @@ impl Workspace {
             ));
         if let Some(branches) = &self.branches {
             root = root.child(branches::render(branches, cx));
+        }
+        if self.push.is_some() {
+            root = root.child(self.push_view(cx));
         }
 
         let Some(popup) = &self.popup else {
@@ -4235,22 +4267,25 @@ impl Render for Shell {
 /// notifications and the rest look like the popup they sit in instead of the library's own dark.
 /// These colors are only read by the components, never by Zide's own elements.
 fn apply_palette(cx: &mut App) {
-    let theme = gpui_kit::component::Theme::global_mut(cx);
-    // the bundled default (`.SystemUIFont`) showed no bold; naming the family finds its bold face
-    theme.font_family = "Noto Sans".into();
-    let colors = &mut theme.colors;
-    // background and text
-    colors.popover = rgb(theme::POPUP).into();
-    colors.popover_foreground = rgb(theme::TEXT).into();
-    // the selected row, like the active tab chip
-    colors.accent = rgb(theme::ACTIVE_BG).into();
-    colors.accent_foreground = rgb(theme::STRONG).into();
-    // the diff dialog: the editor's background, with Zide's green and red for what changed
-    colors.background = rgb(theme::BACKGROUND).into();
-    colors.success = rgb(theme::OK).into();
-    colors.danger = rgb(theme::ERROR).into();
-    // shortcuts, paths, hints
-    colors.muted_foreground = rgb(theme::MUTED).into();
+    // `update` (not `global_mut`) keeps the theme's tokens in step: the dialogs paint their
+    // surface from them
+    gpui_kit::component::Theme::update(cx, |theme| {
+        // the bundled default (`.SystemUIFont`) showed no bold; naming the family finds its bold face
+        theme.font_family = "Noto Sans".into();
+        let colors = &mut theme.colors;
+        // background and text
+        colors.popover = rgb(theme::POPUP).into();
+        colors.popover_foreground = rgb(theme::TEXT).into();
+        // the selected row, like the active tab chip
+        colors.accent = rgb(theme::ACTIVE_BG).into();
+        colors.accent_foreground = rgb(theme::STRONG).into();
+        // the diff dialog: the editor's background, with Zide's green and red for what changed
+        colors.background = rgb(theme::BACKGROUND).into();
+        colors.success = rgb(theme::OK).into();
+        colors.danger = rgb(theme::ERROR).into();
+        // shortcuts, paths, hints
+        colors.muted_foreground = rgb(theme::MUTED).into();
+    });
 }
 
 fn main() {
@@ -4281,6 +4316,7 @@ fn main() {
             KeyBinding::new("shift-f3", FindPrevious, Some("Workspace")),
             KeyBinding::new("ctrl-shift-f", FindInFiles, Some("Workspace")),
             KeyBinding::new("ctrl-shift-`", SwitchBranch, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-k", PushCommits, Some("Workspace")),
             // some layouts report Shift+` as the shifted character
             KeyBinding::new("ctrl-~", SwitchBranch, Some("Workspace")),
             KeyBinding::new("ctrl-shift-~", SwitchBranch, Some("Workspace")),

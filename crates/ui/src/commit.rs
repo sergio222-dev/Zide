@@ -330,7 +330,7 @@ pub(crate) fn kind_color(kind: ChangeKind) -> u32 {
     }
 }
 
-fn check_box(check: Check) -> Div {
+pub(crate) fn check_box(check: Check) -> Div {
     let on = check != Check::Off;
     div()
         .flex()
