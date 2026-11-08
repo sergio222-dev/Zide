@@ -58,7 +58,7 @@ Only Linux x86_64 is published for now.
   change: it keeps its color and arrows until its sides are applied or discarded (an arrow puts the side's lines over what was
   typed). A line break cannot be removed where it would join two parts of the file (an empty line at the edge of a part can).
   While a merge, rebase, cherry-pick or revert is unfinished the status bar shows it (`Merging feature-branch`); with a merge, the
-  commit panel (`Alt+2`) opens with git's message (`Merge branch 'feature-branch'`) and commits everything staged to conclude it.
+  commit panel (`Ctrl+K`) opens with git's message (`Merge branch 'feature-branch'`) and commits everything staged to conclude it.
 - **Minimap** at the right of the editor: every line as colored bars (folded lines are left out), the visible part
   marked, click or drag to jump. Lines added or modified since the last commit are painted green or brown, removed ones
   gray, errors red and the cursor's line blue.
@@ -152,7 +152,7 @@ the projects opened before (Enter opens one in this window) and **Open** picks a
 | `gd` / `Ctrl+B` | Go to Definition |
 | `Alt+1` | Toggle project tree |
 | `Alt+Shift+\`` | Scroll the project tree to the open file and select it |
-| `Alt+2` | Commit panel: tick files, write a message, **Commit** or **Commit and Push…** (`Amend` folds them into the last commit) |
+| `Ctrl+K` | Commit panel: tick files, write a message, **Commit** or **Commit and Push…** (`Amend` folds them into the last commit) |
 | Commit panel `j`/`k`, `Space`, `Enter` | Move over the files, tick or untick one, open its changes (`Tab` or `i` goes to the message, `Alt+Enter` commits, `Esc` back to the files or out) |
 | Double click on a commit panel file | Its changes against the last commit, side by side, in a large dialog (`Esc` closes, double `Space` opens search) |
 | `a` / `m` / `d` / `y` / `p` | In the tree: new file (a name ending with `/` makes a folder), move or rename (a popup with the path, Enter applies, Esc closes), delete (asks first), copy, paste (into the selected folder; a taken name gets ` copy`) |
@@ -166,12 +166,12 @@ the projects opened before (Enter opens one in this window) and **Open** picks a
 | `Ctrl+Alt+L` | Reformat code |
 | `Alt+C` / `Alt+W` / `Alt+R` | Toggle case / whole word / regex in the find panel |
 
-In the Claude chat (`Alt+3` toggles it): `Alt+Up` / `Alt+Down` switch between open chats,
+In the Claude chat (`Alt+2` opens it): `Alt+Up` / `Alt+Down` switch between open chats,
 `Alt+I` focuses the message input, `Alt+H` opens (or closes) the list of earlier conversations, `Esc` interrupts a running turn (or closes the chat when idle),
 `Ctrl+V` pastes an image (click one, in the message or above the input, to see it large; `Esc` closes it), and `/` and `@` open the command and file menus. Earlier conversations
 are also listed by **Claude: Resume Session** in Find Action (`Ctrl+Shift+A`).
 
-In the Git log (`Alt+4` toggles it): the refs tree on the left (HEAD, Local, Remote) narrows the history to
+In the Git log (`Alt+3` opens it): the refs tree on the left (HEAD, Local, Remote) narrows the history to
 the ref you pick, and picking it again goes back to every branch. `/` focuses the search box (message,
 author or the start of a hash), `Tab` moves between refs, commits and files, `j` / `k` or the arrows move,
 `Enter` on a file (or a double click) opens that commit's diff, and `Esc` closes the tab.
