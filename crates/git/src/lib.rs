@@ -852,6 +852,9 @@ mod tests {
                 clone.to_str().unwrap(),
             ],
         );
+        // the merges and rebases the code under test makes need an identity, and a CI runner has none
+        git_in(&clone, &["config", "user.name", "t"]);
+        git_in(&clone, &["config", "user.email", "t@t"]);
         (base, clone)
     }
 
