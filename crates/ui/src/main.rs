@@ -15,6 +15,7 @@ use std::{
 };
 
 mod branches;
+mod changed_files;
 mod chat;
 mod commit;
 mod conflicts;

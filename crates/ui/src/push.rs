@@ -4,17 +4,17 @@
 
 use std::sync::Arc;
 
-use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use zide_git::{ChangeKind, Commit, FileChange, Outgoing};
+use zide_git::{Commit, FileChange, Outgoing};
 
-use crate::commit::{Check, check_box, kind_color};
-use crate::{Workspace, file_icon, theme};
+use crate::changed_files::{self, FileRow, plural};
+use crate::commit::{Check, check_box};
+use crate::{Workspace, theme};
 
 const ROW_HEIGHT: f32 = 24.;
 
@@ -39,21 +39,6 @@ enum Files {
     Failed(String),
     /// Sorted by folder, then path.
     Ready(Vec<FileChange>),
-}
-
-/// A line of the files list: a folder that holds files, or one of its files.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FileRow {
-    Dir {
-        label: String,
-        count: usize,
-    },
-    File {
-        /// Position in the sorted list of files.
-        index: usize,
-        name: String,
-        kind: ChangeKind,
-    },
 }
 
 pub struct PushPopup {
@@ -145,7 +130,7 @@ impl PushPopup {
         self.file = 0;
         self.files = match found {
             Ok(mut list) => {
-                list.sort_by(|a, b| (folder(&a.path), &a.path).cmp(&(folder(&b.path), &b.path)));
+                changed_files::sort(&mut list);
                 Files::Ready(list)
             }
             Err(why) => Files::Failed(why),
@@ -175,38 +160,8 @@ impl PushPopup {
     /// The files under a line for each folder that holds some. `root` names the folder of the
     /// files that sit at the top of the repository.
     pub fn file_rows(&self, root: &str) -> Vec<FileRow> {
-        let list = self.file_list();
-        let mut rows: Vec<FileRow> = Vec::new();
-        let mut current: Option<&str> = None;
-        for (index, change) in list.iter().enumerate() {
-            let dir = folder(&change.path);
-            if current != Some(dir) {
-                current = Some(dir);
-                let count = list.iter().filter(|c| folder(&c.path) == dir).count();
-                let label = if dir.is_empty() { root } else { dir };
-                rows.push(FileRow::Dir {
-                    label: label.to_string(),
-                    count,
-                });
-            }
-            let name = change.path.rsplit('/').next().unwrap_or(&change.path);
-            rows.push(FileRow::File {
-                index,
-                name: name.to_string(),
-                kind: change.kind,
-            });
-        }
-        rows
+        changed_files::rows(self.file_list(), root)
     }
-}
-
-/// The folder a path is in, `""` at the top.
-fn folder(path: &str) -> &str {
-    path.rsplit_once('/').map_or("", |(dir, _)| dir)
-}
-
-fn plural(count: usize, one: &str) -> String {
-    format!("{count} {one}{}", if count == 1 { "" } else { "s" })
 }
 
 impl Workspace {
@@ -643,81 +598,26 @@ fn file_list(popup: &PushPopup, root: &str, workspace: &Entity<Workspace>) -> An
         Files::Failed(why) => return note(why.clone(), false).into_any_element(),
         Files::Ready(_) => {}
     }
-    let rows = Arc::new(popup.file_rows(root));
-    let (selected, focused) = (popup.file, popup.pane == Pane::Files);
     let workspace = workspace.clone();
-    let scroll = popup.file_scroll.clone();
-    div()
-        .relative()
-        .size_full()
-        .child(
-            uniform_list("push-files", rows.len(), move |range, _, _| {
-                range
-                    .map(|position| {
-                        let row = div()
-                            .id(("push-file", position))
-                            .w_full()
-                            .h(px(ROW_HEIGHT))
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_2()
-                            .whitespace_nowrap();
-                        match &rows[position] {
-                            FileRow::Dir { label, count } => {
-                                let (icon, color) = file_icon::for_row(label, true, true);
-                                row.child(div().w(px(12.)).child("▾"))
-                                    .child(Icon::new(icon).size_4().text_color(rgb(color)))
-                                    .child(label.clone())
-                                    .child(
-                                        div()
-                                            .text_color(rgb(theme::DIM))
-                                            .child(plural(*count, "file")),
-                                    )
-                                    .into_any_element()
-                            }
-                            FileRow::File { index, name, kind } => {
-                                let index = *index;
-                                let workspace = workspace.clone();
-                                let (icon, color) = file_icon::for_row(name, false, false);
-                                row.pl(px(32.))
-                                    .when(index == selected, |row| {
-                                        row.bg(rgb(if focused {
-                                            theme::TREE_FOCUSED
-                                        } else {
-                                            theme::TREE_SELECTED
-                                        }))
-                                    })
-                                    .cursor_pointer()
-                                    .on_click(move |event, window, cx| {
-                                        workspace.update(cx, |this, cx| {
-                                            if let Some(popup) = &mut this.push {
-                                                popup.pane = Pane::Files;
-                                                popup.select_file(index);
-                                            }
-                                            if event.click_count() == 2 {
-                                                this.show_push_diff(window, cx);
-                                            }
-                                            cx.notify();
-                                        })
-                                    })
-                                    .child(Icon::new(icon).size_4().text_color(rgb(color)))
-                                    .child(
-                                        div()
-                                            .text_color(rgb(kind_color(*kind)))
-                                            .child(name.clone()),
-                                    )
-                                    .into_any_element()
-                            }
-                        }
-                    })
-                    .collect()
+    changed_files::list(
+        "push-files",
+        Arc::new(popup.file_rows(root)),
+        popup.file,
+        popup.pane == Pane::Files,
+        &popup.file_scroll,
+        move |index, clicks, window, cx| {
+            workspace.update(cx, |this, cx| {
+                if let Some(popup) = &mut this.push {
+                    popup.pane = Pane::Files;
+                    popup.select_file(index);
+                }
+                if clicks == 2 {
+                    this.show_push_diff(window, cx);
+                }
+                cx.notify();
             })
-            .size_full()
-            .track_scroll(&scroll),
-        )
-        .child(Scrollbar::new(&popup.file_scroll))
-        .into_any_element()
+        },
+    )
 }
 
 /// Under the files: the message of the selected commit and who made it, when.
@@ -767,6 +667,8 @@ fn commit_details(popup: &PushPopup) -> Div {
 
 #[cfg(test)]
 mod tests {
+    use zide_git::ChangeKind;
+
     use super::*;
 
     fn commit(hash: &str, subject: &str) -> Commit {
@@ -865,11 +767,5 @@ mod tests {
         assert_eq!(popup.selected_file().unwrap().path, "src/a.rs");
         popup.move_file(10);
         assert_eq!(popup.selected_file().unwrap().path, "src/a/deep.rs");
-    }
-
-    #[::core::prelude::v1::test]
-    fn the_counts_read_in_singular_and_plural() {
-        assert_eq!(plural(1, "file"), "1 file");
-        assert_eq!(plural(3, "commit"), "3 commits");
     }
 }
