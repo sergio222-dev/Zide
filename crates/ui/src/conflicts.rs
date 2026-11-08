@@ -195,8 +195,15 @@ impl Workspace {
                 match (remaining, &mut this.conflicts) {
                     (Some(remaining), Some(popup)) => popup.replace(remaining),
                     (None, Some(_)) => {
+                        let finish = this.conflicts.as_ref().map(|popup| popup.data.operation);
                         this.close_conflicts(window, cx);
-                        this.notify(Notification::success("Every conflict is resolved"), cx);
+                        let done = match finish {
+                            Some(Operation::Merge) => {
+                                "Every conflict is resolved: commit to finish the merge"
+                            }
+                            _ => "Every conflict is resolved",
+                        };
+                        this.notify(Notification::success(done), cx);
                     }
                     _ => {}
                 }

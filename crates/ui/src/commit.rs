@@ -376,7 +376,38 @@ impl Workspace {
         }
         self.commit_open = true;
         self.refresh_commit(cx);
+        self.fill_merge_message(window, cx);
         self.focus_commit_list(window, cx);
+    }
+
+    /// While a merge is under way, an empty message starts as the one git prepared for it
+    /// (`Merge branch 'x'`).
+    fn fill_merge_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(panel) = &self.commit else {
+            return;
+        };
+        if !panel.message.read(cx).value().is_empty() {
+            return;
+        }
+        let (message, root) = (panel.message.clone(), self.root.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { zide_git::merge_message(&root) })
+                .await;
+            if let Some(text) = found {
+                this.update_in(cx, |_, window, cx| {
+                    message.update(cx, |state, cx| {
+                        // typed meanwhile: it stays
+                        if state.value().is_empty() {
+                            state.set_value(text, window, cx);
+                        }
+                    })
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// The keyboard goes to the list of files.

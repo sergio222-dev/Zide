@@ -46,6 +46,8 @@ Only Linux x86_64 is published for now.
   cherry-pick or revert stops on conflicts, a dialog lists each file with what both sides did to it. *Accept Yours* keeps
   the current branch's version of the selected file, *Accept Theirs* the incoming one (a side that deleted the file deletes it);
   the file is then marked resolved. Settling a file by hand (*Merge…*) comes next.
+  While a merge, rebase, cherry-pick or revert is unfinished the status bar shows it (`Merging feature-branch`); with a merge, the
+  commit panel (`Alt+2`) opens with git's message (`Merge branch 'feature-branch'`) and commits everything staged to conclude it.
 - **Minimap** at the right of the editor: every line as colored bars (folded lines are left out), the visible part
   marked, click or drag to jump. Lines added or modified since the last commit are painted green or brown, removed ones
   gray, errors red and the cursor's line blue.

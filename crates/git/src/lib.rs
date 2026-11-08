@@ -238,6 +238,30 @@ pub struct BranchStatus {
     pub ahead: u32,
     /// Commits to pull.
     pub behind: u32,
+    /// A merge, rebase, cherry-pick or revert that is not finished, whether or not it stopped on
+    /// conflicts.
+    pub progress: Option<Progress>,
+}
+
+/// An operation that is under way on the checked-out branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Progress {
+    pub operation: Operation,
+    /// The branch (or short commit) that comes in.
+    pub theirs: String,
+}
+
+impl Progress {
+    /// `Merging feature-branch`, `Rebasing feat/x`...
+    pub fn label(&self) -> String {
+        let verb = match self.operation {
+            Operation::Merge => "Merging",
+            Operation::Rebase => "Rebasing",
+            Operation::CherryPick => "Cherry-picking",
+            Operation::Revert => "Reverting",
+        };
+        format!("{verb} {}", self.theirs)
+    }
 }
 
 /// The branch of the repository at `root` and how far it is from its upstream, as of the last
@@ -254,11 +278,14 @@ pub fn branch_status(root: &Path) -> Option<BranchStatus> {
         ])
         .output()
         .ok()?;
-    output
+    let mut status = output
         .status
         .success()
         .then(|| parse_branch_status(&String::from_utf8_lossy(&output.stdout)))
-        .flatten()
+        .flatten()?;
+    status.progress =
+        current_operation(root).map(|(operation, _, theirs)| Progress { operation, theirs });
+    Some(status)
 }
 
 /// Reads the `# branch.*` headers of `git status --porcelain=v2 --branch`.
@@ -286,6 +313,7 @@ fn parse_branch_status(output: &str) -> Option<BranchStatus> {
         tracked: counts.is_some(),
         ahead: counts.map_or(0, |(ahead, _)| ahead),
         behind: counts.map_or(0, |(_, behind)| behind),
+        progress: None,
     })
 }
 
@@ -912,7 +940,8 @@ mod tests {
                 name: "feat/x".into(),
                 tracked: true,
                 ahead: 4,
-                behind: 2
+                behind: 2,
+                progress: None
             })
         );
         let local = "# branch.oid abc\n# branch.head wip\n";
@@ -922,7 +951,8 @@ mod tests {
                 name: "wip".into(),
                 tracked: false,
                 ahead: 0,
-                behind: 0
+                behind: 0,
+                progress: None
             })
         );
         let detached = "# branch.oid 0123456789abcdef\n# branch.head (detached)\n";
@@ -1424,72 +1454,12 @@ pub fn conflicts(root: &Path) -> Option<Conflicts> {
     if files.is_empty() {
         return None;
     }
-    let git_dir = run(root, &["rev-parse", "--absolute-git-dir"], false).ok()?;
-    let git_dir = Path::new(&git_dir);
-    let read = |name: &str| {
-        std::fs::read_to_string(git_dir.join(name))
-            .ok()
-            .map(|text| text.trim().to_string())
-    };
-    // a name for a commit: the branch that points at it, else its short hash
-    let describe = |rev: &str| {
-        run(
-            root,
-            &[
-                "name-rev",
-                "--name-only",
-                "--no-undefined",
-                "--refs=refs/heads/*",
-                rev,
-            ],
-            false,
-        )
-        .ok()
-        .map(|name| {
-            name.trim_end_matches(|c| c == '^' || c == '~' || char::is_ascii_digit(&c))
-                .to_string()
-        })
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| rev.chars().take(7).collect())
-    };
-    let branch = || {
-        run(root, &["symbolic-ref", "--short", "-q", "HEAD"], false)
-            .unwrap_or_else(|_| "HEAD".into())
-    };
-    let rebase_dir = ["rebase-merge", "rebase-apply"]
-        .into_iter()
-        .find(|dir| git_dir.join(dir).is_dir());
-    let (operation, yours, theirs) = if let Some(dir) = rebase_dir {
-        // replaying your commits on top of `onto`: git's "ours" is what they are replayed on
-        let theirs = read(&format!("{dir}/head-name"))
-            .map(|name| name.trim_start_matches("refs/heads/").to_string())
-            .unwrap_or_else(|| "HEAD".into());
-        let yours =
-            read(&format!("{dir}/onto")).map_or_else(|| "HEAD".into(), |onto| describe(&onto));
-        (Operation::Rebase, yours, theirs)
-    } else if let Some(head) = read("MERGE_HEAD") {
-        // `Merge branch 'feature-branch' into main`
-        let named = read("MERGE_MSG")
-            .and_then(|text| {
-                let line = text.lines().next()?.to_string();
-                let start = line.find('\'')? + 1;
-                let end = start + line[start..].find('\'')?;
-                Some(line[start..end].to_string())
-            })
-            .unwrap_or_else(|| describe(&head));
-        (Operation::Merge, branch(), named)
-    } else if let Some(head) = read("CHERRY_PICK_HEAD") {
-        (
-            Operation::CherryPick,
-            branch(),
-            head.chars().take(7).collect(),
-        )
-    } else if let Some(head) = read("REVERT_HEAD") {
-        (Operation::Revert, branch(), head.chars().take(7).collect())
-    } else {
+    let (operation, yours, theirs) = current_operation(root).unwrap_or_else(|| {
         // e.g. a stash that was applied: no operation to name
-        (Operation::Merge, branch(), "incoming".into())
-    };
+        let branch = run(root, &["symbolic-ref", "--short", "-q", "HEAD"], false)
+            .unwrap_or_else(|_| "HEAD".into());
+        (Operation::Merge, branch, "incoming".into())
+    });
     Some(Conflicts {
         operation,
         yours,
@@ -1556,6 +1526,102 @@ pub fn resolve(root: &Path, conflict: &Conflict, side: Side) -> Result<(), Strin
     run(root, &["--literal-pathspecs", "add", "--", path], false).map(drop)
 }
 
+/// The operation that is under way (merge, rebase, cherry-pick or revert), with the name of the
+/// side that is yours and of the one that comes in. `None` when nothing is under way.
+fn current_operation(root: &Path) -> Option<(Operation, String, String)> {
+    let git_dir = run(root, &["rev-parse", "--absolute-git-dir"], false).ok()?;
+    let git_dir = Path::new(&git_dir);
+    let read = |name: &str| {
+        std::fs::read_to_string(git_dir.join(name))
+            .ok()
+            .map(|text| text.trim().to_string())
+    };
+    // a name for a commit: the branch that points at it, else its short hash
+    let describe = |rev: &str| {
+        run(
+            root,
+            &[
+                "name-rev",
+                "--name-only",
+                "--no-undefined",
+                "--refs=refs/heads/*",
+                rev,
+            ],
+            false,
+        )
+        .ok()
+        .map(|name| {
+            name.trim_end_matches(|c| c == '^' || c == '~' || char::is_ascii_digit(&c))
+                .to_string()
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| rev.chars().take(7).collect())
+    };
+    let branch = || {
+        run(root, &["symbolic-ref", "--short", "-q", "HEAD"], false)
+            .unwrap_or_else(|_| "HEAD".into())
+    };
+    let rebase_dir = ["rebase-merge", "rebase-apply"]
+        .into_iter()
+        .find(|dir| git_dir.join(dir).is_dir());
+    let (operation, yours, theirs) = if let Some(dir) = rebase_dir {
+        // replaying your commits on top of `onto`: git's "ours" is what they are replayed on
+        let theirs = read(&format!("{dir}/head-name"))
+            .map(|name| name.trim_start_matches("refs/heads/").to_string())
+            .unwrap_or_else(|| "HEAD".into());
+        let yours =
+            read(&format!("{dir}/onto")).map_or_else(|| "HEAD".into(), |onto| describe(&onto));
+        (Operation::Rebase, yours, theirs)
+    } else if let Some(head) = read("MERGE_HEAD") {
+        // `Merge branch 'feature-branch' into main`
+        let named = read("MERGE_MSG")
+            .and_then(|text| {
+                let line = text.lines().next()?.to_string();
+                let start = line.find('\'')? + 1;
+                let end = start + line[start..].find('\'')?;
+                Some(line[start..end].to_string())
+            })
+            .unwrap_or_else(|| describe(&head));
+        (Operation::Merge, branch(), named)
+    } else if let Some(head) = read("CHERRY_PICK_HEAD") {
+        (
+            Operation::CherryPick,
+            branch(),
+            head.chars().take(7).collect(),
+        )
+    } else {
+        let head = read("REVERT_HEAD")?;
+        (Operation::Revert, branch(), head.chars().take(7).collect())
+    };
+    Some((operation, yours, theirs))
+}
+
+/// The message git prepared for the merge that is under way (`Merge branch 'x'`), without the
+/// comment lines it adds. `None` outside a merge.
+pub fn merge_message(root: &Path) -> Option<String> {
+    let git_dir = run(root, &["rev-parse", "--absolute-git-dir"], false).ok()?;
+    let git_dir = Path::new(&git_dir);
+    if !git_dir.join("MERGE_HEAD").exists() {
+        return None;
+    }
+    let text = std::fs::read_to_string(git_dir.join("MERGE_MSG")).ok()?;
+    let message: Vec<&str> = text.lines().filter(|line| !line.starts_with('#')).collect();
+    let message = message.join("\n").trim().to_string();
+    (!message.is_empty()).then_some(message)
+}
+
+/// Whether a merge is under way: its commit takes everything that is staged, not some paths.
+fn merging(root: &Path) -> bool {
+    run(root, &["rev-parse", "--git-path", "MERGE_HEAD"], false).is_ok_and(|path| {
+        let path = Path::new(&path);
+        if path.is_absolute() {
+            path.exists()
+        } else {
+            root.join(path).exists()
+        }
+    })
+}
+
 /// Starts tracking `path` (a file, or every file under a folder) without committing it.
 pub fn add(root: &Path, path: &str) -> Result<(), String> {
     run(root, &["--literal-pathspecs", "add", "--", path], false).map(drop)
@@ -1565,7 +1631,9 @@ pub fn add(root: &Path, path: &str) -> Result<(), String> {
 /// into the last commit; an empty message then keeps that commit's.
 pub fn commit(root: &Path, paths: &[String], message: &str, amend: bool) -> Result<(), String> {
     let message = message.trim();
-    if paths.is_empty() && !amend {
+    // a merge is concluded by committing all that is staged: git refuses it with paths
+    let merging = merging(root);
+    if paths.is_empty() && !amend && !merging {
         return Err("There is nothing selected to commit".into());
     }
     if message.is_empty() && !amend {
@@ -1585,7 +1653,7 @@ pub fn commit(root: &Path, paths: &[String], message: &str, amend: bool) -> Resu
     } else {
         commit.extend(["-m", message]);
     }
-    if !paths.is_empty() {
+    if !paths.is_empty() && !merging {
         commit.push("--");
         commit.extend(paths.iter().map(String::as_str));
     }
@@ -1677,6 +1745,48 @@ mod commit_tests {
             .map(|c| (c.path, c.kind))
             .collect();
         assert_eq!(kinds, [("file.txt".to_string(), ChangeKind::Conflicted)]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_merge_under_way_is_reported_and_concluded_by_a_commit() {
+        let dir = conflicted("progress", "edit");
+        let found = conflicts(&dir).unwrap();
+        // with the conflict still open and once it is resolved, the merge is under way
+        let progress = branch_status(&dir).unwrap().progress.unwrap();
+        assert_eq!(progress.label(), "Merging feature-branch");
+        assert_eq!(
+            merge_message(&dir).as_deref(),
+            Some("Merge branch 'feature-branch'")
+        );
+        assert_eq!(resolve(&dir, &found.files[0], Side::Theirs), Ok(()));
+        assert!(conflicts(&dir).is_none());
+        assert_eq!(
+            branch_status(&dir).unwrap().progress.map(|p| p.operation),
+            Some(Operation::Merge)
+        );
+        // the panel commits the paths it ticks, which git refuses during a merge: all is committed
+        let message = merge_message(&dir).unwrap();
+        assert_eq!(
+            commit(&dir, &["file.txt".to_string()], &message, false),
+            Ok(())
+        );
+        assert!(branch_status(&dir).unwrap().progress.is_none());
+        assert!(merge_message(&dir).is_none());
+        let parents = run(&dir, &["rev-list", "--parents", "-n1", "HEAD"], false).unwrap();
+        assert_eq!(
+            parents.split_whitespace().count(),
+            3,
+            "a merge commit has two parents"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn nothing_is_under_way_on_a_plain_branch() {
+        let dir = repo("plain");
+        assert!(branch_status(&dir).is_none_or(|status| status.progress.is_none()));
+        assert!(merge_message(&dir).is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 
