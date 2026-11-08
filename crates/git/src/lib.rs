@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use similar::{Algorithm, DiffOp, TextDiff};
 
+pub mod merge;
+
 /// How a line of the file differs from the last commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineChange {
@@ -1526,6 +1528,39 @@ pub fn resolve(root: &Path, conflict: &Conflict, side: Side) -> Result<(), Strin
     run(root, &["--literal-pathspecs", "add", "--", path], false).map(drop)
 }
 
+/// The three versions of a conflicted file: the common ancestor and both sides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stages {
+    /// Empty when both sides added the file.
+    pub base: String,
+    pub yours: String,
+    pub theirs: String,
+}
+
+/// Reads the versions git keeps in the index for the conflicted file `path`.
+pub fn stages(root: &Path, path: &str) -> Result<Stages, String> {
+    let stage = |number: u8, needed: bool| {
+        let spec = format!(":{number}:{path}");
+        match run_raw(root, &["--literal-pathspecs", "show", &spec]) {
+            Ok(text) => Ok(text),
+            Err(_) if !needed => Ok(String::new()),
+            Err(why) => Err(why),
+        }
+    };
+    Ok(Stages {
+        base: stage(1, false)?,
+        yours: stage(2, true)?,
+        theirs: stage(3, true)?,
+    })
+}
+
+/// Settles the conflicted file `path` with `content`, which was written by hand, and marks it
+/// resolved.
+pub fn resolve_with(root: &Path, path: &str, content: &str) -> Result<(), String> {
+    std::fs::write(root.join(path), content).map_err(|e| format!("could not write {path}: {e}"))?;
+    run(root, &["--literal-pathspecs", "add", "--", path], false).map(drop)
+}
+
 /// The operation that is under way (merge, rebase, cherry-pick or revert), with the name of the
 /// side that is yours and of the one that comes in. `None` when nothing is under way.
 fn current_operation(root: &Path) -> Option<(Operation, String, String)> {
@@ -1820,6 +1855,21 @@ mod commit_tests {
         let found = conflicts(&dir).unwrap();
         assert_eq!(resolve(&dir, &found.files[0], Side::Yours), Ok(()));
         assert_eq!(fs::read_to_string(dir.join("file.txt")).unwrap(), "yours\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_stages_of_a_conflict_are_settled_by_hand() {
+        let dir = conflicted("stages", "modify");
+        let found = stages(&dir, "file.txt").unwrap();
+        assert_eq!(found.base, "base\n");
+        assert_ne!(found.yours, found.theirs);
+        assert_eq!(resolve_with(&dir, "file.txt", "by hand\n"), Ok(()));
+        assert_eq!(
+            fs::read_to_string(dir.join("file.txt")).unwrap(),
+            "by hand\n"
+        );
+        assert!(conflicts(&dir).is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 
