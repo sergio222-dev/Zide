@@ -5,13 +5,15 @@
 
 use std::sync::Arc;
 
+use gpui_kit::component::calendar::Date;
+use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use zide_git::log::{self, GraphRow, LogEntry, LogQuery, RefKind, RefLabel, Scope};
+use zide_git::log::{self, Author, GraphRow, LogEntry, LogQuery, RefKind, RefLabel, Scope};
 use zide_git::{Branches, FileChange, Switch};
 
 use crate::branches::{Kind, Model, Row};
@@ -31,6 +33,48 @@ const SECTIONS: [(&str, &str); 2] = [("local", "Local"), ("remote", "Remote")];
 const LANE_COLORS: [u32; 8] = [
     0x61afef, 0xe5c07b, 0x98c379, 0xc678dd, 0xe06c75, 0x56b6c2, 0xd19a66, 0xabb2bf,
 ];
+
+/// The filters that open a popup under their button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Filter {
+    User,
+    /// The list of ways to narrow by date.
+    Date,
+    /// The popup with the After and Before pickers, opened by the last row of the date list.
+    Range,
+}
+
+/// The dates the list offers besides the range, with how git reads each.
+const PRESETS: [(&str, &str); 3] = [
+    ("Last 24 hours", "24 hours ago"),
+    ("Last 7 days", "7 days ago"),
+    ("Last 30 days", "30 days ago"),
+];
+
+/// What a row of the date list asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatePick {
+    Any,
+    /// The preset, counted from 1.
+    Preset(usize),
+    /// Choose the days with the pickers.
+    Select,
+}
+
+fn date_items() -> Vec<String> {
+    std::iter::once("Any time".to_string())
+        .chain(PRESETS.iter().map(|(label, _)| label.to_string()))
+        .chain(std::iter::once("Select...".to_string()))
+        .collect()
+}
+
+fn date_pick(row: usize) -> DatePick {
+    match row {
+        0 => DatePick::Any,
+        row if row <= PRESETS.len() => DatePick::Preset(row),
+        _ => DatePick::Select,
+    }
+}
 
 /// What the keyboard moves through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -61,7 +105,23 @@ enum Files {
 
 pub struct LogPanel {
     query: Entity<InputState>,
-    _typing: Subscription,
+    /// The paths the commits must touch, separated by spaces.
+    paths: Entity<InputState>,
+    _typing: Vec<Subscription>,
+    /// Everyone who made commits, for the user filter.
+    authors: Vec<Author>,
+    /// The email of the user the history is narrowed to; empty: everyone.
+    user: String,
+    /// The pickers of the date filter, and the days they hold (`2026-11-08`; empty: none).
+    after: Entity<DatePickerState>,
+    before: Entity<DatePickerState>,
+    after_day: String,
+    before_day: String,
+    /// The preset of the date list in use, counted from 1; 0 when there is none.
+    preset: usize,
+    /// The popup of a filter, when open, with the row the keyboard is on (the user list; the
+    /// date popup is for the mouse).
+    menu: Option<(Filter, usize)>,
     /// Counts the pauses in typing: a search waits for its own to end.
     typed: u64,
     refs: Option<Model>,
@@ -100,6 +160,38 @@ fn scope_key(scope: &Scope) -> Option<String> {
 
 /// What picking `target` in the tree asks for: that ref, or every branch when it already is the
 /// one.
+/// The rows of the user filter: everyone, then each author with how many commits they made.
+fn user_items(authors: &[Author]) -> Vec<String> {
+    std::iter::once("All users".to_string())
+        .chain(
+            authors
+                .iter()
+                .map(|a| format!("{} <{}>  ({})", a.name, a.email, a.commits)),
+        )
+        .collect()
+}
+
+/// The email the user filter takes for `row` of [`user_items`]; empty for everyone.
+fn user_at(authors: &[Author], row: usize) -> String {
+    row.checked_sub(1)
+        .and_then(|at| authors.get(at))
+        .map(|a| a.email.clone())
+        .unwrap_or_default()
+}
+
+/// The limits git is given for the days picked: from the start of the first to the end of the
+/// last.
+fn day_limits(after: &str, before: &str) -> (String, String) {
+    let at = |day: &str, time: &str| {
+        if day.is_empty() {
+            String::new()
+        } else {
+            format!("{day} {time}")
+        }
+    };
+    (at(after, "00:00:00"), at(before, "23:59:59"))
+}
+
 fn scope_after_pick(current: &Scope, target: &Switch) -> Scope {
     let wanted = match target {
         Switch::Local(name) => Scope::Ref(format!("refs/heads/{name}")),
@@ -113,10 +205,25 @@ fn scope_after_pick(current: &Scope, target: &Switch) -> Scope {
 }
 
 impl LogPanel {
-    fn new(query: Entity<InputState>, typing: Subscription) -> Self {
+    fn new(
+        query: Entity<InputState>,
+        paths: Entity<InputState>,
+        dates: [Entity<DatePickerState>; 2],
+        typing: Vec<Subscription>,
+    ) -> Self {
+        let [after, before] = dates;
         Self {
             query,
+            paths,
             _typing: typing,
+            authors: Vec::new(),
+            user: String::new(),
+            after,
+            before,
+            after_day: String::new(),
+            before_day: String::new(),
+            preset: 0,
+            menu: None,
             typed: 0,
             refs: None,
             head_cursor: false,
@@ -133,6 +240,66 @@ impl LogPanel {
             commit_scroll: UniformListScrollHandle::new(),
             file_scroll: UniformListScrollHandle::new(),
             ref_scroll: UniformListScrollHandle::new(),
+        }
+    }
+
+    /// What the search box, the filters and the scope ask for.
+    fn log_query(&self, cx: &App) -> LogQuery {
+        let (mut since, until) = day_limits(&self.after_day, &self.before_day);
+        if let Some((_, git)) = self.preset.checked_sub(1).and_then(|at| PRESETS.get(at)) {
+            since = git.to_string();
+        }
+        LogQuery {
+            scope: self.scope.clone(),
+            text: self.query.read(cx).value().trim().to_string(),
+            user: self.user.clone(),
+            since,
+            until,
+            paths: self
+                .paths
+                .read(cx)
+                .value()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    fn menu_items(&self, filter: Filter) -> Vec<String> {
+        match filter {
+            Filter::User => user_items(&self.authors),
+            Filter::Date => date_items(),
+            Filter::Range => Vec::new(),
+        }
+    }
+
+    /// Opens the list of `filter` on its current value, or closes it.
+    fn toggle_menu(&mut self, filter: Filter) {
+        if self.menu.is_some_and(|(open, _)| open == filter) {
+            self.menu = None;
+            return;
+        }
+        let row = match filter {
+            Filter::User => self
+                .authors
+                .iter()
+                .position(|a| a.email == self.user)
+                .map_or(0, |at| at + 1),
+            Filter::Date if self.preset > 0 => self.preset,
+            Filter::Date if !self.after_day.is_empty() || !self.before_day.is_empty() => {
+                PRESETS.len() + 1
+            }
+            Filter::Date | Filter::Range => 0,
+        };
+        self.menu = Some((filter, row));
+    }
+
+    /// Takes row `row` of the list of `filter` and closes it.
+    fn pick_menu(&mut self, filter: Filter, row: usize) {
+        self.menu = None;
+        match filter {
+            Filter::User => self.user = user_at(&self.authors, row),
+            Filter::Date | Filter::Range => {}
         }
     }
 
@@ -298,12 +465,31 @@ impl Workspace {
         }
         if self.log.is_none() {
             let query = cx.new(|cx| InputState::new(window, cx).placeholder("Text or hash"));
-            let typing = cx.subscribe(&query, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.log_typed(cx);
-                }
-            });
-            self.log = Some(LogPanel::new(query, typing));
+            let paths = cx.new(|cx| InputState::new(window, cx).placeholder("Paths"));
+            let picker = |window: &mut Window, cx: &mut Context<Self>| {
+                cx.new(|cx| DatePickerState::new(window, cx).date_format("%Y-%m-%d"))
+            };
+            let dates = [picker(window, cx), picker(window, cx)];
+            let typing = [&query, &paths]
+                .map(|input| {
+                    cx.subscribe(input, |this, _, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            this.log_typed(cx);
+                        }
+                    })
+                })
+                .into();
+            let mut typing: Vec<Subscription> = typing;
+            for (which, picker) in dates.iter().enumerate() {
+                typing.push(
+                    cx.subscribe(picker, move |this, _, event: &DatePickerEvent, cx| {
+                        let DatePickerEvent::Change(value) = event;
+                        let day = value.format("%Y-%m-%d").map(|d| d.to_string());
+                        this.log_day(which == 0, day.unwrap_or_default(), cx);
+                    }),
+                );
+            }
+            self.log = Some(LogPanel::new(query, paths, dates, typing));
         }
         self.claude_open = false; // the tab takes the place of the chat, as the chat does the editor
         self.log_open = true;
@@ -313,17 +499,23 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Reads the branches again, off the UI thread, for the tree.
+    /// Reads the branches for the tree and the authors for the user filter again, off the UI
+    /// thread.
     fn load_log_refs(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
-            let found = cx
+            let (found, authors) = cx
                 .background_executor()
-                .spawn(async move { zide_git::branches(&root) })
+                .spawn(async move { (zide_git::branches(&root), log::authors(&root)) })
                 .await;
             this.update(cx, |this, cx| {
-                if let (Some(panel), Some(found)) = (&mut this.log, found) {
-                    panel.set_refs(found);
+                if let Some(panel) = &mut this.log {
+                    if let Some(found) = found {
+                        panel.set_refs(found);
+                    }
+                    if let Ok(authors) = authors {
+                        panel.authors = authors;
+                    }
                     cx.notify();
                 }
             })
@@ -340,12 +532,8 @@ impl Workspace {
         panel.generation += 1;
         panel.loading = true;
         let generation = panel.generation;
-        let text = panel.query.read(cx).value().trim().to_string();
-        let filtered = !text.is_empty();
-        let query = LogQuery {
-            scope: panel.scope.clone(),
-            text,
-        };
+        let query = panel.log_query(cx);
+        let filtered = query.is_filtered();
         let limit = panel.limit;
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
@@ -488,9 +676,73 @@ impl Workspace {
     }
 
     fn log_typing(&self, window: &Window, cx: &App) -> bool {
-        self.log
-            .as_ref()
-            .is_some_and(|panel| panel.query.read(cx).focus_handle(cx).is_focused(window))
+        self.log.as_ref().is_some_and(|panel| {
+            [&panel.query, &panel.paths]
+                .iter()
+                .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
+        })
+    }
+
+    /// Opens or closes the list of a filter.
+    fn toggle_log_menu(&mut self, filter: Filter, cx: &mut Context<Self>) {
+        if let Some(panel) = &mut self.log {
+            panel.toggle_menu(filter);
+        }
+        cx.notify();
+    }
+
+    /// The date filter changed: `after` tells which of the two days, and an empty one is cleared.
+    fn log_day(&mut self, after: bool, day: String, cx: &mut Context<Self>) {
+        if let Some(panel) = &mut self.log {
+            panel.preset = 0; // the days picked take the place of a preset
+            if after {
+                panel.after_day = day;
+            } else {
+                panel.before_day = day;
+            }
+            panel.limit = PAGE;
+        }
+        self.load_log(cx);
+    }
+
+    /// Narrows the history by row `row` of the list of `filter`.
+    fn pick_log_filter(
+        &mut self,
+        filter: Filter,
+        row: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel) = &mut self.log else {
+            return;
+        };
+        panel.limit = PAGE;
+        match filter {
+            Filter::User => panel.pick_menu(filter, row),
+            Filter::Range => return,
+            Filter::Date => match date_pick(row) {
+                DatePick::Select => {
+                    // the pickers are for the days; nothing is asked of git until one is picked
+                    panel.menu = Some((Filter::Range, 0));
+                    return cx.notify();
+                }
+                pick => {
+                    panel.menu = None;
+                    panel.preset = match pick {
+                        DatePick::Preset(at) => at,
+                        _ => 0,
+                    };
+                    panel.after_day.clear();
+                    panel.before_day.clear();
+                    for picker in [panel.after.clone(), panel.before.clone()] {
+                        picker.update(cx, |picker, cx| {
+                            picker.set_date(Date::Single(None), window, cx)
+                        });
+                    }
+                }
+            },
+        }
+        self.load_log(cx);
     }
 
     /// Tab: the keyboard goes to the next list, or out of the search box.
@@ -532,21 +784,49 @@ impl Workspace {
         let Some(panel) = &mut self.log else {
             return;
         };
+        if matches!(panel.menu, Some((Filter::Range, _))) {
+            // the pickers read their own keys; Esc closes the popup, and not the tab
+            if key == "escape" {
+                panel.menu = None;
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
         cx.stop_propagation();
         let pane = panel.pane;
         let down = key == "down" || vim == Some(Key::Char('j'));
         let up = key == "up" || vim == Some(Key::Char('k'));
+        if let Some((filter, row)) = panel.menu {
+            // an open filter list takes the keys
+            let last = panel.menu_items(filter).len().saturating_sub(1);
+            match key {
+                "escape" => panel.menu = None,
+                "enter" => return self.pick_log_filter(filter, row, window, cx),
+                _ if down => panel.menu = Some((filter, (row + 1).min(last))),
+                _ if up => panel.menu = Some((filter, row.saturating_sub(1))),
+                _ => {}
+            }
+            return cx.notify();
+        }
         match key {
             "escape" => {
                 self.log_open = false;
                 self.focus.focus(window, cx);
                 return cx.notify();
             }
-            "/" => {
-                let query = panel.query.clone();
-                query.update(cx, |state, cx| state.focus(window, cx));
+            "/" | "p" => {
+                let input = if key == "/" {
+                    &panel.query
+                } else {
+                    &panel.paths
+                };
+                let input = input.clone();
+                input.update(cx, |state, cx| state.focus(window, cx));
                 return cx.notify();
             }
+            "u" => return self.toggle_log_menu(Filter::User, cx),
+            "d" => return self.toggle_log_menu(Filter::Date, cx),
             _ if down || up => {
                 let delta = if down { 1 } else { -1 };
                 match pane {
@@ -639,7 +919,10 @@ impl Workspace {
             .flex_shrink_0()
             .border_b_1()
             .border_color(rgb(theme::BORDER))
-            .child(div().w(px(360.)).child(Input::new(&panel.query)))
+            .child(div().w(px(300.)).child(Input::new(&panel.query)))
+            .child(filter_menu(panel, Filter::User, &workspace))
+            .child(filter_menu(panel, Filter::Date, &workspace))
+            .child(div().w(px(200.)).child(Input::new(&panel.paths)))
             .children(panel.scope_label().map(|label| {
                 let clear = workspace.clone();
                 div()
@@ -708,6 +991,141 @@ impl Workspace {
                     ),
             )
     }
+}
+
+/// A button that opens the list of `filter`; it says what the history is narrowed to.
+fn filter_menu(panel: &LogPanel, filter: Filter, workspace: &Entity<Workspace>) -> Div {
+    let (label, active) = match filter {
+        Filter::User => match panel.authors.iter().find(|a| a.email == panel.user) {
+            Some(author) => (format!("User: {}", author.name), true),
+            None if !panel.user.is_empty() => (format!("User: {}", panel.user), true),
+            None => ("User".to_string(), false),
+        },
+        Filter::Date | Filter::Range => match (panel.after_day.as_str(), panel.before_day.as_str())
+        {
+            ("", "") => match panel.preset.checked_sub(1).and_then(|at| PRESETS.get(at)) {
+                Some((label, _)) => (format!("Date: {label}"), true),
+                None => ("Date".to_string(), false),
+            },
+            (after, "") => (format!("Date: after {after}"), true),
+            ("", before) => (format!("Date: before {before}"), true),
+            (after, before) => (format!("Date: {after} to {before}"), true),
+        },
+    };
+    // the range popup belongs to the Date button
+    let shown = |menu: Filter| panel.menu.filter(|(open, _)| *open == menu);
+    let open = shown(filter);
+    let range = if filter == Filter::Date {
+        shown(Filter::Range)
+    } else {
+        None
+    };
+    let toggle = workspace.clone();
+    div()
+        .relative()
+        .flex_shrink_0()
+        .child(
+            div()
+                .id(SharedString::from(format!("log-filter-{filter:?}")))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .h(px(26.))
+                .rounded_md()
+                .cursor_pointer()
+                .whitespace_nowrap()
+                .border_1()
+                .border_color(rgb(if open.is_some() {
+                    theme::ACTIVE_BORDER
+                } else {
+                    theme::CONTROL_BORDER
+                }))
+                .when(active, |d| d.bg(rgb(theme::SELECTION)))
+                .child(label)
+                .child(div().text_color(rgb(theme::DIM)).child("⌄"))
+                .on_click(move |_, _, cx| {
+                    toggle.update(cx, |this, cx| this.toggle_log_menu(filter, cx))
+                }),
+        )
+        .when_some(range, |d, _| {
+            let row = |label: &'static str, picker: &Entity<DatePickerState>| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(50.)).child(label))
+                    .child(
+                        div().w(px(190.)).child(
+                            DatePicker::new(picker)
+                                .placeholder("Any day")
+                                .cleanable(true),
+                        ),
+                    )
+            };
+            // deferred: painted over the lists under the header
+            d.child(deferred(
+                div()
+                    .id("log-menu-date")
+                    .occlude()
+                    .absolute()
+                    .top(px(30.))
+                    .left_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .bg(rgb(theme::POPUP))
+                    .border_1()
+                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .rounded_md()
+                    .child(row("After", &panel.after))
+                    .child(row("Before", &panel.before)),
+            ))
+        })
+        .when_some(open, |d, (_, highlighted)| {
+            let rows = panel
+                .menu_items(filter)
+                .into_iter()
+                .enumerate()
+                .map(|(row, item)| {
+                    let pick = workspace.clone();
+                    div()
+                        .id(SharedString::from(format!("log-{filter:?}-{row}")))
+                        .px_2()
+                        .h(px(ROW_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .whitespace_nowrap()
+                        .when(row == highlighted, |d| d.bg(rgb(theme::ACTIVE_BG)))
+                        .hover(|d| d.bg(rgb(theme::SELECTION)))
+                        .child(item)
+                        .on_click(move |_, window, cx| {
+                            pick.update(cx, |this, cx| {
+                                this.pick_log_filter(filter, row, window, cx)
+                            })
+                        })
+                });
+            // deferred: painted over the lists under the header
+            d.child(deferred(
+                div()
+                    .id(SharedString::from(format!("log-menu-{filter:?}")))
+                    .occlude()
+                    .absolute()
+                    .top(px(30.))
+                    .left_0()
+                    .min_w(px(180.))
+                    .max_h(px(ROW_HEIGHT * 10.))
+                    .overflow_y_scroll()
+                    .bg(rgb(theme::POPUP))
+                    .border_1()
+                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .rounded_md()
+                    .children(rows),
+            ))
+        })
 }
 
 /// A line of text in the place of a list that has nothing to show.
@@ -1124,7 +1542,63 @@ mod tests {
     use zide_git::Switch;
     use zide_git::log::Scope;
 
-    use super::{scope_after_pick, scope_key};
+    use zide_git::log::Author;
+
+    use super::{
+        DatePick, date_items, date_pick, day_limits, scope_after_pick, scope_key, user_at,
+        user_items,
+    };
+
+    fn authors() -> Vec<Author> {
+        let author = |name: &str, email: &str, commits| Author {
+            name: name.into(),
+            email: email.into(),
+            commits,
+        };
+        vec![author("Ana", "ana@x.io", 7), author("Luis", "l@x.io", 2)]
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_user_list_starts_with_everyone_and_a_row_gives_the_email() {
+        let who = authors();
+        assert_eq!(
+            user_items(&who),
+            ["All users", "Ana <ana@x.io>  (7)", "Luis <l@x.io>  (2)"]
+        );
+        assert_eq!(user_at(&who, 0), "");
+        assert_eq!(user_at(&who, 2), "l@x.io");
+        assert_eq!(user_at(&who, 9), ""); // past the list: everyone
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_date_list_has_the_presets_and_ends_in_select() {
+        assert_eq!(
+            date_items(),
+            [
+                "Any time",
+                "Last 24 hours",
+                "Last 7 days",
+                "Last 30 days",
+                "Select..."
+            ]
+        );
+        assert_eq!(date_pick(0), DatePick::Any);
+        assert_eq!(date_pick(3), DatePick::Preset(3));
+        assert_eq!(date_pick(4), DatePick::Select);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_days_picked_cover_the_whole_first_and_last_day() {
+        assert_eq!(day_limits("", ""), (String::new(), String::new()));
+        assert_eq!(
+            day_limits("2026-11-01", "2026-11-08"),
+            (
+                "2026-11-01 00:00:00".to_string(),
+                "2026-11-08 23:59:59".to_string()
+            )
+        );
+        assert_eq!(day_limits("", "2026-11-08").0, "");
+    }
 
     #[::core::prelude::v1::test]
     fn picking_a_ref_narrows_the_history_and_picking_it_again_goes_back_to_all() {
