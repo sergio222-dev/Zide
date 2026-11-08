@@ -1137,7 +1137,7 @@ mod tests {
         let only = |scope| {
             subjects(&LogQuery {
                 scope,
-                text: String::new(),
+                ..LogQuery::default()
             })
         };
         assert_eq!(
@@ -1148,8 +1148,8 @@ mod tests {
         // search: message, author and the start of a hash
         let text = |text: &str| {
             subjects(&LogQuery {
-                scope: Scope::All,
                 text: text.into(),
+                ..LogQuery::default()
             })
         };
         assert_eq!(text("FEATURE"), ["feature work"]);
@@ -1169,6 +1169,72 @@ mod tests {
                 .unwrap()
                 .contains(&"feat/x".to_string())
         );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn the_log_filters_by_user_date_and_paths_and_lists_the_authors() {
+        use log::{LogQuery, authors, read};
+        let (base, clone) = origin_and_clone("logfilters");
+        let as_other = |args: &[&str]| {
+            let mut full = vec!["-c", "user.name=Ana Perez", "-c", "user.email=ana@x.io"];
+            full.extend(args);
+            git_in(&clone, &full);
+        };
+        fs::write(clone.join("a.txt"), "a").unwrap();
+        git_in(&clone, &["add", "a.txt"]);
+        git_in(&clone, &["commit", "-q", "-m", "touch a"]);
+        fs::write(clone.join("b.txt"), "b").unwrap();
+        git_in(&clone, &["add", "b.txt"]);
+        as_other(&["commit", "-q", "-m", "touch b"]);
+        // one commit an old date
+        fs::write(clone.join("c.txt"), "c").unwrap();
+        git_in(&clone, &["add", "c.txt"]);
+        // `--since` reads the date the commit was committed
+        let old = Command::new("git")
+            .arg("-C")
+            .arg(&clone)
+            .args(["commit", "-q", "-m", "ancient"])
+            .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00")
+            .env("GIT_AUTHOR_DATE", "2001-01-01T00:00:00")
+            .output()
+            .unwrap();
+        assert!(old.status.success());
+        let subjects = |query: &LogQuery| -> Vec<String> {
+            read(&clone, query, 50)
+                .unwrap()
+                .iter()
+                .map(|e| e.commit.subject.clone())
+                .collect()
+        };
+        let query = |user: &str, since: &str, paths: &[&str], text: &str| LogQuery {
+            user: user.into(),
+            since: since.into(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            text: text.into(),
+            ..LogQuery::default()
+        };
+        assert_eq!(subjects(&query("ana@x.io", "", &[], "")), ["touch b"]);
+        // a text search inside one user's commits does not widen it to the text's author matches
+        assert_eq!(subjects(&query("ana@x.io", "", &[], "touch")), ["touch b"]);
+        assert_eq!(subjects(&query("", "", &["a.txt"], "")), ["touch a"]);
+        assert_eq!(subjects(&query("", "", &["a.txt", "b.txt"], "")).len(), 2);
+        assert!(!subjects(&query("", "5 years ago", &[], "")).contains(&"ancient".to_string()));
+        assert!(subjects(&query("", "", &[], "")).contains(&"ancient".to_string()));
+        // the start of a hash still finds its commit, unless the limits leave it out
+        let b = read(&clone, &query("ana@x.io", "", &[], ""), 5).unwrap()[0]
+            .commit
+            .hash
+            .clone();
+        assert_eq!(subjects(&query("", "", &[], &b[..8])), ["touch b"]);
+        assert_eq!(subjects(&query("ana@x.io", "", &[], &b[..8])), ["touch b"]);
+        assert!(subjects(&query("", "", &["a.txt"], &b[..8])).is_empty());
+        assert!(query("", "", &["a.txt"], "").is_filtered() && !LogQuery::default().is_filtered());
+
+        let who = authors(&clone).unwrap();
+        assert_eq!(who.iter().map(|a| a.commits).sum::<usize>(), 4);
+        let ana = who.iter().find(|a| a.email == "ana@x.io").unwrap();
+        assert_eq!((ana.name.as_str(), ana.commits), ("Ana Perez", 1));
         fs::remove_dir_all(base).unwrap();
     }
 

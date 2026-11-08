@@ -47,6 +47,59 @@ pub struct LogQuery {
     pub scope: Scope,
     /// Text to look for in the message and the author, or the start of a hash. Empty: no filter.
     pub text: String,
+    /// Only the commits whose author has this name or email. Empty: any.
+    pub user: String,
+    /// Only the commits newer than this, as git reads a date (`7 days ago`). Empty: any.
+    pub since: String,
+    /// Only the commits that touch one of these paths. Empty: any.
+    pub paths: Vec<String>,
+}
+
+impl LogQuery {
+    /// The history is cut down by more than the branch, so it is no longer a connected graph.
+    pub fn is_filtered(&self) -> bool {
+        !self.text.trim().is_empty()
+            || !self.user.is_empty()
+            || !self.since.is_empty()
+            || !self.paths.is_empty()
+    }
+
+    /// The options that limit by user and date.
+    fn limits(&self) -> Vec<String> {
+        let mut limits = Vec::new();
+        if !self.user.is_empty() {
+            limits.push(format!("--author={}", self.user));
+        }
+        if !self.since.is_empty() {
+            limits.push(format!("--since={}", self.since));
+        }
+        limits
+    }
+}
+
+/// Someone who made commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Author {
+    pub name: String,
+    pub email: String,
+    pub commits: usize,
+}
+
+/// Everyone who made commits on any branch, the most active first.
+pub fn authors(root: &Path) -> Result<Vec<Author>, String> {
+    let out = run(root, &["shortlog", "-sne", "--all"], false)?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let (commits, who) = line.trim().split_once('\t')?;
+            let (name, email) = who.rsplit_once(" <")?;
+            Some(Author {
+                name: name.to_string(),
+                email: email.trim_end_matches('>').to_string(),
+                commits: commits.trim().parse().ok()?,
+            })
+        })
+        .collect())
 }
 
 const FORMAT: &str = "--format=%H%x1f%P%x1f%D%x1f%an%x1f%ae%x1f%at%x1f%ad%x1f%s%x1f%b%x1e";
@@ -61,32 +114,34 @@ pub fn read(root: &Path, query: &LogQuery, limit: usize) -> Result<Vec<LogEntry>
         Scope::Ref(name) => vec![name.as_str()],
     };
     let n = format!("-n{limit}");
-    let base = |extra: &[&str]| {
+    let limits = query.limits();
+    let paths: Vec<&str> = std::iter::once("--")
+        .chain(query.paths.iter().map(String::as_str))
+        .collect();
+    let base = |extra: &[&str], scope: &[&str]| {
         let mut args = vec!["log", "--decorate=full", "--date=format:%z", FORMAT, &n];
+        args.extend(limits.iter().map(String::as_str));
         args.extend(extra);
-        args.extend(&scope);
+        args.extend(scope);
+        args.extend(&paths);
         run(root, &args, false).map(|out| parse(&out))
     };
     if text.is_empty() {
-        return base(&["--topo-order"]);
+        return base(&["--topo-order"], &scope);
     }
     let grep = format!("--grep={text}");
-    let author = format!("--author={text}");
     let flags = ["--regexp-ignore-case", "--fixed-strings"];
-    let mut found = base(&[flags[0], flags[1], &grep])?;
-    found.extend(base(&[flags[0], flags[1], &author])?);
+    let mut found = base(&[flags[0], flags[1], &grep], &scope)?;
+    if query.user.is_empty() {
+        // a second --author would not narrow the chosen one down, it would add to it
+        let author = format!("--author={text}");
+        found.extend(base(&[flags[0], flags[1], &author], &scope)?);
+    }
     if text.len() >= 4 && text.chars().all(|c| c.is_ascii_hexdigit()) {
         let spec = format!("{text}^{{commit}}");
         if let Ok(full) = run(root, &["rev-parse", "--verify", "--quiet", &spec], false) {
-            let args = [
-                "log",
-                "--no-walk",
-                "--decorate=full",
-                "--date=format:%z",
-                FORMAT,
-                &full,
-            ];
-            found.extend(parse(&run(root, &args, false)?));
+            // that commit alone, if it passes the same limits
+            found.extend(base(&["--no-walk"], &[&full])?);
         }
     }
     let mut seen = std::collections::HashSet::new();
