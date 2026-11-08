@@ -3,6 +3,8 @@
 //! the result (both sides, one under the other); the cross leaves it out. *Merge…* of the
 //! conflict dialog opens it.
 
+use std::cell::Cell as Shared;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::Disableable;
@@ -40,6 +42,124 @@ struct Row {
     right: Cell,
     /// The segment of the change that starts at this row, with the sides that offer a choice.
     start_of: Option<(usize, bool, bool)>,
+    /// The segment and the line of it that the middle cell is, where the caret can be.
+    mid_at: Option<(usize, usize)>,
+}
+
+/// Where the caret is in the result: a line of a segment, and a character of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Caret {
+    segment: usize,
+    line: usize,
+    col: usize,
+}
+
+/// What a key does to the text of a segment.
+enum Op<'a> {
+    Insert(&'a str),
+    Backspace,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Move {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+}
+
+/// The lines of a segment after `op` at `caret`, and where the caret goes (line, character).
+/// A line is never joined to the next segment: the last line of the segment keeps its break
+/// (unless it is the end of the file), and an empty edge line is what Backspace and Delete can
+/// remove there.
+fn edit_text(
+    lines: &[String],
+    caret: Caret,
+    op: Op,
+    last: bool,
+) -> Option<(Vec<String>, usize, usize)> {
+    let mut text = lines.concat();
+    let content = lines
+        .get(caret.line)
+        .map_or("", |line| line.trim_end_matches('\n'));
+    let byte = content
+        .char_indices()
+        .nth(caret.col)
+        .map_or(content.len(), |(at, _)| at);
+    let mut at = lines[..caret.line.min(lines.len())]
+        .iter()
+        .map(String::len)
+        .sum::<usize>()
+        + byte;
+    match op {
+        Op::Insert(typed) => {
+            text.insert_str(at, typed);
+            at += typed.len();
+        }
+        Op::Backspace if at == 0 => {
+            if !text.starts_with('\n') {
+                return None;
+            }
+            text.remove(0); // the empty first line
+        }
+        Op::Backspace => {
+            let before = text[..at].char_indices().next_back()?.0;
+            text.replace_range(before..at, "");
+            at = before;
+        }
+        Op::Delete => {
+            let ch = text[at..].chars().next()?;
+            let ends_a_line_of_text =
+                ch == '\n' && at + 1 == text.len() && at > 0 && text.as_bytes()[at - 1] != b'\n';
+            if ends_a_line_of_text {
+                return None;
+            }
+            text.replace_range(at..at + ch.len_utf8(), "");
+        }
+    }
+    if !last && !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    let mut lines: Vec<String> = text.split_inclusive('\n').map(str::to_string).collect();
+    if at == text.len() && text.ends_with('\n') {
+        lines.push(String::new()); // the caret is on a new last line at the end of the file
+    }
+    let (mut line, mut col, mut start) = (0, 0, 0);
+    for (index, text_line) in lines.iter().enumerate() {
+        let content = text_line.trim_end_matches('\n').len();
+        if at <= start + content {
+            (line, col) = (index, text_line[..at - start].chars().count());
+            break;
+        }
+        start += text_line.len();
+    }
+    Some((lines, line, col))
+}
+
+/// How many cells a line takes up to its `col`-th character.
+fn cells_before(line: &str, col: usize) -> usize {
+    line.chars()
+        .take(col)
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum()
+}
+
+/// The character of `line` the caret goes before when the click is `cells` cells from its start:
+/// a click on the left half of a character goes before it.
+fn col_at(line: &str, cells: usize) -> usize {
+    let line = line.trim_end_matches('\n');
+    let mut used = 0;
+    for (col, c) in line.chars().enumerate() {
+        let width = if c == '\t' { 4 } else { 1 };
+        if cells * 2 < used * 2 + width {
+            return col;
+        }
+        used += width;
+    }
+    line.chars().count()
 }
 
 pub struct MergeEditor {
@@ -47,6 +167,16 @@ pub struct MergeEditor {
     merge: Merge,
     pub yours: String,
     pub theirs: String,
+    caret: Caret,
+    /// The merge before each step, to undo them.
+    history: Vec<Merge>,
+    /// The last step was typing: the next key joins it.
+    typing: bool,
+    family: SharedString,
+    /// Width of a character of the font.
+    cell: f32,
+    /// Where the text of the result starts, on screen.
+    origin: Rc<Shared<f32>>,
     rows: Arc<Vec<Row>>,
     /// The row where each change starts.
     starts: Vec<usize>,
@@ -97,7 +227,7 @@ fn build_rows(merge: &Merge) -> (Vec<Row>, Vec<usize>) {
         }
     };
     for (index, segment) in merge.segments().iter().enumerate() {
-        let result = merge.result_of(segment);
+        let result = merge.result_of(index, segment);
         let (yours, theirs, tints, dims, choice) = match segment {
             Segment::Common(range) => {
                 let lines = &merge.base()[range.clone()];
@@ -158,6 +288,9 @@ fn build_rows(merge: &Merge) -> (Vec<Row>, Vec<usize>) {
             }
             if let Some(text) = result.get(line) {
                 row.mid = number(&mut mid, text, tints[1], false);
+                row.mid_at = Some((index, line));
+            } else if line == 0 && is_change {
+                row.mid_at = Some((index, 0)); // nothing in the result yet: a line can be typed
             }
             if let Some(text) = theirs.get(line) {
                 row.right = number(&mut right, text, tints[2], dims[1]);
@@ -172,12 +305,25 @@ fn build_rows(merge: &Merge) -> (Vec<Row>, Vec<usize>) {
 }
 
 impl MergeEditor {
-    pub fn new(path: String, yours: String, theirs: String, merge: Merge) -> Self {
+    pub fn new(
+        path: String,
+        yours: String,
+        theirs: String,
+        merge: Merge,
+        family: SharedString,
+        cell: f32,
+    ) -> Self {
         let mut editor = Self {
             path,
             merge,
             yours,
             theirs,
+            caret: Caret::default(),
+            history: Vec::new(),
+            typing: false,
+            family,
+            cell,
+            origin: Rc::new(Shared::new(0.)),
             rows: Arc::new(Vec::new()),
             starts: Vec::new(),
             at: 0,
@@ -185,8 +331,194 @@ impl MergeEditor {
             scroll: UniformListScrollHandle::new(),
         };
         editor.rebuild();
+        editor.settle_caret();
+        // the caret starts on the first change
+        if let Some(at) = editor
+            .starts
+            .first()
+            .and_then(|row| editor.rows[*row].mid_at)
+        {
+            editor.caret = Caret {
+                segment: at.0,
+                line: at.1,
+                col: 0,
+            };
+        }
         editor.go_to(0);
         editor
+    }
+
+    /// Remembers the merge before a step. Keys typed one after another are one step.
+    fn record(&mut self, typing: bool) {
+        if !(typing && self.typing) {
+            self.history.push(self.merge.clone());
+            if self.history.len() > 100 {
+                self.history.remove(0);
+            }
+        }
+        self.typing = typing;
+    }
+
+    pub fn undo(&mut self) {
+        if let Some(merge) = self.history.pop() {
+            self.merge = merge;
+            self.typing = false;
+            self.rebuild();
+            self.reveal();
+        }
+    }
+
+    fn row_of(&self, caret: Caret) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|row| row.mid_at == Some((caret.segment, caret.line)))
+    }
+
+    /// Puts the caret on a row that can hold it, if the one it was on is gone.
+    fn settle_caret(&mut self) {
+        if self.row_of(self.caret).is_some() {
+            let len = self
+                .line_text(self.caret.segment, self.caret.line)
+                .chars()
+                .count();
+            self.caret.col = self.caret.col.min(len);
+            return;
+        }
+        let found = self
+            .rows
+            .iter()
+            .find_map(|row| {
+                row.mid_at
+                    .filter(|(segment, _)| *segment >= self.caret.segment)
+            })
+            .or_else(|| self.rows.iter().rev().find_map(|row| row.mid_at));
+        if let Some((segment, line)) = found {
+            self.caret = Caret {
+                segment,
+                line,
+                col: 0,
+            };
+        }
+    }
+
+    fn line_text(&self, segment: usize, line: usize) -> String {
+        self.merge
+            .result_lines(segment)
+            .get(line)
+            .map(|text| text.trim_end_matches('\n').to_string())
+            .unwrap_or_default()
+    }
+
+    /// Scrolls so the caret is on screen.
+    fn reveal(&mut self) {
+        if let Some(row) = self.row_of(self.caret) {
+            self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+        }
+    }
+
+    fn edit(&mut self, op: Op) -> bool {
+        let lines = self.merge.result_lines(self.caret.segment);
+        let last = self.caret.segment + 1 == self.merge.segments().len();
+        let Some((lines, line, col)) = edit_text(&lines, self.caret, op, last) else {
+            return false;
+        };
+        self.record(true);
+        self.merge.set_result(self.caret.segment, lines);
+        self.caret.line = line;
+        self.caret.col = col;
+        self.rebuild();
+        self.settle_caret();
+        self.reveal();
+        true
+    }
+
+    /// Types `text` (which may hold line breaks) at the caret.
+    pub fn type_text(&mut self, text: &str) {
+        self.edit(Op::Insert(&text.replace("\r\n", "\n")));
+    }
+
+    pub fn backspace(&mut self) {
+        self.edit(Op::Backspace);
+    }
+
+    pub fn delete(&mut self) {
+        self.edit(Op::Delete);
+    }
+
+    pub fn move_caret(&mut self, direction: Move) {
+        self.typing = false;
+        let Some(row) = self.row_of(self.caret) else {
+            return;
+        };
+        let editable = |rows: &[Row], from: usize, down: bool| -> Option<(usize, usize)> {
+            if down {
+                rows.get(from + 1..)?.iter().find_map(|row| row.mid_at)
+            } else {
+                rows.get(..from)?.iter().rev().find_map(|row| row.mid_at)
+            }
+        };
+        let len = self
+            .line_text(self.caret.segment, self.caret.line)
+            .chars()
+            .count();
+        let to = |this: &mut Self, at: (usize, usize), col: Option<usize>| {
+            this.caret = Caret {
+                segment: at.0,
+                line: at.1,
+                col: 0,
+            };
+            let len = this.line_text(at.0, at.1).chars().count();
+            this.caret.col = col.map_or(len, |col| col.min(len));
+        };
+        match direction {
+            Move::Home => self.caret.col = 0,
+            Move::End => self.caret.col = len,
+            Move::Left if self.caret.col > 0 => self.caret.col -= 1,
+            Move::Right if self.caret.col < len => self.caret.col += 1,
+            Move::Left => {
+                if let Some(at) = editable(&self.rows, row, false) {
+                    to(self, at, None);
+                }
+            }
+            Move::Right => {
+                if let Some(at) = editable(&self.rows, row, true) {
+                    to(self, at, Some(0));
+                }
+            }
+            Move::Up => {
+                if let Some(at) = editable(&self.rows, row, false) {
+                    to(self, at, Some(self.caret.col));
+                }
+            }
+            Move::Down => {
+                if let Some(at) = editable(&self.rows, row, true) {
+                    to(self, at, Some(self.caret.col));
+                }
+            }
+        }
+        self.reveal();
+    }
+
+    /// A click on the middle pane at row `row`, `x` pixels from the left of the window.
+    pub fn click(&mut self, row: usize, x: f32) {
+        let Some((segment, line)) = self.rows.get(row).and_then(|row| row.mid_at) else {
+            return;
+        };
+        self.typing = false;
+        let cells = ((x - self.origin.get()) / self.cell).round().max(0.) as usize;
+        let text = self.line_text(segment, line);
+        self.caret = Caret {
+            segment,
+            line,
+            col: col_at(&text, cells),
+        };
+    }
+
+    /// Pixels from the start of the text to the caret, and the row it is on.
+    fn caret_position(&self) -> Option<(usize, f32)> {
+        let row = self.row_of(self.caret)?;
+        let text = self.line_text(self.caret.segment, self.caret.line);
+        Some((row, cells_before(&text, self.caret.col) as f32 * self.cell))
     }
 
     fn rebuild(&mut self) {
@@ -210,24 +542,28 @@ impl MergeEditor {
         }
     }
 
-    pub fn apply(&mut self, segment: usize, side: Which) {
-        self.merge.apply(segment, side);
+    /// Runs a step over the merge that can be undone.
+    fn change(&mut self, step: impl FnOnce(&mut Merge)) {
+        self.record(false);
+        step(&mut self.merge);
         self.rebuild();
+        self.settle_caret();
+    }
+
+    pub fn apply(&mut self, segment: usize, side: Which) {
+        self.change(|merge| merge.apply(segment, side));
     }
 
     pub fn discard(&mut self, segment: usize, side: Which) {
-        self.merge.discard(segment, side);
-        self.rebuild();
+        self.change(|merge| merge.discard(segment, side));
     }
 
     pub fn apply_non_conflicting(&mut self, only: Option<Which>) {
-        self.merge.apply_non_conflicting(only);
-        self.rebuild();
+        self.change(|merge| merge.apply_non_conflicting(only));
     }
 
     pub fn accept(&mut self, side: Which) {
-        self.merge.accept(side);
-        self.rebuild();
+        self.change(|merge| merge.accept(side));
     }
 
     /// Every conflict has a choice: the file can be saved.
@@ -237,8 +573,7 @@ impl MergeEditor {
 
     /// The text to save: what was chosen, plus the changes that needed no choice.
     pub fn finish(&mut self) -> String {
-        self.merge.apply_non_conflicting(None);
-        self.rebuild();
+        self.apply_non_conflicting(None);
         self.merge.result()
     }
 
@@ -279,6 +614,7 @@ impl Workspace {
             .as_ref()
             .map(|popup| popup.names())
             .unwrap_or_default();
+        let (family, cell) = measure_font(window);
         cx.spawn_in(window, async move |this, cx| {
             let path = conflict.path.clone();
             let stages = cx
@@ -288,7 +624,14 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| match stages {
                 Ok(stages) => {
                     let merge = Merge::new(&stages.base, &stages.yours, &stages.theirs);
-                    this.merge = Some(MergeEditor::new(conflict.path, yours, theirs, merge));
+                    this.merge = Some(MergeEditor::new(
+                        conflict.path,
+                        yours,
+                        theirs,
+                        merge,
+                        family,
+                        cell,
+                    ));
                     this.focus.focus(window, cx);
                     cx.notify();
                 }
@@ -337,7 +680,8 @@ impl Workspace {
         .detach();
     }
 
-    /// Keys while the merge editor is open: Esc closes it, F7 and Shift+F7 move between changes.
+    /// Keys while the merge editor is open: Esc closes it, F7 and Shift+F7 move between changes,
+    /// the rest edit the result (typing, Backspace, Delete, arrows, Ctrl+V, Ctrl+Z).
     pub(crate) fn merge_key(
         &mut self,
         event: &KeyDownEvent,
@@ -345,17 +689,50 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         cx.stop_propagation();
-        let shift = event.keystroke.modifiers.shift;
-        match event.keystroke.key.as_str() {
-            "escape" => self.close_merge(cx),
-            "f7" => {
-                if let Some(editor) = &mut self.merge {
-                    editor.step(if shift { -1 } else { 1 });
-                }
-                cx.notify();
-            }
-            _ => {}
+        let keystroke = &event.keystroke;
+        let (shift, held) = (
+            keystroke.modifiers.shift,
+            keystroke.modifiers.control || keystroke.modifiers.platform,
+        );
+        let key = keystroke.key.as_str();
+        if key == "escape" {
+            return self.close_merge(cx);
         }
+        let pasted = (held && key == "v")
+            .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
+            .flatten();
+        let Some(editor) = &mut self.merge else {
+            return;
+        };
+        match key {
+            _ if held && key == "z" => editor.undo(),
+            _ if held => {
+                if let Some(text) = pasted {
+                    editor.type_text(&text);
+                }
+            }
+            "f7" => editor.step(if shift { -1 } else { 1 }),
+            "left" => editor.move_caret(Move::Left),
+            "right" => editor.move_caret(Move::Right),
+            "up" => editor.move_caret(Move::Up),
+            "down" => editor.move_caret(Move::Down),
+            "home" => editor.move_caret(Move::Home),
+            "end" => editor.move_caret(Move::End),
+            "backspace" => editor.backspace(),
+            "delete" => editor.delete(),
+            "enter" => editor.type_text("\n"),
+            "tab" => editor.type_text("\t"),
+            _ => {
+                if let Some(text) = keystroke
+                    .key_char
+                    .as_ref()
+                    .filter(|_| !keystroke.modifiers.alt)
+                {
+                    editor.type_text(text);
+                }
+            }
+        }
+        cx.notify();
     }
 
     pub(crate) fn merge_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -364,7 +741,9 @@ impl Workspace {
         let rows = editor.rows.clone();
         let scroll = editor.scroll.clone();
         let (can_apply, busy) = (editor.can_apply(), editor.busy);
-        let font: SharedString = EDITOR_FONTS[0].into();
+        let font = editor.family.clone();
+        let caret = editor.caret_position();
+        let origin = editor.origin.clone();
         let file_name = editor.path.rsplit('/').next().unwrap_or(&editor.path);
 
         let tool = |id: &'static str, glyph: &'static str| {
@@ -477,7 +856,10 @@ impl Workspace {
             let font = font.clone();
             uniform_list("merge-rows", rows.len(), move |range, _, _| {
                 range
-                    .map(|position| row_view(&rows[position], position, &workspace, &font))
+                    .map(|position| {
+                        let caret = caret.filter(|(row, _)| *row == position).map(|(_, x)| x);
+                        row_view(&rows[position], position, &workspace, &font, caret, &origin)
+                    })
                     .collect()
             })
             .size_full()
@@ -583,6 +965,24 @@ impl Workspace {
     }
 }
 
+/// The first editor font that is installed, and the width of one of its characters.
+fn measure_font(window: &Window) -> (SharedString, f32) {
+    let text_system = window.text_system();
+    let installed = text_system.all_font_names();
+    let family: SharedString = EDITOR_FONTS
+        .iter()
+        .find(|family| installed.iter().any(|name| name == *family))
+        .unwrap_or(&EDITOR_FONTS[0])
+        .to_string()
+        .into();
+    let id = text_system.resolve_font(&font(family.clone()));
+    let cell = text_system
+        .advance(id, px(13.), 'm')
+        .ok()
+        .map_or(8., |advance| f32::from(advance.width));
+    (family, cell)
+}
+
 /// Changes the merge being edited.
 fn edit(workspace: &Entity<Workspace>, cx: &mut App, change: impl FnOnce(&mut MergeEditor)) {
     workspace.update(cx, |this, cx| {
@@ -599,6 +999,8 @@ fn row_view(
     position: usize,
     workspace: &Entity<Workspace>,
     font: &SharedString,
+    caret: Option<f32>,
+    origin: &Rc<Shared<f32>>,
 ) -> AnyElement {
     let text = |cell: &Cell| {
         div()
@@ -720,8 +1122,41 @@ fn row_view(
                 .border_l_1()
                 .border_r_1()
                 .border_color(rgb(theme::BORDER))
+                .when(row.mid_at.is_some(), |d| d.cursor_text())
                 .child(number(&row.mid, NUMBER))
-                .child(text(&row.mid)),
+                .child(
+                    text(&row.mid)
+                        .relative()
+                        .child({
+                            let origin = origin.clone();
+                            canvas(
+                                move |bounds, _, _| origin.set(f32::from(bounds.origin.x)),
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .left(px(4.))
+                            .top_0()
+                            .size_full()
+                        })
+                        .when_some(caret, |d, x| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .left(px(4. + x))
+                                    .top_0()
+                                    .h_full()
+                                    .w(px(2.))
+                                    .bg(rgb(theme::CARET_BAR)),
+                            )
+                        }),
+                )
+                .on_mouse_down(MouseButton::Left, {
+                    let workspace = workspace.clone();
+                    move |event, _, cx| {
+                        let x = f32::from(event.position.x);
+                        edit(&workspace, cx, |editor| editor.click(position, x))
+                    }
+                }),
         )
         .child(
             pane(row.right.tint)
@@ -741,6 +1176,8 @@ mod tests {
             "main".into(),
             "feature".into(),
             Merge::new(base, yours, theirs),
+            "monospace".into(),
+            8.,
         )
     }
 
@@ -832,6 +1269,99 @@ mod tests {
         assert_eq!(editor.at, 0);
         editor.step(-1);
         assert_eq!(editor.at, 1);
+    }
+
+    fn caret_at(segment: usize, line: usize, col: usize) -> Caret {
+        Caret { segment, line, col }
+    }
+
+    fn lines(text: &str) -> Vec<String> {
+        text.split_inclusive('\n').map(str::to_string).collect()
+    }
+
+    #[::core::prelude::v1::test]
+    fn typing_splits_and_joins_lines_inside_a_segment() {
+        let start = lines("ab\ncd\n");
+        let (typed, line, col) =
+            edit_text(&start, caret_at(0, 0, 1), Op::Insert("X\nY"), false).unwrap();
+        assert_eq!((typed.concat(), line, col), ("aX\nYb\ncd\n".into(), 1, 1));
+        let (joined, line, col) =
+            edit_text(&lines("aX\nYb\n"), caret_at(0, 1, 0), Op::Backspace, false).unwrap();
+        assert_eq!((joined.concat(), line, col), ("aXYb\n".into(), 0, 2));
+        let (gone, line, col) =
+            edit_text(&lines("ab\ncd\n"), caret_at(0, 0, 2), Op::Delete, false).unwrap();
+        assert_eq!((gone.concat(), line, col), ("abcd\n".into(), 0, 2));
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_break_that_ends_a_segment_stays_unless_its_line_is_empty() {
+        // Delete at the end of the last line would glue it to the next segment
+        assert!(edit_text(&lines("ab\n"), caret_at(0, 0, 2), Op::Delete, false).is_none());
+        // an empty first line goes with Backspace, an empty last line with Delete
+        let (rest, ..) =
+            edit_text(&lines("\nab\n"), caret_at(0, 0, 0), Op::Backspace, false).unwrap();
+        assert_eq!(rest.concat(), "ab\n");
+        let (rest, ..) = edit_text(&lines("ab\n\n"), caret_at(0, 1, 0), Op::Delete, false).unwrap();
+        assert_eq!(rest.concat(), "ab\n");
+        // nothing before the first character of a line of text
+        assert!(edit_text(&lines("ab\n"), caret_at(0, 0, 0), Op::Backspace, false).is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn text_typed_into_an_empty_segment_gets_its_break() {
+        let (typed, line, col) =
+            edit_text(&[], caret_at(1, 0, 0), Op::Insert("new"), false).unwrap();
+        assert_eq!((typed, line, col), (vec!["new\n".to_string()], 0, 3));
+        // at the end of the file it does not
+        let (typed, ..) = edit_text(&[], caret_at(1, 0, 0), Op::Insert("new"), true).unwrap();
+        assert_eq!(typed, ["new"]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn typing_in_the_result_settles_the_change_and_can_be_undone() {
+        let mut editor = editor("a\nA\nz\n", "a\nC\nz\n", "a\nB\nz\n");
+        assert_eq!(editor.caret, caret_at(1, 0, 0));
+        editor.type_text("my ");
+        editor.type_text("own ");
+        assert_eq!(editor.merge.result(), "a\nmy own A\nz\n");
+        assert!(editor.can_apply());
+        assert_eq!(editor.rows[1].mid.text, "my own A");
+        assert_eq!(editor.rows[1].start_of, Some((1, false, false)));
+        // two keys typed in a row are one step
+        editor.undo();
+        assert_eq!(editor.merge.result(), "a\nA\nz\n");
+        assert!(!editor.can_apply());
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_caret_walks_over_the_lines_of_the_result_and_skips_padding() {
+        // yours adds two lines, so the result has padding rows in that change
+        let mut editor = editor("a\nz\n", "a\nx\ny\nz\n", "a\nz\n");
+        // the result of the change is empty: its first row can take a line
+        assert_eq!(editor.caret, caret_at(1, 0, 0));
+        editor.move_caret(Move::Down);
+        assert_eq!(editor.caret, caret_at(2, 0, 0));
+        editor.move_caret(Move::End);
+        editor.move_caret(Move::Right);
+        assert_eq!(editor.caret, caret_at(2, 0, 1));
+        editor.move_caret(Move::Right); // end of the file
+        assert_eq!(editor.caret, caret_at(2, 0, 1));
+        editor.move_caret(Move::Left);
+        assert_eq!(editor.caret, caret_at(2, 0, 0));
+        editor.move_caret(Move::Left);
+        assert_eq!(editor.caret, caret_at(1, 0, 0));
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_click_puts_the_caret_on_the_nearest_character() {
+        let mut editor = editor("abc\n", "abc\n", "abc\n");
+        editor.origin.set(100.);
+        editor.click(0, 100. + 2. * 8. + 1.);
+        assert_eq!(editor.caret, caret_at(0, 0, 2));
+        editor.click(0, 100. + 50. * 8.);
+        assert_eq!(editor.caret, caret_at(0, 0, 3));
+        assert_eq!(col_at("\tx", 4), 1);
+        assert_eq!(cells_before("\tx", 2), 5);
     }
 
     #[::core::prelude::v1::test]

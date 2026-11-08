@@ -92,6 +92,8 @@ pub struct Merge {
     yours: Vec<String>,
     theirs: Vec<String>,
     segments: Vec<Segment>,
+    /// Lines typed over the result of a segment, by segment.
+    edited: Vec<Option<Vec<String>>>,
 }
 
 fn lines(text: &str) -> Vec<String> {
@@ -182,11 +184,13 @@ impl Merge {
         if at < base.len() {
             segments.push(Segment::Common(at..base.len()));
         }
+        let edited = vec![None; segments.len()];
         Self {
             base,
             yours,
             theirs,
             segments,
+            edited,
         }
     }
 
@@ -230,6 +234,8 @@ impl Merge {
             return;
         }
         change.applied.push(side);
+        self.edited[index] = None; // what was typed is replaced by what is applied
+        let change = self.change_mut(index).expect("it is a change");
         if change.kind == Kind::Both {
             (change.yours_is, change.theirs_is) = (Handling::Applied, Handling::Applied);
         } else {
@@ -299,8 +305,40 @@ impl Merge {
             .count()
     }
 
+    /// The lines of the result of the segment `index`, as they are now.
+    pub fn result_lines(&self, index: usize) -> Vec<String> {
+        self.segments
+            .get(index)
+            .map(|segment| {
+                self.result_of(index, segment)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Replaces the result of the segment `index` with lines typed by hand. A change that was
+    /// edited counts as settled: the sides that were pending are left out.
+    pub fn set_result(&mut self, index: usize, lines: Vec<String>) {
+        let Some(slot) = self.edited.get_mut(index) else {
+            return;
+        };
+        *slot = Some(lines);
+        if let Some(change) = self.change_mut(index) {
+            for side in [Which::Yours, Which::Theirs] {
+                if change.kind.changed_by(side) && change.handling(side) == Handling::Pending {
+                    change.set(side, Handling::Discarded);
+                }
+            }
+        }
+    }
+
     /// The lines of the result for a segment, as they are now.
-    pub fn result_of(&self, segment: &Segment) -> Vec<&str> {
+    pub fn result_of(&self, index: usize, segment: &Segment) -> Vec<&str> {
+        if let Some(Some(lines)) = self.edited.get(index) {
+            return lines.iter().map(String::as_str).collect();
+        }
         match segment {
             Segment::Common(range) => self.base[range.clone()]
                 .iter()
@@ -327,8 +365,8 @@ impl Merge {
     /// The text of the result.
     pub fn result(&self) -> String {
         let mut text = String::new();
-        for segment in &self.segments {
-            for line in self.result_of(segment) {
+        for (index, segment) in self.segments.iter().enumerate() {
+            for line in self.result_of(index, segment) {
                 if !text.is_empty() && !text.ends_with('\n') {
                     text.push('\n'); // the last line of a side had none, and something follows
                 }
@@ -389,6 +427,22 @@ mod tests {
         // a handled side is not handled twice
         merge.apply(0, Which::Theirs);
         assert_eq!(merge.result(), "B\n");
+    }
+
+    #[test]
+    fn typed_lines_replace_the_result_of_a_segment_and_settle_its_change() {
+        let mut merge = Merge::new("a\nA\nz\n", "a\nC\nz\n", "a\nB\nz\n");
+        merge.set_result(1, vec!["mine\n".into(), "too\n".into()]);
+        assert_eq!(merge.result(), "a\nmine\ntoo\nz\n");
+        assert_eq!(merge.conflicts_left(), 0);
+        merge.set_result(0, vec!["first\n".into()]);
+        assert_eq!(merge.result(), "first\nmine\ntoo\nz\n");
+        assert_eq!(merge.result_lines(1), ["mine\n", "too\n"]);
+        // a change that was typed over is settled: applying what is pending leaves it alone
+        let mut merge = Merge::new("A\n", "C\n", "B\n");
+        merge.set_result(0, vec!["typed\n".into()]);
+        merge.apply_non_conflicting(None);
+        assert_eq!(merge.result(), "typed\n");
     }
 
     #[test]

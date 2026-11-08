@@ -49,7 +49,9 @@ Only Linux x86_64 is published for now.
   (it starts as the common ancestor) in the middle. The arrow of a change (`»` / `«`) puts it in the result — both sides go one
   under the other — and the cross (`✕`) leaves it out; additions are green, removals gray, replacements blue and changes both
   sides made red. The toolbar applies every non-conflicting change (`F7` / `Shift+F7` move between changes); *Apply* is enabled
-  once no conflict is left, and writes the result and marks the file resolved. Editing the result by hand is not there yet.
+  once no conflict is left, and writes the result and marks the file resolved. The result can be typed over: click or use the
+  arrows, `Home`/`End`, type, `Enter`, `Backspace`, `Delete`, `Ctrl+V` to paste, `Ctrl+Z` to undo. A change typed over counts as
+  settled; a line break cannot be removed where it would join two parts of the file (an empty line at the edge of a part can).
   While a merge, rebase, cherry-pick or revert is unfinished the status bar shows it (`Merging feature-branch`); with a merge, the
   commit panel (`Alt+2`) opens with git's message (`Merge branch 'feature-branch'`) and commits everything staged to conclude it.
 - **Minimap** at the right of the editor: every line as colored bars (folded lines are left out), the visible part
