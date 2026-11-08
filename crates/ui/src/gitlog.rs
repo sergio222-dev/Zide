@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::Scrollbar;
@@ -37,7 +38,42 @@ const LANE_COLORS: [u32; 8] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Filter {
     User,
+    /// The list of ways to narrow by date.
     Date,
+    /// The popup with the After and Before pickers, opened by the last row of the date list.
+    Range,
+}
+
+/// The dates the list offers besides the range, with how git reads each.
+const PRESETS: [(&str, &str); 3] = [
+    ("Last 24 hours", "24 hours ago"),
+    ("Last 7 days", "7 days ago"),
+    ("Last 30 days", "30 days ago"),
+];
+
+/// What a row of the date list asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatePick {
+    Any,
+    /// The preset, counted from 1.
+    Preset(usize),
+    /// Choose the days with the pickers.
+    Select,
+}
+
+fn date_items() -> Vec<String> {
+    std::iter::once("Any time".to_string())
+        .chain(PRESETS.iter().map(|(label, _)| label.to_string()))
+        .chain(std::iter::once("Select...".to_string()))
+        .collect()
+}
+
+fn date_pick(row: usize) -> DatePick {
+    match row {
+        0 => DatePick::Any,
+        row if row <= PRESETS.len() => DatePick::Preset(row),
+        _ => DatePick::Select,
+    }
 }
 
 /// What the keyboard moves through.
@@ -81,6 +117,8 @@ pub struct LogPanel {
     before: Entity<DatePickerState>,
     after_day: String,
     before_day: String,
+    /// The preset of the date list in use, counted from 1; 0 when there is none.
+    preset: usize,
     /// The popup of a filter, when open, with the row the keyboard is on (the user list; the
     /// date popup is for the mouse).
     menu: Option<(Filter, usize)>,
@@ -184,6 +222,7 @@ impl LogPanel {
             before,
             after_day: String::new(),
             before_day: String::new(),
+            preset: 0,
             menu: None,
             typed: 0,
             refs: None,
@@ -206,7 +245,10 @@ impl LogPanel {
 
     /// What the search box, the filters and the scope ask for.
     fn log_query(&self, cx: &App) -> LogQuery {
-        let (since, until) = day_limits(&self.after_day, &self.before_day);
+        let (mut since, until) = day_limits(&self.after_day, &self.before_day);
+        if let Some((_, git)) = self.preset.checked_sub(1).and_then(|at| PRESETS.get(at)) {
+            since = git.to_string();
+        }
         LogQuery {
             scope: self.scope.clone(),
             text: self.query.read(cx).value().trim().to_string(),
@@ -226,7 +268,8 @@ impl LogPanel {
     fn menu_items(&self, filter: Filter) -> Vec<String> {
         match filter {
             Filter::User => user_items(&self.authors),
-            Filter::Date => Vec::new(),
+            Filter::Date => date_items(),
+            Filter::Range => Vec::new(),
         }
     }
 
@@ -242,7 +285,11 @@ impl LogPanel {
                 .iter()
                 .position(|a| a.email == self.user)
                 .map_or(0, |at| at + 1),
-            Filter::Date => 0,
+            Filter::Date if self.preset > 0 => self.preset,
+            Filter::Date if !self.after_day.is_empty() || !self.before_day.is_empty() => {
+                PRESETS.len() + 1
+            }
+            Filter::Date | Filter::Range => 0,
         };
         self.menu = Some((filter, row));
     }
@@ -252,7 +299,7 @@ impl LogPanel {
         self.menu = None;
         match filter {
             Filter::User => self.user = user_at(&self.authors, row),
-            Filter::Date => {}
+            Filter::Date | Filter::Range => {}
         }
     }
 
@@ -647,6 +694,7 @@ impl Workspace {
     /// The date filter changed: `after` tells which of the two days, and an empty one is cleared.
     fn log_day(&mut self, after: bool, day: String, cx: &mut Context<Self>) {
         if let Some(panel) = &mut self.log {
+            panel.preset = 0; // the days picked take the place of a preset
             if after {
                 panel.after_day = day;
             } else {
@@ -658,10 +706,41 @@ impl Workspace {
     }
 
     /// Narrows the history by row `row` of the list of `filter`.
-    fn pick_log_filter(&mut self, filter: Filter, row: usize, cx: &mut Context<Self>) {
-        if let Some(panel) = &mut self.log {
-            panel.pick_menu(filter, row);
-            panel.limit = PAGE;
+    fn pick_log_filter(
+        &mut self,
+        filter: Filter,
+        row: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel) = &mut self.log else {
+            return;
+        };
+        panel.limit = PAGE;
+        match filter {
+            Filter::User => panel.pick_menu(filter, row),
+            Filter::Range => return,
+            Filter::Date => match date_pick(row) {
+                DatePick::Select => {
+                    // the pickers are for the days; nothing is asked of git until one is picked
+                    panel.menu = Some((Filter::Range, 0));
+                    return cx.notify();
+                }
+                pick => {
+                    panel.menu = None;
+                    panel.preset = match pick {
+                        DatePick::Preset(at) => at,
+                        _ => 0,
+                    };
+                    panel.after_day.clear();
+                    panel.before_day.clear();
+                    for picker in [panel.after.clone(), panel.before.clone()] {
+                        picker.update(cx, |picker, cx| {
+                            picker.set_date(Date::Single(None), window, cx)
+                        });
+                    }
+                }
+            },
         }
         self.load_log(cx);
     }
@@ -705,7 +784,7 @@ impl Workspace {
         let Some(panel) = &mut self.log else {
             return;
         };
-        if matches!(panel.menu, Some((Filter::Date, _))) {
+        if matches!(panel.menu, Some((Filter::Range, _))) {
             // the pickers read their own keys; Esc closes the popup, and not the tab
             if key == "escape" {
                 panel.menu = None;
@@ -723,7 +802,7 @@ impl Workspace {
             let last = panel.menu_items(filter).len().saturating_sub(1);
             match key {
                 "escape" => panel.menu = None,
-                "enter" => return self.pick_log_filter(filter, row, cx),
+                "enter" => return self.pick_log_filter(filter, row, window, cx),
                 _ if down => panel.menu = Some((filter, (row + 1).min(last))),
                 _ if up => panel.menu = Some((filter, row.saturating_sub(1))),
                 _ => {}
@@ -922,14 +1001,25 @@ fn filter_menu(panel: &LogPanel, filter: Filter, workspace: &Entity<Workspace>) 
             None if !panel.user.is_empty() => (format!("User: {}", panel.user), true),
             None => ("User".to_string(), false),
         },
-        Filter::Date => match (panel.after_day.as_str(), panel.before_day.as_str()) {
-            ("", "") => ("Date".to_string(), false),
+        Filter::Date | Filter::Range => match (panel.after_day.as_str(), panel.before_day.as_str())
+        {
+            ("", "") => match panel.preset.checked_sub(1).and_then(|at| PRESETS.get(at)) {
+                Some((label, _)) => (format!("Date: {label}"), true),
+                None => ("Date".to_string(), false),
+            },
             (after, "") => (format!("Date: after {after}"), true),
             ("", before) => (format!("Date: before {before}"), true),
             (after, before) => (format!("Date: {after} to {before}"), true),
         },
     };
-    let open = panel.menu.filter(|(open, _)| *open == filter);
+    // the range popup belongs to the Date button
+    let shown = |menu: Filter| panel.menu.filter(|(open, _)| *open == menu);
+    let open = shown(filter);
+    let range = if filter == Filter::Date {
+        shown(Filter::Range)
+    } else {
+        None
+    };
     let toggle = workspace.clone();
     div()
         .relative()
@@ -958,7 +1048,7 @@ fn filter_menu(panel: &LogPanel, filter: Filter, workspace: &Entity<Workspace>) 
                     toggle.update(cx, |this, cx| this.toggle_log_menu(filter, cx))
                 }),
         )
-        .when_some(open.filter(|_| filter == Filter::Date), |d, _| {
+        .when_some(range, |d, _| {
             let row = |label: &'static str, picker: &Entity<DatePickerState>| {
                 div()
                     .flex()
@@ -993,50 +1083,49 @@ fn filter_menu(panel: &LogPanel, filter: Filter, workspace: &Entity<Workspace>) 
                     .child(row("Before", &panel.before)),
             ))
         })
-        .when_some(
-            open.filter(|_| filter == Filter::User),
-            |d, (_, highlighted)| {
-                let rows = panel
-                    .menu_items(filter)
-                    .into_iter()
-                    .enumerate()
-                    .map(|(row, item)| {
-                        let pick = workspace.clone();
-                        div()
-                            .id(SharedString::from(format!("log-{filter:?}-{row}")))
-                            .px_2()
-                            .h(px(ROW_HEIGHT))
-                            .flex()
-                            .items_center()
-                            .flex_shrink_0()
-                            .cursor_pointer()
-                            .whitespace_nowrap()
-                            .when(row == highlighted, |d| d.bg(rgb(theme::ACTIVE_BG)))
-                            .hover(|d| d.bg(rgb(theme::SELECTION)))
-                            .child(item)
-                            .on_click(move |_, _, cx| {
-                                pick.update(cx, |this, cx| this.pick_log_filter(filter, row, cx))
-                            })
-                    });
-                // deferred: painted over the lists under the header
-                d.child(deferred(
+        .when_some(open, |d, (_, highlighted)| {
+            let rows = panel
+                .menu_items(filter)
+                .into_iter()
+                .enumerate()
+                .map(|(row, item)| {
+                    let pick = workspace.clone();
                     div()
-                        .id(SharedString::from(format!("log-menu-{filter:?}")))
-                        .occlude()
-                        .absolute()
-                        .top(px(30.))
-                        .left_0()
-                        .min_w(px(180.))
-                        .max_h(px(ROW_HEIGHT * 10.))
-                        .overflow_y_scroll()
-                        .bg(rgb(theme::POPUP))
-                        .border_1()
-                        .border_color(rgb(theme::CONTROL_BORDER))
-                        .rounded_md()
-                        .children(rows),
-                ))
-            },
-        )
+                        .id(SharedString::from(format!("log-{filter:?}-{row}")))
+                        .px_2()
+                        .h(px(ROW_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .whitespace_nowrap()
+                        .when(row == highlighted, |d| d.bg(rgb(theme::ACTIVE_BG)))
+                        .hover(|d| d.bg(rgb(theme::SELECTION)))
+                        .child(item)
+                        .on_click(move |_, window, cx| {
+                            pick.update(cx, |this, cx| {
+                                this.pick_log_filter(filter, row, window, cx)
+                            })
+                        })
+                });
+            // deferred: painted over the lists under the header
+            d.child(deferred(
+                div()
+                    .id(SharedString::from(format!("log-menu-{filter:?}")))
+                    .occlude()
+                    .absolute()
+                    .top(px(30.))
+                    .left_0()
+                    .min_w(px(180.))
+                    .max_h(px(ROW_HEIGHT * 10.))
+                    .overflow_y_scroll()
+                    .bg(rgb(theme::POPUP))
+                    .border_1()
+                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .rounded_md()
+                    .children(rows),
+            ))
+        })
 }
 
 /// A line of text in the place of a list that has nothing to show.
@@ -1455,7 +1544,10 @@ mod tests {
 
     use zide_git::log::Author;
 
-    use super::{day_limits, scope_after_pick, scope_key, user_at, user_items};
+    use super::{
+        DatePick, date_items, date_pick, day_limits, scope_after_pick, scope_key, user_at,
+        user_items,
+    };
 
     fn authors() -> Vec<Author> {
         let author = |name: &str, email: &str, commits| Author {
@@ -1476,6 +1568,23 @@ mod tests {
         assert_eq!(user_at(&who, 0), "");
         assert_eq!(user_at(&who, 2), "l@x.io");
         assert_eq!(user_at(&who, 9), ""); // past the list: everyone
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_date_list_has_the_presets_and_ends_in_select() {
+        assert_eq!(
+            date_items(),
+            [
+                "Any time",
+                "Last 24 hours",
+                "Last 7 days",
+                "Last 30 days",
+                "Select..."
+            ]
+        );
+        assert_eq!(date_pick(0), DatePick::Any);
+        assert_eq!(date_pick(3), DatePick::Preset(3));
+        assert_eq!(date_pick(4), DatePick::Select);
     }
 
     #[::core::prelude::v1::test]

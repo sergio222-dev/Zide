@@ -176,7 +176,8 @@ the ref you pick, and picking it again goes back to every branch. `/` focuses th
 author or the start of a hash), `Tab` moves between refs, commits and files, `j` / `k` or the arrows move,
 `Enter` on a file (or a double click) opens that commit's diff, and `Esc` closes the tab.
 The **User** button (`u`; `Up`/`Down` move, `Enter` picks, `Esc` closes) narrows the history to one author. **Date**
-(`d`) opens a popup with an *After* and a *Before* date picker (the clear button of each one drops it), and the **Paths**
+(`d`) lists *Last 24 hours*, *Last 7 days* and *Last 30 days*, and *Select...* opens an *After* and a *Before* date
+picker (the clear button of each one drops it); and the **Paths**
 box (`p`) keeps the commits that touch any of the paths typed, separated by spaces. The filters combine with the search
 and the branch; while any is on, the graph is drawn as plain dots because the commits shown are no longer a connected history.
 
