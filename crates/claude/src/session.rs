@@ -72,6 +72,8 @@ impl Session {
             .args(["-p", "--verbose", "--include-partial-messages"])
             .args(["--input-format", "stream-json"])
             .args(["--output-format", "stream-json"])
+            // tells when a message sent mid-turn is taken up (folded into the running turn or not)
+            .arg("--replay-user-messages")
             // Without this, anything that would prompt is denied on the spot.
             .args(["--permission-prompt-tool", "stdio"]);
         if let Some(id) = options.resume {
