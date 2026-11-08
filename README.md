@@ -180,6 +180,10 @@ The **User** button (`u`; `Up`/`Down` move, `Enter` picks, `Esc` closes) narrows
 picker (the clear button of each one drops it); and the **Paths**
 box (`p`) keeps the commits that touch any of the paths typed, separated by spaces. The filters combine with the search
 and the branch; while any is on, the graph is drawn as plain dots because the commits shown are no longer a connected history.
+Right click on a commit opens its menu (`Up`/`Down` and `Enter` work too, `Esc` closes it): *Copy Revision Number*,
+*Cherry-Pick*, *Reset Current Branch to Here...* (asks for Soft, Mixed, Hard or Keep), *Revert Commit*, *New Branch...*
+(created from that commit and checked out) and *New Tag...*. A cherry-pick or revert that clashes leaves its conflicts
+for the resolver, as a merge does.
 
 Vim fold keys (`za`, `zo`, `zc`, `zM`, `zR`) and scroll keys (`zt`, `zz`, `zb`, `Ctrl+D`,
 `Ctrl+U`) work in normal mode.

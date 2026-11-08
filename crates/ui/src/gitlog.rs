@@ -16,6 +16,8 @@ use gpui_kit::*;
 use zide_git::log::{self, Author, GraphRow, LogEntry, LogQuery, RefKind, RefLabel, Scope};
 use zide_git::{Branches, FileChange, Switch};
 
+mod menu;
+
 use crate::branches::{Kind, Model, Row};
 use crate::changed_files;
 use crate::{Workspace, file_icon, statusbar, theme};
@@ -122,6 +124,8 @@ pub struct LogPanel {
     /// The popup of a filter, when open, with the row the keyboard is on (the user list; the
     /// date popup is for the mouse).
     menu: Option<(Filter, usize)>,
+    /// The context menu of a commit, when open.
+    commit_menu: Option<menu::CommitMenu>,
     /// Counts the pauses in typing: a search waits for its own to end.
     typed: u64,
     refs: Option<Model>,
@@ -223,6 +227,7 @@ impl LogPanel {
             after_day: String::new(),
             before_day: String::new(),
             preset: 0,
+            commit_menu: None,
             menu: None,
             typed: 0,
             refs: None,
@@ -497,6 +502,14 @@ impl Workspace {
         self.load_log_refs(cx);
         self.load_log(cx);
         cx.notify();
+    }
+
+    /// Reads the history again after git changed it, when the tab is showing.
+    pub(crate) fn reload_log(&mut self, cx: &mut Context<Self>) {
+        if self.log_open {
+            self.load_log_refs(cx);
+            self.load_log(cx);
+        }
     }
 
     /// Reads the branches for the tree and the authors for the user filter again, off the UI
@@ -784,6 +797,16 @@ impl Workspace {
         let Some(panel) = &mut self.log else {
             return;
         };
+        if panel.commit_menu.is_some() {
+            // the context menu of a commit takes every key
+            let down = key == "down" || vim == Some(Key::Char('j'));
+            let up = key == "up" || vim == Some(Key::Char('k'));
+            cx.stop_propagation();
+            return match panel.menu_key(key, down, up) {
+                menu::MenuKey::Run(action) => self.commit_action(action, window, cx),
+                _ => cx.notify(),
+            };
+        }
         if matches!(panel.menu, Some((Filter::Range, _))) {
             // the pickers read their own keys; Esc closes the popup, and not the tab
             if key == "escape" {
@@ -965,6 +988,12 @@ impl Workspace {
             .min_h_0()
             .w_full()
             .text_color(rgb(theme::TEXT))
+            .children(
+                panel
+                    .commit_menu
+                    .as_ref()
+                    .map(|open| menu::view(open, &workspace)),
+            )
             .child(header)
             .child(
                 div()
@@ -1390,9 +1419,18 @@ fn commits_pane(panel: &LogPanel, workspace: &Entity<Workspace>) -> Div {
                                     .px_2()
                                     .cursor_pointer()
                                     .when(index == selected, |d| d.bg(rgb(focus_bg(focused))))
-                                    .on_click(move |_, _, cx| {
+                                    .on_click({
+                                        let workspace = workspace.clone();
+                                        move |_, _, cx| {
+                                            workspace.update(cx, |this, cx| {
+                                                this.select_log_commit(index, cx)
+                                            })
+                                        }
+                                    })
+                                    .on_mouse_down(MouseButton::Right, move |event, _, cx| {
+                                        let at = event.position;
                                         workspace.update(cx, |this, cx| {
-                                            this.select_log_commit(index, cx)
+                                            this.open_commit_menu(index, at, cx)
                                         })
                                     })
                                     .child(graph_cell(&graph[index], width))
