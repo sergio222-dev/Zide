@@ -254,6 +254,19 @@ impl LogPanel {
         }
     }
 
+    /// The cursor of the tree is on a section or folder that is closed.
+    fn closed_ref_row(&self) -> bool {
+        let Some(model) = &self.refs else {
+            return false;
+        };
+        model.rows().get(model.selected()).is_some_and(|row| {
+            matches!(
+                row.kind,
+                Kind::Section { expanded: false } | Kind::Folder { expanded: false }
+            )
+        })
+    }
+
     /// Moves the cursor of the tree; `true` when it moved.
     fn move_ref(&mut self, delta: isize) -> bool {
         let Some(model) = &mut self.refs else {
@@ -568,8 +581,13 @@ impl Workspace {
             },
             "left" | "right" => {
                 let open = key == "right";
+                // Right opens a closed folder, and only when there is nothing to open does it
+                // leave the tree for the commits.
+                let closed = panel.closed_ref_row();
                 match (pane, &mut panel.refs) {
-                    (Pane::Refs, Some(model)) if !panel.head_cursor => model.fold(open),
+                    (Pane::Refs, Some(model)) if !panel.head_cursor && (!open || closed) => {
+                        model.fold(open)
+                    }
                     (Pane::Refs, _) if open => panel.pane = Pane::Commits,
                     (Pane::Commits, _) if open => panel.pane = Pane::Files,
                     (Pane::Commits, _) => panel.pane = Pane::Refs,
@@ -1040,23 +1058,23 @@ fn files_pane(panel: &LogPanel, root: &str, workspace: &Entity<Workspace>) -> An
 }
 
 /// Under the files: the message of the selected commit, who made it and when, and where it is.
-fn details(panel: &LogPanel) -> Div {
-    let block = div()
-        .flex()
-        .flex_col()
-        .gap_2()
+fn details(panel: &LogPanel) -> Stateful<Div> {
+    let frame = div()
+        .id("log-details")
         .flex_shrink_0()
         .h(px(220.))
         .p_3()
-        .overflow_hidden()
+        .overflow_y_scroll()
         .border_t_1()
         .border_color(rgb(theme::BORDER));
     let Some(entry) = panel.selected_entry() else {
-        return block;
+        return frame;
     };
+    // the content keeps its height, so it scrolls inside the frame instead of squeezing
+    let block = div().flex().flex_col().gap_2().flex_shrink_0();
     let commit = &entry.commit;
     let (date, clock) = zide_git::date_and_time(commit.time, commit.tz_minutes);
-    block
+    let content = block
         .child(
             div()
                 .font_weight(FontWeight::BOLD)
@@ -1097,7 +1115,8 @@ fn details(panel: &LogPanel) -> Div {
                 .text_xs()
                 .text_color(rgb(theme::DIM))
                 .child(format!("In {count}: {}", branches.join(", ")))
-        }))
+        }));
+    frame.child(content)
 }
 
 #[cfg(test)]
