@@ -70,6 +70,14 @@ pub fn render(
     }
     if let Some(branch) = branch {
         let (label, color) = branch_label(branch);
+        // an operation that is not finished: the reminder that it still needs a commit
+        if let Some(progress) = &branch.progress {
+            bar = bar.right(
+                div()
+                    .text_color(rgb(theme::WORKING))
+                    .child(progress.label()),
+            );
+        }
         bar = bar.right(div().text_color(rgb(color)).child(label)).right(
             div()
                 .id("branch")
@@ -112,6 +120,7 @@ mod tests {
             tracked,
             ahead,
             behind,
+            progress: None,
         };
         branch_label(&branch).0
     }

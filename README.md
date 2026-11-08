@@ -38,6 +38,23 @@ Only Linux x86_64 is published for now.
   tracking local one.
   Right-click a branch for its menu: *New Branch from…*, *Update* (fast-forward only), *Push…* (asks first, never forced)
   and *Rename* (the dialog refuses a name that already exists).
+- **Push dialog** (`Ctrl+Shift+K`, or Find Action → *Push Commits*): the commits the remote lacks on the left, the files of the
+  selected commit on the right with its message, author and date under them. `Enter` or a double click on a file opens what
+  the commit changed in it, side by side (green added, gray removed, blue replaced); `Ctrl+Enter` or **Push** pushes (never
+  forced), and *Push tags* sends the tags too.
+- **Conflict resolver** (Find Action → *Resolve Conflicts*, offered only while git reports conflicts): when a merge, rebase,
+  cherry-pick or revert stops on conflicts, a dialog lists each file with what both sides did to it. *Accept Yours* keeps
+  the current branch's version of the selected file, *Accept Theirs* the incoming one (a side that deleted the file deletes it);
+  the file is then marked resolved. *Merge…* (or a double click on the file) opens the merge editor: yours on the left, theirs on the right and the result
+  (it starts as the common ancestor) in the middle. The arrow of a change (`»` / `«`) puts it in the result — both sides go one
+  under the other — and the cross (`✕`) leaves it out; additions are green, removals gray, replacements blue and changes both
+  sides made red. The toolbar applies every non-conflicting change (`F7` / `Shift+F7` move between changes); *Apply* is enabled
+  once no conflict is left, and writes the result and marks the file resolved. The result can be typed over: click or use the
+  arrows, `Home`/`End`, type, `Enter`, `Backspace`, `Delete`, `Ctrl+V` to paste, `Ctrl+Z` to undo. Typing does not settle a
+  change: it keeps its color and arrows until its sides are applied or discarded (an arrow puts the side's lines over what was
+  typed). A line break cannot be removed where it would join two parts of the file (an empty line at the edge of a part can).
+  While a merge, rebase, cherry-pick or revert is unfinished the status bar shows it (`Merging feature-branch`); with a merge, the
+  commit panel (`Alt+2`) opens with git's message (`Merge branch 'feature-branch'`) and commits everything staged to conclude it.
 - **Minimap** at the right of the editor: every line as colored bars (folded lines are left out), the visible part
   marked, click or drag to jump. Lines added or modified since the last commit are painted green or brown, removed ones
   gray, errors red and the cursor's line blue.
@@ -124,6 +141,8 @@ the projects opened before (Enter opens one in this window) and **Open** picks a
 | `F3` / `Shift+F3` | Next / previous match |
 | `Ctrl+Shift+F` | Find in Files |
 | ``Ctrl+Shift+` `` | Switch Branch |
+| `Ctrl+Alt+A` | Add to Git: start tracking the selected file or folder in the tree (the open file elsewhere) |
+| `Ctrl+Shift+K` | Push dialog: commits to push, their files and diffs (`Tab` switches list, `Enter` opens the diff, `Ctrl+Enter` pushes) |
 | `Alt+F7` | Find Usages |
 | `gd` / `Ctrl+B` | Go to Definition |
 | `Alt+1` | Toggle project tree |

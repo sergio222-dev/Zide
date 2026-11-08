@@ -80,8 +80,10 @@ pub struct Changes {
 }
 
 impl Changes {
-    /// Takes the repository's current changes, keeping what the user ticked.
-    pub fn set_changes(&mut self, changes: Vec<FileChange>) {
+    /// Takes the repository's current changes, keeping what the user ticked. Files git does not
+    /// track are not listed: they are not part of the repository until they are added.
+    pub fn set_changes(&mut self, mut changes: Vec<FileChange>) {
+        changes.retain(|change| change.kind != ChangeKind::Untracked);
         for change in &changes {
             if self.seen.insert(change.path.clone()) {
                 self.checked.insert(change.path.clone());
@@ -322,15 +324,15 @@ fn join(path: &str, name: &str) -> String {
 
 pub(crate) fn kind_color(kind: ChangeKind) -> u32 {
     match kind {
-        // a file git does not track yet is a new file: green like the added ones
-        ChangeKind::Added | ChangeKind::Untracked => theme::OK,
+        ChangeKind::Added => theme::OK,
         ChangeKind::Modified | ChangeKind::Renamed => theme::ICON_CODE,
         ChangeKind::Deleted => theme::CHANGE_REMOVED,
-        ChangeKind::Conflicted => theme::ERROR,
+        // red: git does not track it yet (the project tree shows it; the panel does not list it)
+        ChangeKind::Conflicted | ChangeKind::Untracked => theme::ERROR,
     }
 }
 
-fn check_box(check: Check) -> Div {
+pub(crate) fn check_box(check: Check) -> Div {
     let on = check != Check::Off;
     div()
         .flex()
@@ -374,7 +376,38 @@ impl Workspace {
         }
         self.commit_open = true;
         self.refresh_commit(cx);
+        self.fill_merge_message(window, cx);
         self.focus_commit_list(window, cx);
+    }
+
+    /// While a merge is under way, an empty message starts as the one git prepared for it
+    /// (`Merge branch 'x'`).
+    fn fill_merge_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(panel) = &self.commit else {
+            return;
+        };
+        if !panel.message.read(cx).value().is_empty() {
+            return;
+        }
+        let (message, root) = (panel.message.clone(), self.root.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { zide_git::merge_message(&root) })
+                .await;
+            if let Some(text) = found {
+                this.update_in(cx, |_, window, cx| {
+                    message.update(cx, |state, cx| {
+                        // typed meanwhile: it stays
+                        if state.value().is_empty() {
+                            state.set_value(text, window, cx);
+                        }
+                    })
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// The keyboard goes to the list of files.
@@ -414,10 +447,10 @@ impl Workspace {
         let in_panel = self.commit_open
             && (self.commit_focused(window, cx)
                 || self.commit.as_ref().is_some_and(|panel| panel.list_focused));
-        let ready = self
-            .commit
-            .as_ref()
-            .is_some_and(|panel| !panel.busy && panel.changes.ticked() > 0 || panel.amend);
+        let merging = self.merging();
+        let ready = self.commit.as_ref().is_some_and(|panel| {
+            !panel.busy && (panel.changes.ticked() > 0 || merging) || panel.amend
+        });
         if in_panel && ready {
             self.commit_selected(false, cx);
         }
@@ -513,6 +546,10 @@ impl Workspace {
                 .spawn(async move { zide_git::changes(&root) })
                 .await;
             this.update(cx, |this, cx| {
+                let conflicted = |status: &std::collections::HashMap<_, _>| {
+                    status.values().any(|kind| *kind == ChangeKind::Conflicted)
+                };
+                let before = conflicted(&this.git_status);
                 this.git_status = Arc::new(
                     changes
                         .iter()
@@ -521,6 +558,10 @@ impl Workspace {
                 );
                 if let Some(panel) = &mut this.commit {
                     panel.changes.set_changes(changes);
+                }
+                // the actions on offer depend on it (Resolve Conflicts only shows with conflicts)
+                if this.popup.is_some() && before != conflicted(&this.git_status) {
+                    this.search_again(cx);
                 }
                 cx.notify();
             })
@@ -579,8 +620,20 @@ impl Workspace {
         );
     }
 
+    /// A merge is under way: committing concludes it, whether or not any file is listed (the
+    /// merge may leave nothing to change).
+    fn merging(&self) -> bool {
+        self.branch.as_ref().is_some_and(|branch| {
+            branch
+                .progress
+                .as_ref()
+                .is_some_and(|progress| progress.operation == zide_git::Operation::Merge)
+        })
+    }
+
     pub(crate) fn commit_view(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let workspace = cx.entity();
+        let merging = self.merging();
         let panel = self.commit.as_ref().expect("the panel is open");
         let rows = panel.changes.rows();
         let (count, ticked, amend, busy) = (
@@ -591,7 +644,7 @@ impl Workspace {
         );
         let message = panel.message.clone();
         let scroll = panel.scroll.clone();
-        let can_commit = !busy && ticked > 0 || amend;
+        let can_commit = !busy && (ticked > 0 || merging) || amend;
         let selected = panel.changes.selected_row().map(|row| row.key);
         let list_focused = panel.list_focused;
 
@@ -926,9 +979,22 @@ mod tests {
         changes.toggle_check(".atl");
         changes.set_changes(vec![
             change(".atl/a.json", ChangeKind::Modified),
-            change("new.rs", ChangeKind::Untracked),
+            change("new.rs", ChangeKind::Added),
         ]);
         assert_eq!(changes.paths(), ["new.rs"]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn files_git_does_not_track_are_not_listed_to_commit() {
+        let mut changes = Changes::default();
+        changes.set_changes(vec![
+            change("kept.rs", ChangeKind::Modified),
+            change("loose.rs", ChangeKind::Untracked),
+        ]);
+        assert_eq!(changes.count(), 1);
+        assert_eq!(changes.paths(), ["kept.rs"]);
+        assert!(changes.change("loose.rs").is_none());
+        assert_eq!(kind_color(ChangeKind::Untracked), theme::ERROR);
     }
 
     #[::core::prelude::v1::test]

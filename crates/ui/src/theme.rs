@@ -40,6 +40,13 @@ pub const CHANGE_ADDED: u32 = 0x4f9a56;
 pub const CHANGE_MODIFIED: u32 = 0x9a7040;
 pub const CHANGE_REMOVED: u32 = 0x7d848f;
 
+/// The diff of a file: lines added, removed and replaced (blue, on both sides).
+pub const DIFF_ADDED: u32 = 0x2b4a38;
+pub const DIFF_REMOVED: u32 = 0x3a3d44;
+pub const DIFF_CHANGED: u32 = 0x2a4163;
+/// Lines both sides changed, in the merge editor.
+pub const DIFF_CONFLICT: u32 = 0x4a3030;
+
 /// The minimap: the line of the cursor.
 pub const MINIMAP_CURSOR: u32 = 0x3b82f6;
 

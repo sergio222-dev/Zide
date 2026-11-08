@@ -571,7 +571,7 @@ impl Workspace {
         .detach();
     }
 
-    fn focus_active_chat(&self, window: &mut Window, cx: &mut App) {
+    pub(super) fn focus_active_chat(&self, window: &mut Window, cx: &mut App) {
         if let Some(chats) = &self.claude {
             let chat = chats.active();
             chat.input.update(cx, |state, cx| state.focus(window, cx));

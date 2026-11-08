@@ -17,6 +17,7 @@ use std::{
 mod branches;
 mod chat;
 mod commit;
+mod conflicts;
 mod definition;
 mod diff_view;
 mod file_icon;
@@ -24,10 +25,12 @@ mod fileops;
 mod indent;
 mod layout;
 mod markdown;
+mod merge_editor;
 mod meter;
 mod minimap;
 mod nav;
 mod projects;
+mod push;
 mod rows;
 mod session;
 mod statusbar;
@@ -82,6 +85,7 @@ actions!(
         RecentFiles,
         ToggleProjectTree,
         RevealOpenFile,
+        AddToGit,
         ToggleClaudeChat,
         ToggleCommitPanel,
         CommitNow,
@@ -91,6 +95,7 @@ actions!(
         FindUsages,
         GoToDefinition,
         SwitchBranch,
+        PushCommits,
         ReformatCode,
         ExtendSelection,
         FocusTree,
@@ -160,6 +165,8 @@ struct ActionDef {
     /// For a setting that is switched on and off: whether it is on. The row shows it, and
     /// running the command flips it.
     state: Option<fn(&Workspace) -> bool>,
+    /// Offered only while git reports conflicts.
+    only_when_conflicted: bool,
     run: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
 }
 
@@ -170,6 +177,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["find files", "open file"],
             action: Some(Box::new(GoToFile)),
             closes_popup: false,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.show_tab(Tab::Files, cx),
         },
@@ -178,6 +186,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["format", "beautify", "prettify", "indent"],
             action: Some(Box::new(ReformatCode)),
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.reformat(cx),
         },
@@ -186,14 +195,25 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["declaration", "gd", "jump to definition", "goto definition"],
             action: Some(Box::new(GoToDefinition)),
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.go_to_definition(cx),
+        },
+        ActionDef {
+            name: "Push Commits",
+            synonyms: &["push", "publish", "git", "outgoing", "upload"],
+            action: Some(Box::new(PushCommits)),
+            closes_popup: true,
+            only_when_conflicted: false,
+            state: None,
+            run: |ws, window, cx| ws.toggle_push(window, cx),
         },
         ActionDef {
             name: "Switch Branch",
             synonyms: &["branches", "checkout", "git", "change branch"],
             action: Some(Box::new(SwitchBranch)),
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, window, cx| ws.open_branches(window, cx),
         },
@@ -202,6 +222,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["references", "occurrences", "where used"],
             action: Some(Box::new(FindUsages)),
             closes_popup: false,
+            only_when_conflicted: false,
             state: None,
             run: |ws, window, cx| ws.find_usages(window, cx),
         },
@@ -210,6 +231,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["file explorer", "project view", "sidebar"],
             action: Some(Box::new(ToggleProjectTree)),
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, window, cx| ws.toggle_tree(window, cx),
         },
@@ -218,6 +240,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["commit", "git", "changes", "stage"],
             action: Some(Box::new(ToggleCommitPanel)),
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, window, cx| ws.toggle_commit(window, cx),
         },
@@ -226,14 +249,41 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["reveal", "locate", "scroll to file", "show in tree"],
             action: Some(Box::new(RevealOpenFile)),
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.reveal_open_file(cx),
+        },
+        ActionDef {
+            name: "Resolve Conflicts",
+            synonyms: &[
+                "merge",
+                "conflict",
+                "conflicts",
+                "rebase",
+                "theirs",
+                "yours",
+            ],
+            action: None,
+            closes_popup: true,
+            only_when_conflicted: true,
+            state: None,
+            run: |ws, window, cx| ws.open_conflicts(window, cx),
+        },
+        ActionDef {
+            name: "Add to Git",
+            synonyms: &["track", "stage", "git add", "vcs"],
+            action: Some(Box::new(AddToGit)),
+            closes_popup: true,
+            only_when_conflicted: false,
+            state: None,
+            run: |ws, _, cx| ws.add_to_git(cx),
         },
         ActionDef {
             name: "Toggle Claude Chat",
             synonyms: &["claude", "ai", "assistant", "chat"],
             action: Some(Box::new(ToggleClaudeChat)),
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, window, cx| ws.toggle_claude(window, cx),
         },
@@ -242,6 +292,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["claude", "history", "sessions", "continue", "resume"],
             action: None,
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, window, cx| ws.claude_history(window, cx),
         },
@@ -250,6 +301,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["claude", "test", "minimal", "cheap", "bare"],
             action: None,
             closes_popup: false,
+            only_when_conflicted: false,
             state: Some(|ws| ws.claude_bare),
             run: |ws, _, cx| {
                 ws.claude_bare = !ws.claude_bare;
@@ -261,6 +313,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["claude", "new", "clear", "session"],
             action: None,
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, window, cx| ws.claude_new(window, cx),
         },
@@ -269,6 +322,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["markdown", "md", "render"],
             action: Some(Box::new(ToggleMarkdownPreview)),
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.toggle_md_preview(cx),
         },
@@ -277,6 +331,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["previous location", "go back", "history"],
             action: Some(Box::new(NavigateBack)),
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.navigate(true, cx),
         },
@@ -285,6 +340,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["next location", "go forward", "history"],
             action: Some(Box::new(NavigateForward)),
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.navigate(false, cx),
         },
@@ -293,6 +349,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["recent", "history", "switcher"],
             action: Some(Box::new(RecentFiles)),
             closes_popup: false,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.show_tab(Tab::Recent, cx),
         },
@@ -301,6 +358,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["symbols", "function", "class", "method"],
             action: Some(Box::new(GoToSymbol)),
             closes_popup: false,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.show_tab(Tab::Symbols, cx),
         },
@@ -309,6 +367,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["commands", "actions"],
             action: Some(Box::new(FindAction)),
             closes_popup: false,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.show_tab(Tab::Actions, cx),
         },
@@ -317,6 +376,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["search in file", "find in editor"],
             action: Some(Box::new(FindInFile)),
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, window, cx| ws.open_find(false, window, cx),
         },
@@ -325,6 +385,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["find and replace", "substitute"],
             action: Some(Box::new(ReplaceInFile)),
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, window, cx| ws.open_find(true, window, cx),
         },
@@ -333,6 +394,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["grep", "ripgrep", "search text"],
             action: Some(Box::new(FindInFiles)),
             closes_popup: false,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.show_tab(Tab::Text, cx),
         },
@@ -341,6 +403,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["next tab"],
             action: Some(Box::new(SwitchTab)),
             closes_popup: false,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.switch_tab(cx),
         },
@@ -349,6 +412,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["regular expression"],
             action: Some(Box::new(ToggleRegex)),
             closes_popup: false,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.toggle_text_option(|o| o.regex = !o.regex, cx),
         },
@@ -357,6 +421,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["case sensitive"],
             action: Some(Box::new(ToggleCase)),
             closes_popup: false,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.toggle_text_option(|o| o.case_sensitive = !o.case_sensitive, cx),
         },
@@ -365,6 +430,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["words"],
             action: Some(Box::new(ToggleWord)),
             closes_popup: false,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.toggle_text_option(|o| o.whole_word = !o.whole_word, cx),
         },
@@ -373,6 +439,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["rescan", "refresh", "reindex"],
             action: None,
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.rescan(cx),
         },
@@ -381,6 +448,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["upgrade", "check for updates", "new version"],
             action: None,
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |_, _, cx| cx.emit(UpdateRequested),
         },
@@ -389,6 +457,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["open project", "open folder", "switch project"],
             action: None,
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |_, _, cx| cx.emit(OpenRequested),
         },
@@ -397,6 +466,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["open recent", "switch project", "projects", "history"],
             action: None,
             closes_popup: false,
+            only_when_conflicted: false,
             state: None,
             run: |ws, _, cx| ws.show_tab(Tab::Projects, cx),
         },
@@ -411,6 +481,7 @@ fn action_registry() -> Vec<ActionDef> {
             ],
             action: None,
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |_, _, cx| cx.emit(CloseRequested),
         },
@@ -419,6 +490,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["exit", "close ide"],
             action: None,
             closes_popup: true,
+            only_when_conflicted: false,
             state: None,
             run: |_, _, cx| cx.quit(),
         },
@@ -427,6 +499,7 @@ fn action_registry() -> Vec<ActionDef> {
             synonyms: &["minimap", "overview", "map", "hide minimap"],
             action: None,
             closes_popup: false,
+            only_when_conflicted: false,
             state: Some(|ws| ws.minimap),
             run: |ws, _, cx| ws.toggle_minimap(cx),
         },
@@ -570,6 +643,11 @@ struct Workspace {
     branch: Option<zide_git::BranchStatus>,
     /// The branch switcher, while it is open.
     branches: Option<branches::BranchPopup>,
+    /// The push dialog (Ctrl+Shift+K), while it is open.
+    push: Option<push::PushPopup>,
+    /// The conflict resolver, while it is open.
+    conflicts: Option<conflicts::ConflictsPopup>,
+    merge: Option<merge_editor::MergeEditor>,
     /// The rendered Markdown beside the editor (Ctrl+Shift+M), for `.md` files.
     md_preview: bool,
     md: Option<MdPreview>,
@@ -695,7 +773,15 @@ impl Workspace {
         let this = cx.weak_entity();
         let claude_keys = cx.intercept_keystrokes(move |event, window, cx| {
             this.update(cx, |this, cx| {
-                if this.claude_open && this.popup.is_none() && this.branches.is_none() {
+                // the popups and dialogs over the chat own the keys (Esc closes them, not the chat)
+                if this.claude_open
+                    && this.popup.is_none()
+                    && this.branches.is_none()
+                    && this.push.is_none()
+                    && this.conflicts.is_none()
+                    && this.merge.is_none()
+                    && !window.has_active_dialog(cx)
+                {
                     this.claude_key(&event.keystroke, window, cx);
                 }
             })
@@ -723,6 +809,9 @@ impl Workspace {
             git_status: Arc::default(),
             branch: None,
             branches: None,
+            push: None,
+            conflicts: None,
+            merge: None,
             md_preview: false,
             md: None,
             nav: nav::NavHistory::default(),
@@ -917,6 +1006,28 @@ impl Workspace {
 
     /// Asks git, off the UI thread, who last changed each line of the open file and what the last
     /// commit had, to mark the lines that differ.
+    /// The window got the focus: git may have changed while it was away (a commit, checkout,
+    /// merge or conflict in a terminal), and its watcher does not report the `.git` folder.
+    fn refresh_on_focus(&mut self, cx: &mut Context<Self>) {
+        self.refresh_commit(cx); // the changes, the tree's colors, the conflict check
+        self.refresh_git(cx); // the gutter compares with HEAD
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move { zide_git::branch_status(&root) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.branch != status {
+                    this.branch = status;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.viewer.as_ref().map(|viewer| viewer.path().to_string()) else {
             return;
@@ -951,6 +1062,9 @@ impl Workspace {
 
     fn open_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.autosave(cx);
+        self.refresh_commit(cx); // what git says now, for the actions that depend on it
+        self.push = None;
+        self.conflicts = None;
         let input = cx.new(|cx| InputState::new(window, cx));
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -2395,6 +2509,8 @@ impl Workspace {
     /// Opens the branch switcher (the status bar's branch, or the Switch Branch action).
     fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.popup = None;
+        self.push = None;
+        self.conflicts = None;
         self.cancel_running_search();
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search for branches"));
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
@@ -2861,7 +2977,16 @@ impl Workspace {
             }
             Tab::Projects => {}
             Tab::Actions => {
-                popup.actions = Arc::new(search_actions(&self.action_texts, &query, usize::MAX));
+                let conflicted = self
+                    .git_status
+                    .values()
+                    .any(|kind| *kind == zide_git::ChangeKind::Conflicted);
+                let hits = search_actions(&self.action_texts, &query, usize::MAX);
+                popup.actions = Arc::new(
+                    hits.into_iter()
+                        .filter(|hit| conflicted || !self.registry[hit.index].only_when_conflicted)
+                        .collect(),
+                );
                 popup.select(0);
                 cx.notify();
             }
@@ -3145,6 +3270,7 @@ impl Workspace {
                 }),
             )
             .on_action(cx.listener(|this, _: &RevealOpenFile, _, cx| this.reveal_open_file(cx)))
+            .on_action(cx.listener(|this, _: &AddToGit, _, cx| this.add_to_git(cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleClaudeChat, window, cx| {
                     this.toggle_claude(window, cx)
@@ -3168,6 +3294,9 @@ impl Workspace {
             .on_action(
                 cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)),
             )
+            .on_action(
+                cx.listener(|this, _: &PushCommits, window, cx| this.toggle_push(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ReformatCode, _, cx| this.reformat(cx)))
             .on_action(
                 cx.listener(|this, _: &FocusTree, window, cx| this.focus_tree(true, window, cx)),
@@ -3190,7 +3319,9 @@ impl Workspace {
                 cx.listener(|this, _: &PreviousMethod, _, cx| this.jump_to_method(false, cx)),
             )
             .on_action(cx.listener(|this, _: &SwitchTab, window, cx| {
-                if this.popup.is_some() {
+                if this.push.is_some() {
+                    this.push_switch_pane(cx);
+                } else if this.popup.is_some() {
                     this.switch_tab(cx);
                 } else {
                     this.commit_tab(window, cx);
@@ -3215,6 +3346,15 @@ impl Workspace {
                     return;
                 }
                 this.diff_open = false;
+                if this.merge.is_some() {
+                    return this.merge_key(event, window, cx);
+                }
+                if this.conflicts.is_some() {
+                    return this.conflicts_key(event, window, cx);
+                }
+                if this.push.is_some() {
+                    return this.push_key(event, window, cx);
+                }
                 if this.branches.is_some() {
                     return this.branches_key(event, window, cx);
                 }
@@ -3335,6 +3475,15 @@ impl Workspace {
             ));
         if let Some(branches) = &self.branches {
             root = root.child(branches::render(branches, cx));
+        }
+        if self.push.is_some() {
+            root = root.child(self.push_view(cx));
+        }
+        if self.conflicts.is_some() {
+            root = root.child(self.conflicts_view(cx));
+        }
+        if self.merge.is_some() {
+            root = root.child(self.merge_view(cx));
         }
 
         let Some(popup) = &self.popup else {
@@ -4163,14 +4312,17 @@ impl Shell {
         workspace.update(cx, |workspace, cx| workspace.restore_layout(window, cx));
         let saver = workspace.downgrade();
         self._activation = Some(cx.observe_window_activation(window, move |_, window, cx| {
-            if !window.is_window_active() {
-                saver
-                    .update(cx, |this, cx| {
+            let active = window.is_window_active();
+            saver
+                .update(cx, |this, cx| {
+                    if active {
+                        this.refresh_on_focus(cx);
+                    } else {
                         this.autosave(cx);
                         cx.notify();
-                    })
-                    .ok();
-            }
+                    }
+                })
+                .ok();
         }));
         self._workspace_requests = vec![
             cx.subscribe(&workspace, |this, _, _: &UpdateRequested, cx| {
@@ -4235,22 +4387,25 @@ impl Render for Shell {
 /// notifications and the rest look like the popup they sit in instead of the library's own dark.
 /// These colors are only read by the components, never by Zide's own elements.
 fn apply_palette(cx: &mut App) {
-    let theme = gpui_kit::component::Theme::global_mut(cx);
-    // the bundled default (`.SystemUIFont`) showed no bold; naming the family finds its bold face
-    theme.font_family = "Noto Sans".into();
-    let colors = &mut theme.colors;
-    // background and text
-    colors.popover = rgb(theme::POPUP).into();
-    colors.popover_foreground = rgb(theme::TEXT).into();
-    // the selected row, like the active tab chip
-    colors.accent = rgb(theme::ACTIVE_BG).into();
-    colors.accent_foreground = rgb(theme::STRONG).into();
-    // the diff dialog: the editor's background, with Zide's green and red for what changed
-    colors.background = rgb(theme::BACKGROUND).into();
-    colors.success = rgb(theme::OK).into();
-    colors.danger = rgb(theme::ERROR).into();
-    // shortcuts, paths, hints
-    colors.muted_foreground = rgb(theme::MUTED).into();
+    // `update` (not `global_mut`) keeps the theme's tokens in step: the dialogs paint their
+    // surface from them
+    gpui_kit::component::Theme::update(cx, |theme| {
+        // the bundled default (`.SystemUIFont`) showed no bold; naming the family finds its bold face
+        theme.font_family = "Noto Sans".into();
+        let colors = &mut theme.colors;
+        // background and text
+        colors.popover = rgb(theme::POPUP).into();
+        colors.popover_foreground = rgb(theme::TEXT).into();
+        // the selected row, like the active tab chip
+        colors.accent = rgb(theme::ACTIVE_BG).into();
+        colors.accent_foreground = rgb(theme::STRONG).into();
+        // the diff dialog: the editor's background, with Zide's green and red for what changed
+        colors.background = rgb(theme::BACKGROUND).into();
+        colors.success = rgb(theme::OK).into();
+        colors.danger = rgb(theme::ERROR).into();
+        // shortcuts, paths, hints
+        colors.muted_foreground = rgb(theme::MUTED).into();
+    });
 }
 
 fn main() {
@@ -4281,6 +4436,7 @@ fn main() {
             KeyBinding::new("shift-f3", FindPrevious, Some("Workspace")),
             KeyBinding::new("ctrl-shift-f", FindInFiles, Some("Workspace")),
             KeyBinding::new("ctrl-shift-`", SwitchBranch, Some("Workspace")),
+            KeyBinding::new("ctrl-shift-k", PushCommits, Some("Workspace")),
             // some layouts report Shift+` as the shifted character
             KeyBinding::new("ctrl-~", SwitchBranch, Some("Workspace")),
             KeyBinding::new("ctrl-shift-~", SwitchBranch, Some("Workspace")),
@@ -4290,6 +4446,7 @@ fn main() {
             // some layouts report Shift+` as the shifted character
             KeyBinding::new("alt-~", RevealOpenFile, Some("Workspace")),
             KeyBinding::new("alt-shift-~", RevealOpenFile, Some("Workspace")),
+            KeyBinding::new("ctrl-alt-a", AddToGit, Some("Workspace")),
             KeyBinding::new("alt-2", ToggleCommitPanel, Some("Workspace")),
             KeyBinding::new("alt-enter", CommitNow, Some("Workspace")),
             KeyBinding::new("alt-3", ToggleClaudeChat, Some("Workspace")),

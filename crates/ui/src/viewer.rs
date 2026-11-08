@@ -43,7 +43,7 @@ pub const DEFAULT_FONT_SIZE: f32 = 16.;
 pub const MIN_FONT_SIZE: f32 = 8.;
 pub const MAX_FONT_SIZE: f32 = 48.;
 /// Monospace families, in order of preference. GPUI does not resolve the generic `monospace`.
-const EDITOR_FONTS: &[&str] = &[
+pub(crate) const EDITOR_FONTS: &[&str] = &[
     "JetBrains Mono",
     "Iosevka Nerd Font Mono",
     "0xProto Nerd Font Mono",
