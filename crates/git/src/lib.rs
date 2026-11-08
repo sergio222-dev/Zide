@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use similar::{Algorithm, DiffOp, TextDiff};
 
+pub mod commit_ops;
 pub mod log;
 pub mod merge;
 mod options;

@@ -2,6 +2,7 @@
 //! selected commit on the right with the commit's details under them. Enter or a double click on
 //! a file shows what the commit changed in it; Ctrl+Enter (or the button) pushes.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -602,10 +603,10 @@ fn file_list(popup: &PushPopup, root: &str, workspace: &Entity<Workspace>) -> An
     changed_files::list(
         "push-files",
         Arc::new(popup.file_rows(root)),
-        popup.file,
+        Arc::new(HashSet::from([popup.file])),
         popup.pane == Pane::Files,
         &popup.file_scroll,
-        move |index, clicks, window, cx| {
+        move |index, clicks, _, window, cx| {
             workspace.update(cx, |this, cx| {
                 if let Some(popup) = &mut this.push {
                     popup.pane = Pane::Files;
@@ -617,6 +618,7 @@ fn file_list(popup: &PushPopup, root: &str, workspace: &Entity<Workspace>) -> An
                 cx.notify();
             })
         },
+        None,
     )
 }
 

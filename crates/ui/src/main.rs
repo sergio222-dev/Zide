@@ -2722,6 +2722,7 @@ impl Workspace {
                         this.refresh_git(cx); // the gutter compares with the new HEAD
                         this.branch = status;
                         this.rescan(cx);
+                        this.reload_log(cx);
                         if let Some(done) = done {
                             this.notify(Notification::success(done), cx);
                         }
@@ -2729,6 +2730,10 @@ impl Workspace {
                     }
                     Err(why) => {
                         this.commit_finished(false, cx);
+                        // a cherry-pick that clashes leaves the repository half way
+                        this.refresh_git(cx);
+                        this.branch = status;
+                        this.reload_log(cx);
                         this.notify(Notification::error(why).title(failure), cx)
                     }
                 }
@@ -2801,7 +2806,8 @@ impl Workspace {
         match action {
             A::NewFrom(start) => {
                 let from = start.clone();
-                self.ask_branch_name(
+                self.ask_name(
+                    branches::NameKind::Branch,
                     "New Branch",
                     "Create",
                     String::new(),
@@ -2824,7 +2830,8 @@ impl Workspace {
             }
             A::Rename(old) => {
                 let initial = old.clone();
-                self.ask_branch_name(
+                self.ask_name(
+                    branches::NameKind::Branch,
                     "Rename Branch",
                     "Rename",
                     initial,
@@ -2857,10 +2864,11 @@ impl Workspace {
         }
     }
 
-    /// Asks for a branch name in a dialog, and runs `then` with it when it is a good one.
+    /// Asks for a branch or tag name in a dialog, and runs `then` with it when it is a good one.
     #[allow(clippy::too_many_arguments)]
-    fn ask_branch_name(
+    fn ask_name(
         &mut self,
+        kind: branches::NameKind,
         title: &'static str,
         ok_text: &'static str,
         initial: String,
@@ -2870,7 +2878,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let root = self.root.clone();
-        let view = cx.new(|cx| branches::NameDialog::new(root, existing, &initial, window, cx));
+        let view =
+            cx.new(|cx| branches::NameDialog::new(kind, root, existing, &initial, window, cx));
         let workspace = cx.entity();
         let then = std::rc::Rc::new(then);
         let first = std::cell::Cell::new(true);

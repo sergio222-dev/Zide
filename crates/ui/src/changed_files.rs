@@ -1,6 +1,8 @@
 //! The files a commit changed, as the push dialog and the log tab list them: grouped under a
 //! line for each folder, colored by what happened to them.
 
+use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::Icon;
@@ -13,6 +15,62 @@ use crate::commit::kind_color;
 use crate::{file_icon, theme};
 
 const ROW_HEIGHT: f32 = 24.;
+
+/// The files picked in a list, as a file manager does: a plain click picks one, Ctrl+click adds
+/// or drops one, Shift picks the range from the last plain click.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Picks {
+    /// The file the cursor is on.
+    pub cursor: usize,
+    /// Where a Shift range starts.
+    anchor: usize,
+    /// The files picked with Ctrl or Shift; empty while only the cursor's is.
+    marked: HashSet<usize>,
+}
+
+impl Picks {
+    /// Every file that is picked.
+    pub fn picked(&self) -> HashSet<usize> {
+        if self.marked.is_empty() {
+            HashSet::from([self.cursor])
+        } else {
+            self.marked.clone()
+        }
+    }
+
+    pub fn click(&mut self, index: usize, ctrl: bool, shift: bool) {
+        if shift {
+            self.marked = (self.anchor.min(index)..=self.anchor.max(index)).collect();
+        } else if ctrl {
+            let mut picked = self.picked();
+            if !picked.remove(&index) {
+                picked.insert(index);
+            }
+            self.marked = picked;
+            self.anchor = index;
+        } else {
+            self.marked.clear();
+            self.anchor = index;
+        }
+        self.cursor = index;
+    }
+
+    /// The cursor goes to `to`; with `extend` the files it passes over are picked too.
+    pub fn move_to(&mut self, to: usize, extend: bool) {
+        if extend {
+            self.marked = (self.anchor.min(to)..=self.anchor.max(to)).collect();
+        } else {
+            self.marked.clear();
+            self.anchor = to;
+        }
+        self.cursor = to;
+    }
+
+    /// Picks or drops the file under the cursor, keeping the others.
+    pub fn toggle(&mut self) {
+        self.click(self.cursor, true, false);
+    }
+}
 
 /// A line of the files list: a folder that holds files, or one of its files.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,15 +127,20 @@ pub fn rows(list: &[FileChange], root: &str) -> Vec<FileRow> {
     rows
 }
 
-/// The list: `selected` is the file highlighted (brighter when `focused`), and `on_click` gets
-/// the file clicked and how many clicks in a row it was.
+/// Asked for the menu of a file: which one, and where the mouse is.
+pub type OnMenu = Rc<dyn Fn(usize, Point<Pixels>, &mut Window, &mut App)>;
+
+/// The list: `selected` are the files highlighted (brighter when `focused`), `on_click` gets the
+/// file clicked, how many clicks in a row it was and the modifier keys held, and `on_menu`, when
+/// there is one, is called by a right click.
 pub fn list(
     id: &'static str,
     rows: Arc<Vec<FileRow>>,
-    selected: usize,
+    selected: Arc<HashSet<usize>>,
     focused: bool,
     scroll: &UniformListScrollHandle,
-    on_click: impl Fn(usize, usize, &mut Window, &mut App) + Clone + 'static,
+    on_click: impl Fn(usize, usize, Modifiers, &mut Window, &mut App) + Clone + 'static,
+    on_menu: Option<OnMenu>,
 ) -> AnyElement {
     div()
         .relative()
@@ -111,9 +174,10 @@ pub fn list(
                             FileRow::File { index, name, kind } => {
                                 let index = *index;
                                 let on_click = on_click.clone();
+                                let on_menu = on_menu.clone();
                                 let (icon, color) = file_icon::for_row(name, false, false);
                                 row.pl(px(32.))
-                                    .when(index == selected, |row| {
+                                    .when(selected.contains(&index), |row| {
                                         row.bg(rgb(if focused {
                                             theme::TREE_FOCUSED
                                         } else {
@@ -122,7 +186,21 @@ pub fn list(
                                     })
                                     .cursor_pointer()
                                     .on_click(move |event, window, cx| {
-                                        on_click(index, event.click_count(), window, cx)
+                                        on_click(
+                                            index,
+                                            event.click_count(),
+                                            event.modifiers(),
+                                            window,
+                                            cx,
+                                        )
+                                    })
+                                    .when_some(on_menu, |row, on_menu| {
+                                        row.on_mouse_down(
+                                            MouseButton::Right,
+                                            move |event, window, cx| {
+                                                on_menu(index, event.position, window, cx)
+                                            },
+                                        )
                                     })
                                     .child(Icon::new(icon).size_4().text_color(rgb(color)))
                                     .child(
@@ -147,7 +225,7 @@ pub fn list(
 mod tests {
     use zide_git::{ChangeKind, FileChange};
 
-    use super::{FileRow, plural, rows, sort};
+    use super::{FileRow, Picks, plural, rows, sort};
 
     fn change(path: &str, kind: ChangeKind) -> FileChange {
         FileChange {
@@ -191,5 +269,50 @@ mod tests {
     fn the_counts_read_in_singular_and_plural() {
         assert_eq!(plural(1, "file"), "1 file");
         assert_eq!(plural(3, "commit"), "3 commits");
+    }
+
+    fn picked(picks: &Picks) -> Vec<usize> {
+        let mut all: Vec<usize> = picks.picked().into_iter().collect();
+        all.sort_unstable();
+        all
+    }
+
+    #[::core::prelude::v1::test]
+    fn ctrl_click_adds_and_drops_files_and_a_plain_click_starts_over() {
+        let mut picks = Picks::default();
+        picks.click(2, false, false);
+        assert_eq!(picked(&picks), [2]);
+        picks.click(5, true, false); // keeps the one the cursor was on
+        assert_eq!(picked(&picks), [2, 5]);
+        picks.click(2, true, false);
+        assert_eq!(picked(&picks), [5]);
+        picks.click(7, false, false);
+        assert_eq!((picked(&picks), picks.cursor), (vec![7], 7));
+    }
+
+    #[::core::prelude::v1::test]
+    fn shift_picks_the_range_from_the_last_plain_click_whichever_way_it_goes() {
+        let mut picks = Picks::default();
+        picks.click(3, false, false);
+        picks.click(6, false, true);
+        assert_eq!(picked(&picks), [3, 4, 5, 6]);
+        picks.click(1, false, true); // the anchor stays
+        assert_eq!(picked(&picks), [1, 2, 3]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn shift_with_the_arrows_extends_and_moving_without_it_drops_the_range() {
+        let mut picks = Picks::default();
+        picks.move_to(1, false);
+        picks.move_to(2, true);
+        picks.move_to(3, true);
+        assert_eq!(picked(&picks), [1, 2, 3]);
+        picks.move_to(4, false);
+        assert_eq!((picked(&picks), picks.cursor), (vec![4], 4));
+        picks.toggle(); // the only one picked: dropping it leaves none marked, the cursor's stays
+        picks.move_to(6, false);
+        picks.toggle();
+        picks.move_to(8, false);
+        assert_eq!(picked(&picks), [8]);
     }
 }

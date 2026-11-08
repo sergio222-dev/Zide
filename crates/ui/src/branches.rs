@@ -545,7 +545,15 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
 
 /// The content of the dialogs that ask for a branch name: the field, and why the name typed is
 /// not good (it exists, or git does not take it).
+/// What the name asked for is the name of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameKind {
+    Branch,
+    Tag,
+}
+
 pub struct NameDialog {
+    kind: NameKind,
     input: Entity<InputState>,
     error: Option<String>,
     root: PathBuf,
@@ -556,6 +564,7 @@ pub struct NameDialog {
 
 impl NameDialog {
     pub fn new(
+        kind: NameKind,
         root: PathBuf,
         existing: Vec<String>,
         initial: &str,
@@ -570,6 +579,7 @@ impl NameDialog {
             }
         });
         Self {
+            kind,
             input,
             error: None,
             root,
@@ -588,7 +598,12 @@ impl NameDialog {
 
     fn validate(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let name = self.typed(cx);
-        self.error = zide_git::check_new_branch_name(&self.root, &name, &self.existing).err();
+        self.error = match self.kind {
+            NameKind::Branch => {
+                zide_git::check_new_branch_name(&self.root, &name, &self.existing).err()
+            }
+            NameKind::Tag => zide_git::commit_ops::check_new_tag_name(&self.root, &name).err(),
+        };
         cx.notify();
         self.error.is_none().then_some(name)
     }
@@ -610,7 +625,10 @@ impl Render for NameDialog {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child("Branch Name:")
+                    .child(match self.kind {
+                        NameKind::Branch => "Branch Name:",
+                        NameKind::Tag => "Tag Name:",
+                    })
                     .child(div().flex_1().child(Input::new(&self.input))),
             )
             .children(
