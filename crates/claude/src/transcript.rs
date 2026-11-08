@@ -101,8 +101,11 @@ pub enum Block {
 pub struct Transcript {
     blocks: Vec<Block>,
     session_id: Option<String>,
-    turn_open: bool,
+    /// Messages sent that have no result yet: the first is being answered, the rest wait.
+    turns: usize,
     alive: bool,
+    /// The CLI is compacting the conversation.
+    compacting: bool,
     usage: Option<Usage>,
     context_window: Option<u64>,
     cost_usd: f64,
@@ -116,8 +119,9 @@ impl Default for Transcript {
         Transcript {
             blocks: Vec::new(),
             session_id: None,
-            turn_open: false,
+            turns: 0,
             alive: true,
+            compacting: false,
             usage: None,
             context_window: None,
             cost_usd: 0.0,
@@ -161,6 +165,11 @@ impl Transcript {
     }
 
     /// How many tokens the model's context holds, once a turn has said so.
+    /// Whether the conversation is being compacted right now.
+    pub fn compacting(&self) -> bool {
+        self.compacting
+    }
+
     pub fn context_window(&self) -> Option<u64> {
         self.context_window
     }
@@ -179,19 +188,25 @@ impl Transcript {
             Status::Inactive
         } else if self.blocks.iter().any(is_pending) {
             Status::NeedsUser
-        } else if self.turn_open {
+        } else if self.turns > 0 {
             Status::Working
         } else {
             Status::Idle
         }
     }
 
-    /// Records what the user sent, which the stream does not echo back, and opens the turn.
+    /// Records what the user sent, which the stream does not echo back, and opens a turn. A
+    /// message sent while another is being answered waits its turn: the CLI queues it.
     /// Sending means there is a live process, even when an earlier one had exited.
     pub fn user_message(&mut self, text: &str) {
         self.push_user(text);
-        self.turn_open = true;
+        self.turns += 1;
         self.alive = true;
+    }
+
+    /// How many sent messages wait for the one being answered.
+    pub fn queued(&self) -> usize {
+        self.turns.saturating_sub(1)
     }
 
     /// A message from a stored conversation: shown, but it opens no turn.
@@ -258,6 +273,7 @@ impl Transcript {
                     });
                 }
             }
+            Event::Compacting(on) => self.compacting = on,
             Event::Usage(usage) => self.usage = Some(usage),
             Event::ContextWindow(tokens) => self.context_window = Some(tokens),
             // account-wide, so the workspace keeps it, not a conversation
@@ -288,7 +304,8 @@ impl Transcript {
                 cost_usd,
                 terminal_reason,
             } => {
-                self.turn_open = false;
+                self.turns = self.turns.saturating_sub(1);
+                self.compacting = false;
                 self.cost_usd = cost_usd;
                 self.cancel_pending();
                 // Local commands (`/context`, `/cost`) answer without streaming: the result
@@ -314,7 +331,7 @@ impl Transcript {
             }
             Event::Exit => {
                 self.alive = false;
-                self.turn_open = false;
+                self.turns = 0;
                 self.cancel_pending();
             }
         }
@@ -399,6 +416,18 @@ mod tests {
         t.apply(done());
         assert_eq!(t.status(), Status::Idle);
         assert_eq!(t.cost_usd(), 0.25);
+    }
+
+    #[test]
+    fn a_message_sent_mid_turn_waits_and_the_turn_ends_with_the_last_result() {
+        let mut t = Transcript::new();
+        t.user_message("one");
+        t.user_message("two");
+        assert_eq!((t.status(), t.queued()), (Status::Working, 1));
+        t.apply(done());
+        assert_eq!((t.status(), t.queued()), (Status::Working, 0));
+        t.apply(done());
+        assert_eq!(t.status(), Status::Idle);
     }
 
     #[test]
@@ -572,6 +601,24 @@ mod tests {
         };
         assert_eq!(p.resolution, Some(Resolution::Cancelled));
         assert_eq!(t.blocks().last(), Some(&Block::Interrupted));
+    }
+
+    #[test]
+    fn compacting_lasts_until_it_ends_or_the_turn_does() {
+        let mut t = Transcript::new();
+        t.user_message("hi");
+        t.apply(Event::Compacting(true));
+        assert!(t.compacting());
+        t.apply(Event::Compacting(false));
+        assert!(!t.compacting());
+        t.apply(Event::Compacting(true));
+        t.apply(Event::Result {
+            text: String::new(),
+            is_error: false,
+            cost_usd: 0.0,
+            terminal_reason: None,
+        });
+        assert!(!t.compacting());
     }
 
     #[test]

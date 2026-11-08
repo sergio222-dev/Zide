@@ -144,7 +144,7 @@ the projects opened before (Enter opens one in this window) and **Open** picks a
 
 In the Claude chat (`Alt+3` toggles it): `Alt+Up` / `Alt+Down` switch between open chats,
 `Alt+I` focuses the message input, `Alt+H` opens (or closes) the list of earlier conversations, `Esc` interrupts a running turn (or closes the chat when idle),
-`Ctrl+V` pastes an image, and `/` and `@` open the command and file menus. Earlier conversations
+`Ctrl+V` pastes an image (click one, in the message or above the input, to see it large; `Esc` closes it), and `/` and `@` open the command and file menus. Earlier conversations
 are also listed by **Claude: Resume Session** in Find Action (`Ctrl+Shift+A`).
 
 Vim fold keys (`za`, `zo`, `zc`, `zM`, `zR`) and scroll keys (`zt`, `zz`, `zb`, `Ctrl+D`,
@@ -168,7 +168,7 @@ something changes, so read it while scrolling or holding a movement key.
 ### Project folder
 
 Zide keeps what it remembers about a project (last open file, where each file was left, font
-size) in the project's own `.zide/` folder, which ignores itself through a `.gitignore` inside.
+size, which panels were showing, the Claude conversation the chat was on and the titles of its agents) in the project's own `.zide/` folder, which ignores itself through a `.gitignore` inside.
 Delete the folder to forget it; `--purge` on uninstall does not touch it.
 
 ### Language servers

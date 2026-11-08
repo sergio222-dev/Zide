@@ -73,6 +73,8 @@ pub enum Event {
         output: String,
         is_error: bool,
     },
+    /// The CLI started (`true`) or finished (`false`) compacting the conversation.
+    Compacting(bool),
     Usage(Usage),
     /// The account's usage limits.
     Limits(Limits),
@@ -181,6 +183,13 @@ pub fn parse_events(line: &str) -> Vec<Event> {
             })
             .into_iter()
             .collect(),
+        "system" if value["subtype"] == "status" => match value["status"].as_str() {
+            Some("compacting") => vec![Event::Compacting(true)],
+            // the status clears when the compaction ends, with its result
+            None if value["compact_result"].is_string() => vec![Event::Compacting(false)],
+            _ => Vec::new(),
+        },
+        "system" if value["subtype"] == "compact_boundary" => vec![Event::Compacting(false)],
         "stream_event" => {
             let delta = &value["event"]["delta"];
             match delta["type"].as_str() {
@@ -306,6 +315,17 @@ mod tests {
                 model: None,
             }
         );
+    }
+
+    #[test]
+    fn compacting_starts_and_ends_with_the_status() {
+        let start = r#"{"type":"system","subtype":"status","status":"compacting"}"#;
+        assert_eq!(parse_events(start), vec![Event::Compacting(true)]);
+        let end =
+            r#"{"type":"system","subtype":"status","status":null,"compact_result":"success"}"#;
+        assert_eq!(parse_events(end), vec![Event::Compacting(false)]);
+        let other = r#"{"type":"system","subtype":"status","status":"requesting"}"#;
+        assert_eq!(parse_events(other), vec![]);
     }
 
     #[test]

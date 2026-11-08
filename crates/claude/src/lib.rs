@@ -2,6 +2,7 @@
 //! user's own Claude Code, so everything configured in `~/.claude` and the project's
 //! `.claude` (CLAUDE.md, hooks, MCP servers, skills, output style) applies unchanged.
 
+pub mod agents;
 mod cli;
 mod defaults;
 mod event;
