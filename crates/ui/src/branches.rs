@@ -413,6 +413,7 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
             let top = (MENU_LIST_TOP + selected as f32 * ROW_HEIGHT + scrolled)
                 .clamp(MENU_LIST_TOP, MENU_LIST_TOP + 400.);
             div()
+                .occlude()
                 .absolute()
                 .left_full()
                 .ml_1()
@@ -521,6 +522,7 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
     .flex_1()
     .min_h_0();
     div()
+        .occlude() // a scroll over the popup is not the editor's
         .absolute()
         .top_16()
         .left_1_4()
