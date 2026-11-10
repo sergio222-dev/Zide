@@ -356,3 +356,43 @@ fn ctrl_a_without_a_number_changes_nothing_and_repeats_with_dot() {
     assert_eq!(run("1", "<C-a>.").0, "3");
     assert_eq!(run("1", "<C-a>u").0, "1");
 }
+
+#[test]
+fn an_opener_in_insert_mode_brings_its_closer_with_the_cursor_between() {
+    for (typed, text) in [("(", "()"), ("[", "[]"), ("{", "{}"), ("\"", "\"\"")] {
+        let (result, cursor) = run("", &format!("i{typed}"));
+        assert_eq!((result.as_str(), cursor), (text, 1), "typing {typed}");
+    }
+}
+
+#[test]
+fn typing_the_closer_steps_over_the_one_that_came_along() {
+    assert_eq!(run("", "i(a)").0, "(a)");
+    assert_eq!(run("", "i(a)").1, 3);
+    assert_eq!(run("", "i\"a\"b").0, "\"a\"b");
+    assert_eq!(run("", "i{[(x)]}").0, "{[(x)]}");
+}
+
+#[test]
+fn backspace_between_an_empty_pair_removes_both() {
+    assert_eq!(run("", "i(<BS>").0, "");
+    assert_eq!(run("", "i\"<BS>").0, "");
+    assert_eq!(run("", "i(a<BS>").0, "()");
+}
+
+#[test]
+fn an_opener_before_a_word_or_inside_a_string_stays_alone() {
+    assert_eq!(run_at("word", 0, "i(").0, "(word");
+    assert_eq!(run("", "i\"[").0, "\"[\"");
+    assert_eq!(run("", "i\"{(").0, "\"{(\"");
+}
+
+#[test]
+fn a_quote_after_a_word_character_is_not_a_pair() {
+    assert_eq!(run("", "idon\"").0, "don\"");
+}
+
+#[test]
+fn an_escaped_quote_does_not_close_the_string() {
+    assert_eq!(run("", "i\"a\\\"[").0, "\"a\\\"[\"");
+}

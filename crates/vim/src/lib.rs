@@ -200,14 +200,71 @@ impl Vim {
                 self.cursor -= usize::from(column > 0);
                 self.want_column = buffer.position_of(self.cursor).column;
             }
-            Key::Char(c) => self.type_text(buffer, c.encode_utf8(&mut [0; 4])),
+            Key::Char(c) => self.type_char(buffer, c),
             Key::Enter => self.type_text(buffer, "\n"),
             Key::Backspace if self.cursor > 0 => {
-                buffer.delete(self.cursor - 1..self.cursor);
+                // between an empty pair both halves go
+                let pair = buffer
+                    .char_at(self.cursor - 1)
+                    .zip(buffer.char_at(self.cursor))
+                    .is_some_and(|(open, close)| closer_of(open) == Some(close));
+                let end = self.cursor + usize::from(pair);
+                buffer.delete(self.cursor - 1..end);
                 self.cursor -= 1;
             }
             Key::Backspace | Key::Ctrl(_) => {}
         }
+    }
+
+    /// Typing a character in Insert: a closer steps over the one already there, an opener
+    /// brings its closer along when what follows is not part of a word.
+    fn type_char(&mut self, buffer: &mut Buffer, c: char) {
+        let next = buffer.char_at(self.cursor);
+        let previous = self.cursor.checked_sub(1).and_then(|at| buffer.char_at(at));
+        if previous == Some('\\') && c == '"' {
+            return self.type_text(buffer, "\""); // an escaped quote is just text
+        }
+        if matches!(c, ')' | ']' | '}' | '"') && next == Some(c) {
+            self.cursor += 1; // the closer that was brought along
+            return;
+        }
+        let Some(closer) = closer_of(c) else {
+            return self.type_text(buffer, c.encode_utf8(&mut [0; 4]));
+        };
+        let open_ended = next.is_none_or(|n| n.is_whitespace() || matches!(n, ')' | ']' | '}'));
+        let pairs = if c == '"' {
+            // `"` closes a string when inside one, and is part of a word in `don"t`
+            open_ended && !previous.is_some_and(char::is_alphanumeric) && !self.in_string(buffer)
+        } else {
+            open_ended && !self.in_string(buffer)
+        };
+        if pairs {
+            self.type_text(buffer, &format!("{c}{closer}"));
+            self.cursor -= 1;
+        } else {
+            self.type_text(buffer, c.encode_utf8(&mut [0; 4]));
+        }
+    }
+
+    /// True when the cursor sits inside a `"` string of its line: an odd number of
+    /// unescaped quotes before it.
+    fn in_string(&self, buffer: &Buffer) -> bool {
+        let line = buffer.position_of(self.cursor).line;
+        let before = buffer.slice(buffer.line_start(line)..self.cursor);
+        let mut inside = false;
+        let mut escaped = false;
+        for c in before.chars() {
+            match c {
+                '\\' if !escaped => {
+                    escaped = true;
+                    continue;
+                }
+                '"' if !escaped => inside = !inside,
+                _ => {}
+            }
+            escaped = false;
+        }
+        inside
     }
 
     fn type_text(&mut self, buffer: &mut Buffer, text: &str) {
@@ -224,6 +281,17 @@ impl Vim {
         if self.cursor >= start + length {
             self.cursor = start + length.saturating_sub(1);
         }
+    }
+}
+
+/// What closes `open` when it is typed: the pairs that close themselves.
+fn closer_of(open: char) -> Option<char> {
+    match open {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '"' => Some('"'),
+        _ => None,
     }
 }
 
