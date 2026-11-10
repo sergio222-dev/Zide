@@ -156,6 +156,7 @@ the projects opened before (Enter opens one in this window) and **Open** picks a
 | `Ctrl+K` | Commit panel: tick files, write a message, **Commit** or **Commit and Push…** (`Amend` folds them into the last commit) |
 | Commit panel `j`/`k`, `Space`, `Enter` | Move over the files, tick or untick one, open its changes (`Tab` or `i` goes to the message, `Alt+Enter` commits, `Esc` back to the files or out) |
 | Double click on a commit panel file | Its changes against the last commit, side by side, in a large dialog (`Esc` closes, double `Space` opens search) |
+| Commit panel **Stash** tab | The stashes of the repository (message and branch) and the files of the selected one; **Apply**, **Pop** and **Drop** (asks twice). `j`/`k` pick a stash, `a` applies, `p` pops; double click a file to see its changes |
 | `a` / `m` / `d` / `y` / `p` | In the tree: new file (a name ending with `/` makes a folder), move or rename (a popup with the path, Enter applies, Esc closes), delete (asks first), copy, paste (into the selected folder; a taken name gets ` copy`) |
 | `Ctrl+Shift+-` / `Ctrl+Shift+=` | With the tree focused: collapse / expand every folder (the buttons on top of the tree do the same) |
 | `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Navigate back / forward (also the mouse's back and forward buttons) |

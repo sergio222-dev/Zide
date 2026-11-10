@@ -10,7 +10,7 @@ use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{Disableable, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use zide_git::{ChangeKind, FileChange};
+use zide_git::{ChangeKind, FileChange, stash::Stash};
 
 use crate::{TREE_ROW_HEIGHT, Workspace, file_icon, theme};
 
@@ -271,7 +271,41 @@ impl Changes {
     }
 }
 
+/// What the panel shows: the changes to commit or the stashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelTab {
+    #[default]
+    Commit,
+    Stash,
+}
+
+/// What the Stash tab does with the selected stash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StashAction {
+    Apply,
+    Pop,
+    Drop,
+}
+
+/// The Stash tab: the stashes, and the files of the selected one.
+#[derive(Default)]
+pub struct StashTab {
+    pub stashes: Vec<Stash>,
+    /// Position in `stashes`.
+    pub selected: usize,
+    /// The files of the selected stash, once read.
+    pub files: Changes,
+    /// The stash `files` belong to.
+    pub(crate) files_of: Option<String>,
+    /// Drop asks twice: the first click arms it.
+    pub drop_armed: bool,
+    pub(crate) list_scroll: ScrollHandle,
+    pub(crate) files_scroll: UniformListScrollHandle,
+}
+
 pub struct CommitPanel {
+    pub tab: PanelTab,
+    pub stash: StashTab,
     pub changes: Changes,
     pub amend: bool,
     /// A commit is running.
@@ -287,6 +321,8 @@ pub struct CommitPanel {
 impl CommitPanel {
     pub fn new(window: &mut Window, cx: &mut App) -> Self {
         Self {
+            tab: PanelTab::default(),
+            stash: StashTab::default(),
             changes: Changes::default(),
             amend: false,
             busy: false,
@@ -299,6 +335,42 @@ impl CommitPanel {
 }
 
 /// What the notification says once a commit went through: how many files it holds.
+/// The tabs on top of the panel.
+pub(crate) fn panel_tabs(workspace: &Entity<Workspace>, active: PanelTab) -> Div {
+    let tab = |label: &'static str, which: PanelTab| {
+        let workspace = workspace.clone();
+        div()
+            .id(label)
+            .px_2()
+            .h_full()
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .border_b_2()
+            .border_color(rgb(if which == active {
+                theme::ACTIVE_BORDER
+            } else {
+                theme::BACKGROUND
+            }))
+            .text_color(rgb(if which == active {
+                theme::STRONG
+            } else {
+                theme::DIM
+            }))
+            .on_click(move |_, window, cx| {
+                workspace.update(cx, |this, cx| this.set_panel_tab(which, window, cx))
+            })
+            .child(label)
+    };
+    div()
+        .h(px(28.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .child(tab("Commit", PanelTab::Commit))
+        .child(tab("Stash", PanelTab::Stash))
+}
+
 fn done_message(files: usize, push: bool, amend: bool) -> String {
     let what = match (amend, files) {
         (true, 0) => "Amended the last commit".to_string(),
@@ -467,6 +539,9 @@ impl Workspace {
         let Some(panel) = &mut self.commit else {
             return;
         };
+        if panel.tab == PanelTab::Stash {
+            return self.stash_key(event, window, cx);
+        }
         let pending_g = std::mem::take(&mut panel.g_pending);
         let selected = panel.changes.selected_row();
         let key = crate::vim_key(event);
@@ -541,9 +616,12 @@ impl Workspace {
     pub(crate) fn refresh_commit(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
-            let changes = cx
+            let (changes, stashes) = cx
                 .background_executor()
-                .spawn(async move { zide_git::changes(&root) })
+                .spawn(async move {
+                    let stashes = zide_git::stash::stashes(&root).unwrap_or_default();
+                    (zide_git::changes(&root), stashes)
+                })
                 .await;
             this.update(cx, |this, cx| {
                 let conflicted = |status: &std::collections::HashMap<_, _>| {
@@ -559,6 +637,7 @@ impl Workspace {
                 if let Some(panel) = &mut this.commit {
                     panel.changes.set_changes(changes);
                 }
+                this.set_stashes(stashes, cx);
                 // the actions on offer depend on it (Resolve Conflicts only shows with conflicts)
                 if this.popup.is_some() && before != conflicted(&this.git_status) {
                     this.search_again(cx);
@@ -633,6 +712,13 @@ impl Workspace {
 
     pub(crate) fn commit_view(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let workspace = cx.entity();
+        if self
+            .commit
+            .as_ref()
+            .is_some_and(|p| p.tab == PanelTab::Stash)
+        {
+            return self.stash_view(cx);
+        }
         let merging = self.merging();
         let panel = self.commit.as_ref().expect("the panel is open");
         let rows = panel.changes.rows();
@@ -750,6 +836,7 @@ impl Workspace {
         .size_full()
         .track_scroll(&scroll);
 
+        let workspace_for_tabs = workspace.clone();
         let amend_toggle = workspace.clone();
         let commit_button = workspace.clone();
         let push_button = workspace;
@@ -764,15 +851,7 @@ impl Workspace {
             .border_color(rgb(theme::BORDER))
             .bg(rgb(theme::BACKGROUND))
             .text_color(rgb(theme::TEXT))
-            .child(
-                div()
-                    .px_2()
-                    .h(px(28.))
-                    .flex()
-                    .items_center()
-                    .text_color(rgb(theme::STRONG))
-                    .child("Commit"),
-            )
+            .child(panel_tabs(&workspace_for_tabs, PanelTab::Commit))
             .child(
                 div()
                     .relative()

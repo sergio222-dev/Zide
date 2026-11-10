@@ -37,6 +37,7 @@ mod push;
 mod rows;
 mod session;
 mod sound;
+mod stash_tab;
 mod statusbar;
 mod sticky;
 mod theme;
