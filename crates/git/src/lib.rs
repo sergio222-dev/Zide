@@ -12,6 +12,7 @@ pub mod commit_ops;
 pub mod log;
 pub mod merge;
 mod options;
+pub mod stash;
 pub use options::{
     Chosen, OTHER_BRANCH, Op, OptionDef, Value, blocked, conflict, def, merge_args, pull_args,
     rebase_args,

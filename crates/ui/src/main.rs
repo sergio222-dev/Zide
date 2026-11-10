@@ -37,6 +37,7 @@ mod push;
 mod rows;
 mod session;
 mod sound;
+mod stash_tab;
 mod statusbar;
 mod sticky;
 mod theme;
@@ -242,6 +243,15 @@ fn action_registry() -> Vec<ActionDef> {
             only_when_conflicted: false,
             state: None,
             run: |ws, window, cx| ws.toggle_git_op(zide_git::Op::Rebase, window, cx),
+        },
+        ActionDef {
+            name: "Stash Changes",
+            synonyms: &["stash", "shelve", "save changes", "set aside", "git"],
+            action: None,
+            closes_popup: true,
+            only_when_conflicted: false,
+            state: None,
+            run: |ws, window, cx| ws.stash_changes(window, cx),
         },
         ActionDef {
             name: "Switch Branch",
