@@ -807,7 +807,12 @@ impl Workspace {
             chat.session = None;
         }
 
+        let was_working = chat.transcript.status() == Status::Working;
         chat.transcript.apply(event);
+        // the turn is over: the agent has nothing left to do and is not waiting for the user
+        if was_working && chat.transcript.status() == Status::Idle {
+            crate::sound::done();
+        }
         chat.sync_markdown(cx);
         if follow {
             chat.scroll.scroll_to_bottom();

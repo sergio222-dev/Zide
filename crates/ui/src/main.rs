@@ -36,6 +36,7 @@ mod projects;
 mod push;
 mod rows;
 mod session;
+mod sound;
 mod statusbar;
 mod sticky;
 mod theme;
