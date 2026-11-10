@@ -1,6 +1,7 @@
 //! Layer 1: local syntactic analysis for the editor (highlighting for now). Tree-sitter stays
 //! behind this crate's API; it never resolves types or references.
 
+mod comment;
 mod fold;
 mod pair;
 mod select;
@@ -46,6 +47,7 @@ pub struct Span {
 
 struct Grammar {
     extensions: &'static [&'static str],
+    comment: CommentSyntax,
     language: Language,
     query: String,
     /// `query` compiled, the first time it is needed (compiling takes milliseconds).
@@ -87,6 +89,7 @@ fn grammars() -> &'static [Grammar] {
         vec![
             Grammar {
                 extensions: &["rs"],
+                comment: CommentSyntax::SLASHES,
                 language: tree_sitter_rust::LANGUAGE.into(),
                 query: tree_sitter_rust::HIGHLIGHTS_QUERY.to_string(),
                 compiled: OnceLock::new(),
@@ -94,6 +97,7 @@ fn grammars() -> &'static [Grammar] {
             },
             Grammar {
                 extensions: &["js", "mjs", "cjs", "jsx"],
+                comment: CommentSyntax::JSX,
                 language: tree_sitter_javascript::LANGUAGE.into(),
                 query: format!("{js}\n{jsx}"),
                 compiled: OnceLock::new(),
@@ -101,6 +105,7 @@ fn grammars() -> &'static [Grammar] {
             },
             Grammar {
                 extensions: &["ts", "mts", "cts"],
+                comment: CommentSyntax::SLASHES,
                 language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 query: format!("{js}\n{ts}"),
                 compiled: OnceLock::new(),
@@ -108,6 +113,7 @@ fn grammars() -> &'static [Grammar] {
             },
             Grammar {
                 extensions: &["go"],
+                comment: CommentSyntax::SLASHES,
                 language: tree_sitter_go::LANGUAGE.into(),
                 query: generic_first(tree_sitter_go::HIGHLIGHTS_QUERY, "(identifier) @variable"),
                 compiled: OnceLock::new(),
@@ -115,6 +121,7 @@ fn grammars() -> &'static [Grammar] {
             },
             Grammar {
                 extensions: &["py", "pyi"],
+                comment: CommentSyntax::HASH,
                 language: tree_sitter_python::LANGUAGE.into(),
                 query: tree_sitter_python::HIGHLIGHTS_QUERY.to_string(),
                 compiled: OnceLock::new(),
@@ -122,6 +129,7 @@ fn grammars() -> &'static [Grammar] {
             },
             Grammar {
                 extensions: &["md", "markdown"],
+                comment: CommentSyntax::HTML,
                 language: tree_sitter_md::LANGUAGE.into(),
                 query: markdown_query(tree_sitter_md::HIGHLIGHT_QUERY_BLOCK),
                 compiled: OnceLock::new(),
@@ -133,6 +141,7 @@ fn grammars() -> &'static [Grammar] {
             },
             Grammar {
                 extensions: &["tsx"],
+                comment: CommentSyntax::JSX,
                 language: tree_sitter_typescript::LANGUAGE_TSX.into(),
                 query: format!("{js}\n{ts}\n{jsx}"),
                 compiled: OnceLock::new(),
@@ -142,6 +151,7 @@ fn grammars() -> &'static [Grammar] {
     })
 }
 
+pub use comment::{CommentSyntax, comment_syntax, in_jsx_markup, toggle_comment};
 pub use fold::{FoldKind, FoldRegion, fold_regions};
 pub use pair::{is_pair_candidate, matching_pair};
 pub use select::extend_selection;
