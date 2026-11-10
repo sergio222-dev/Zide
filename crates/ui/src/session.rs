@@ -58,6 +58,23 @@ pub fn remember_minimap(root: &Path, shown: bool) {
     write(root, "minimap", if shown { "on" } else { "off" });
 }
 
+/// Whether this project lists the files git ignores; `None` when it was never decided.
+pub fn show_ignored(root: &Path) -> Option<bool> {
+    match fs::read_to_string(file_for(root, "show-ignored"))
+        .ok()?
+        .trim()
+    {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Best effort, like `remember_file`.
+pub fn remember_show_ignored(root: &Path, shown: bool) {
+    write(root, "show-ignored", if shown { "on" } else { "off" });
+}
+
 /// The slash commands Claude reported the last time it ran in this project, one per line.
 pub fn claude_commands(root: &Path) -> Vec<String> {
     fs::read_to_string(file_for(root, "claude-commands"))
@@ -280,6 +297,18 @@ mod tests {
         remember_view(&root, "tab\there", place(1)); // not storable: ignored
         assert_eq!(view(&root, "tab\there"), None);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_show_ignored_choice_is_remembered_per_project() {
+        let root = std::env::temp_dir().join(format!("zide-ignored-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(show_ignored(&root), None);
+        remember_show_ignored(&root, true);
+        assert_eq!(show_ignored(&root), Some(true));
+        remember_show_ignored(&root, false);
+        assert_eq!(show_ignored(&root), Some(false));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

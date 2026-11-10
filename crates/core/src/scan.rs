@@ -17,11 +17,13 @@ pub const STATE_FOLDER: &str = ".zide";
 /// Lists the files under `root`, in parallel, honoring `.gitignore` and skipping `.git` and
 /// Zide's own folder.
 pub fn scan_files(root: &Path) -> io::Result<Vec<String>> {
-    scan_project(root).map(|scan| scan.files)
+    scan_project(root, false).map(|scan| scan.files)
 }
 
-/// Like [`scan_files`], but also lists the directories (what a watcher has to watch).
-pub fn scan_project(root: &Path) -> io::Result<Scan> {
+/// Like [`scan_files`], but also lists the directories (what a watcher has to watch). With
+/// `show_ignored`, what git ignores (`.gitignore`, `.git/info/exclude`, the global ignore file,
+/// `.ignore`) is listed too; `.git` and Zide's own folder never are.
+pub fn scan_project(root: &Path, show_ignored: bool) -> io::Result<Scan> {
     if !root.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotADirectory,
@@ -32,6 +34,12 @@ pub fn scan_project(root: &Path) -> io::Result<Scan> {
     WalkBuilder::new(root)
         .hidden(false)
         .require_git(false)
+        .standard_filters(false)
+        .git_ignore(!show_ignored)
+        .git_global(!show_ignored)
+        .git_exclude(!show_ignored)
+        .ignore(!show_ignored)
+        .parents(!show_ignored)
         .filter_entry(|entry| entry.file_name() != ".git" && entry.file_name() != STATE_FOLDER)
         .build_parallel()
         .run(|| {
@@ -90,12 +98,33 @@ mod tests {
     }
 
     #[test]
+    fn show_ignored_lists_what_gitignore_hides_but_never_git() {
+        let dir = std::env::temp_dir().join(format!("zide-ignored-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::create_dir_all(dir.join("target")).unwrap();
+        fs::write(dir.join(".gitignore"), "target/\ndocker-compose.yml\n").unwrap();
+        fs::write(dir.join("docker-compose.yml"), "").unwrap();
+        fs::write(dir.join("target/out.bin"), "").unwrap();
+        fs::write(dir.join(".git/HEAD"), "").unwrap();
+
+        let mut files = scan_project(&dir, true).unwrap().files;
+        files.sort();
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            files,
+            [".gitignore", "docker-compose.yml", "target/out.bin"]
+        );
+    }
+
+    #[test]
     fn lists_directories_including_empty_ones() {
         let dir = std::env::temp_dir().join(format!("zide-dirs-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("src/empty")).unwrap();
         fs::write(dir.join("src/a.rs"), "").unwrap();
-        let mut dirs = scan_project(&dir).unwrap().dirs;
+        let mut dirs = scan_project(&dir, false).unwrap().dirs;
         dirs.sort();
         assert_eq!(dirs, ["src", "src/empty"]);
         fs::remove_dir_all(&dir).unwrap();
@@ -111,7 +140,7 @@ mod tests {
         fs::write(dir.join(STATE_FOLDER).join(".gitignore"), "*\n").unwrap();
         fs::write(dir.join(STATE_FOLDER).join("views"), "x").unwrap();
         fs::write(dir.join("a.rs"), "").unwrap();
-        let scan = scan_project(&dir).unwrap();
+        let scan = scan_project(&dir, false).unwrap();
         assert_eq!(scan.files, ["a.rs"]);
         assert!(scan.dirs.is_empty(), "{:?}", scan.dirs);
         fs::remove_dir_all(&dir).unwrap();
