@@ -245,6 +245,15 @@ fn action_registry() -> Vec<ActionDef> {
             run: |ws, window, cx| ws.toggle_git_op(zide_git::Op::Rebase, window, cx),
         },
         ActionDef {
+            name: "Stash Changes",
+            synonyms: &["stash", "shelve", "save changes", "set aside", "git"],
+            action: None,
+            closes_popup: true,
+            only_when_conflicted: false,
+            state: None,
+            run: |ws, window, cx| ws.stash_changes(window, cx),
+        },
+        ActionDef {
             name: "Switch Branch",
             synonyms: &["branches", "checkout", "git", "change branch"],
             action: Some(Box::new(SwitchBranch)),

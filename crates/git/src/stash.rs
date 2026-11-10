@@ -52,6 +52,26 @@ fn name(index: usize) -> String {
     format!("stash@{{{index}}}")
 }
 
+/// Sets the changes aside under `message` (git names it after the commit when empty).
+/// `keep_index` leaves what is staged in place; `untracked` takes the new files too.
+pub fn push(root: &Path, message: &str, keep_index: bool, untracked: bool) -> Result<(), String> {
+    let mut args = vec!["stash", "push"];
+    if keep_index {
+        args.push("--keep-index");
+    }
+    if untracked {
+        args.push("--include-untracked");
+    }
+    if !message.is_empty() {
+        args.extend(["-m", message]);
+    }
+    // with nothing to save git says so and still succeeds
+    match run(root, &args, false)?.starts_with("No local changes") {
+        true => Err("There are no local changes to stash".into()),
+        false => Ok(()),
+    }
+}
+
 /// Applies the stash and keeps it in the list.
 pub fn apply(root: &Path, index: usize) -> Result<(), String> {
     run(root, &["stash", "apply", &name(index)], false).map(drop)
@@ -102,6 +122,7 @@ mod tests {
         git_in(&dir, &["add", "."]);
         git_in(&dir, &["commit", "-q", "-m", "first"]);
         assert_eq!(stashes(&dir), Ok(vec![]));
+        assert!(push(&dir, "", false, false).is_err()); // nothing changed yet
 
         fs::write(dir.join("a.txt"), "two\n").unwrap();
         git_in(&dir, &["stash", "push", "-q", "-m", "older"]);
@@ -117,6 +138,13 @@ mod tests {
             crate::commit_files(&dir, &found[0].hash).unwrap()[0].path,
             "a.txt"
         );
+
+        fs::write(dir.join("b.txt"), "new\n").unwrap();
+        fs::write(dir.join("a.txt"), "four\n").unwrap();
+        assert_eq!(push(&dir, "mine", false, true), Ok(()));
+        assert!(!dir.join("b.txt").exists()); // the untracked file went too
+        assert_eq!(stashes(&dir).unwrap()[0].message, "mine");
+        assert_eq!(drop_stash(&dir, 0), Ok(()));
 
         assert_eq!(apply(&dir, 1), Ok(()));
         assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "two\n");

@@ -1,7 +1,9 @@
 //! The Stash tab of the commit panel: the stashes of the repository, the files of the selected
 //! one, and what can be done with it (Apply, Pop, Drop).
 
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{Disableable, Icon};
@@ -9,10 +11,108 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use zide_git::stash::Stash;
 
-use crate::commit::{PanelTab, RowKind, StashAction, kind_color, panel_tabs};
+use crate::commit::{Check, PanelTab, RowKind, StashAction, check_box, kind_color, panel_tabs};
 use crate::{TREE_ROW_HEIGHT, Workspace, file_icon, theme};
 
+/// The content of the Stash Changes dialog: the message and what else goes in the stash.
+pub struct StashDialog {
+    message: Entity<InputState>,
+    keep_index: bool,
+    untracked: bool,
+}
+
+impl StashDialog {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self {
+            message: cx.new(|cx| InputState::new(window, cx).placeholder("Message (optional)")),
+            keep_index: false,
+            untracked: true,
+        }
+    }
+}
+
+impl Render for StashDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let option = |id: &'static str, label: &'static str, on: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .child(check_box(if on { Check::On } else { Check::Off }))
+                .child(label)
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child("Message:")
+                    .child(div().flex_1().child(Input::new(&self.message))),
+            )
+            .child(
+                option("stash-untracked", "Include untracked files", self.untracked).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.untracked = !this.untracked;
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                option(
+                    "stash-keep-index",
+                    "Keep staged changes in place",
+                    self.keep_index,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.keep_index = !this.keep_index;
+                    cx.notify();
+                })),
+            )
+    }
+}
+
 impl Workspace {
+    /// Asks for a message and sets the changes aside (Find Action → *Stash Changes*).
+    pub(crate) fn stash_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| StashDialog::new(window, cx));
+        let workspace = cx.entity();
+        let first = std::cell::Cell::new(true);
+        window.open_alert_dialog(cx, move |alert, window, cx| {
+            if first.replace(false) {
+                let message = view.read(cx).message.clone();
+                message.update(cx, |state, cx| state.focus(window, cx));
+            }
+            let (view, workspace) = (view.clone(), workspace.clone());
+            alert
+                .title("Stash Changes")
+                .child(view.clone())
+                .ok_text("Stash Changes")
+                .show_cancel(true)
+                .on_ok(move |_, _, cx| {
+                    let dialog = view.read(cx);
+                    let message = dialog.message.read(cx).value().trim().to_string();
+                    let (keep_index, untracked) = (dialog.keep_index, dialog.untracked);
+                    workspace.update(cx, |this, cx| {
+                        this.git_task(
+                            "Could not stash the changes",
+                            Some("Changes stashed".into()),
+                            move |root| {
+                                zide_git::stash::push(&root, &message, keep_index, untracked)
+                            },
+                            cx,
+                        )
+                    });
+                    true
+                })
+        });
+    }
+
     /// Switches the tab of the commit panel.
     pub(crate) fn set_panel_tab(
         &mut self,
@@ -334,6 +434,7 @@ impl Workspace {
         .track_scroll(&files_scroll);
 
         let (apply, pop, drop) = (workspace.clone(), workspace.clone(), workspace.clone());
+        let stash = workspace.clone();
         div()
             .id("commit-panel")
             .flex()
@@ -381,6 +482,15 @@ impl Workspace {
                             .disabled(none || busy)
                             .on_click(move |_, _, cx| {
                                 pop.update(cx, |this, cx| this.stash_action(StashAction::Pop, cx))
+                            }),
+                    )
+                    .child(
+                        Button::new("stash-new")
+                            .label("Stash…")
+                            .ml_auto()
+                            .disabled(busy)
+                            .on_click(move |_, window, cx| {
+                                stash.update(cx, |this, cx| this.stash_changes(window, cx))
                             }),
                     )
                     .child(
