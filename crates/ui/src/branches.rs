@@ -1,5 +1,5 @@
-//! The branch switcher: a popup with the branches of the repository as Recent, Local and
-//! Remote, each a tree whose folders are the `/` prefixes of the names (`feat/` holds
+//! The branch switcher: a popup with the branches of the repository as Recent, Local,
+//! Remote and Tags, each a tree whose folders are the `/` prefixes of the names (`feat/` holds
 //! `feat/x`).
 
 use std::{collections::BTreeMap, collections::HashSet, sync::Arc};
@@ -17,10 +17,11 @@ use crate::{Workspace, file_icon, theme};
 const ROW_HEIGHT: f32 = 24.;
 /// Where the rows start inside the popup: its padding, the search field and the gap under it.
 const MENU_LIST_TOP: f32 = 52.;
-pub(crate) const SECTIONS: [(&str, &str); 3] = [
+pub(crate) const SECTIONS: [(&str, &str); 4] = [
     ("recent", "Recent"),
     ("local", "Local"),
     ("remote", "Remote"),
+    ("tags", "Tags"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +73,7 @@ impl Model {
         Self::with_sections(data, &SECTIONS)
     }
 
-    /// Lists only `sections` (of recent, local and remote), in that order.
+    /// Lists only `sections` (of recent, local, remote and tags), in that order.
     pub fn with_sections(
         data: Branches,
         sections: &'static [(&'static str, &'static str)],
@@ -230,6 +231,17 @@ impl Model {
         match section {
             "recent" => self.data.recent.iter().map(local).collect(),
             "local" => self.data.local.iter().map(|b| local(&b.name)).collect(),
+            "tags" => self
+                .data
+                .tags
+                .iter()
+                .map(|tag| Item {
+                    path: tag.clone(),
+                    target: Switch::Tag(tag.clone()),
+                    current: false,
+                    upstream: None,
+                })
+                .collect(),
             _ => self
                 .data
                 .remote
@@ -350,7 +362,7 @@ pub enum BranchAction {
     Rename(String),
 }
 
-/// The entries of the context menu of a branch: a remote one can only start new branches.
+/// The entries of the context menu of a branch: a remote branch or a tag can only start new branches.
 pub fn menu_entries(target: &Switch) -> Vec<(String, BranchAction)> {
     match target {
         Switch::Local(name) => vec![
@@ -362,7 +374,7 @@ pub fn menu_entries(target: &Switch) -> Vec<(String, BranchAction)> {
             ("Push…".into(), BranchAction::Push(name.clone())),
             ("Rename…".into(), BranchAction::Rename(name.clone())),
         ],
-        Switch::Remote(name) => vec![(
+        Switch::Remote(name) | Switch::Tag(name) => vec![(
             format!("New Branch from '{name}'…"),
             BranchAction::NewFrom(name.clone()),
         )],
@@ -662,6 +674,7 @@ mod tests {
             ],
             remote: vec!["origin/main".into(), "origin/feat/card".into()],
             recent: vec!["feat/card".into(), "main".into()],
+            tags: vec!["v1".into(), "rel/v2".into()],
         }
     }
 
@@ -699,7 +712,28 @@ mod tests {
                 "  origin/", // remote names start open, their folders do not
                 "    feat/",
                 "    main",
+                "Tags/",
+                "  rel/", // tag folders start closed, like the others
+                "  v1",
             ]
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_tag_row_checks_out_the_tag_and_the_query_finds_it() {
+        let mut model = Model::new(data());
+        model.set_query("v1");
+        assert_eq!(shown(&model), ["Tags/", "  v1"]);
+        model.select(1);
+        assert_eq!(model.activate(), Some(Switch::Tag("v1".into())));
+        model.set_query("v2");
+        assert_eq!(shown(&model), ["Tags/", "  rel/", "    v2"]);
+        assert_eq!(
+            menu_entries(&Switch::Tag("v1".into())),
+            [(
+                "New Branch from 'v1'…".to_string(),
+                BranchAction::NewFrom("v1".into())
+            )]
         );
     }
 
@@ -755,7 +789,7 @@ mod tests {
         model.set_query("nothing");
         assert!(model.rows().is_empty());
         model.set_query("");
-        assert_eq!(shown(&model).len(), 13);
+        assert_eq!(shown(&model).len(), 16);
     }
 
     #[::core::prelude::v1::test]
