@@ -20,7 +20,10 @@ use zide_lsp::{
 use zide_stubs::{
     StubKind, StubNode, extract_nodes, extract_nodes_in, language_for_path as stub_language,
 };
-use zide_syntax::{Class, FoldRegion, LanguageId, Span, Syntax, language_for_path};
+use zide_syntax::{
+    Class, FoldRegion, LanguageId, Span, Syntax, comment_syntax, in_jsx_markup, language_for_path,
+    toggle_comment,
+};
 use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
@@ -1124,6 +1127,10 @@ impl Viewer {
             }
             return Effect::None;
         }
+        if key == Key::Ctrl('/') {
+            self.toggle_comment();
+            return Effect::None;
+        }
         let navigating = matches!(
             self.vim.mode(),
             Mode::Normal | Mode::Visual | Mode::VisualLine
@@ -1179,6 +1186,48 @@ impl Viewer {
         self.snap_cursor(before);
         self.reveal_cursor();
         Effect::None
+    }
+
+    /// Comments or uncomments the lines of the selection, or the cursor's line without one,
+    /// with the markers of the file's language; a file of an unknown language is left alone.
+    /// The selection ends, as in IntelliJ.
+    fn toggle_comment(&mut self) {
+        let Some(language) = self.language.filter(|_| self.editable) else {
+            return;
+        };
+        let range = match self.vim.selection(&self.buffer) {
+            Some((range, _)) => range,
+            None => self.vim.cursor()..self.vim.cursor() + 1,
+        };
+        let first = self.buffer.position_of(range.start).line;
+        let last = self
+            .buffer
+            .position_of(range.end.saturating_sub(1).max(range.start))
+            .line;
+        let lines: Vec<String> = (first..=last).map(|l| self.buffer.line(l)).collect();
+        let markup = self.syntax.as_ref().is_some_and(|syntax| {
+            let mut code = (first..=last).filter(|&l| !self.buffer.line(l).trim().is_empty());
+            code.all(|l| {
+                let line = self.buffer.line(l);
+                let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+                let at = self.buffer.line_start(l) + indent;
+                in_jsx_markup(syntax.tree(), self.buffer.byte_of(at))
+            })
+        });
+        let toggled = toggle_comment(comment_syntax(language), &lines, markup);
+        if toggled == lines {
+            return;
+        }
+        if matches!(self.vim.mode(), Mode::Visual | Mode::VisualLine) {
+            self.vim.handle(&mut self.buffer, Key::Esc);
+        }
+        let start = self.buffer.line_start(first);
+        let end = self.buffer.line_start(last) + self.buffer.line_len(last);
+        self.buffer.edit(start..end, &toggled.join("\n"));
+        self.buffer.commit();
+        self.rebuild();
+        self.vim.set_cursor(&self.buffer, start);
+        self.reveal_cursor();
     }
 
     /// Starts (or updates) the search. The cursor goes to the first match at or after it.
@@ -2977,6 +3026,50 @@ mod tests {
         type_keys(&mut viewer, "zz");
         assert_eq!(viewer.pending_keys(), "");
         assert_eq!(viewer.vim.cursor(), 0); // scrolling does not move the cursor
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn ctrl_slash_comments_the_line_or_the_selection_in_the_files_language() {
+        let (dir, file) = temp_file_as("comment", "a.rs", "fn a() {\n    b();\n}\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.handle_key(Key::Char('j'));
+        viewer.handle_key(Key::Ctrl('/'));
+        assert_eq!(viewer.buffer.text(), "fn a() {\n    // b();\n}\n");
+        viewer.handle_key(Key::Ctrl('/'));
+        assert_eq!(viewer.buffer.text(), "fn a() {\n    b();\n}\n");
+        type_keys(&mut viewer, "gg");
+        type_keys(&mut viewer, "Vj");
+        viewer.handle_key(Key::Ctrl('/'));
+        assert_eq!(viewer.buffer.text(), "// fn a() {\n//     b();\n}\n");
+        assert_eq!(viewer.vim.mode(), Mode::Normal);
+        viewer.handle_key(Key::Char('u'));
+        assert_eq!(viewer.buffer.text(), "fn a() {\n    b();\n}\n");
+        fs::remove_dir_all(dir).unwrap();
+
+        let jsx = "const a = () => (\n  <div>\n    <b>{x}</b>\n  </div>\n);\n";
+        let (dir, file) = temp_file_as("comment-tsx", "a.tsx", jsx);
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.handle_key(Key::Char('j'));
+        viewer.handle_key(Key::Ctrl('/'));
+        assert_eq!(viewer.buffer.line(1), "  {/* <div> */}");
+        viewer.handle_key(Key::Ctrl('/'));
+        assert_eq!(viewer.buffer.text(), jsx);
+        type_keys(&mut viewer, "gg");
+        viewer.handle_key(Key::Ctrl('/'));
+        assert_eq!(viewer.buffer.line(0), "// const a = () => (");
+        fs::remove_dir_all(dir).unwrap();
+
+        let (dir, file) = temp_file_as("comment-py", "a.py", "x = 1\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.handle_key(Key::Ctrl('/'));
+        assert_eq!(viewer.buffer.text(), "# x = 1\n");
+        fs::remove_dir_all(dir).unwrap();
+
+        let (dir, file) = temp_file("comment-txt", "plain\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.handle_key(Key::Ctrl('/'));
+        assert_eq!(viewer.buffer.text(), "plain\n"); // no language, no comment syntax
         fs::remove_dir_all(dir).unwrap();
     }
 
