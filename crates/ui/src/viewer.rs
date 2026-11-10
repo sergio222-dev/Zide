@@ -553,7 +553,9 @@ impl Viewer {
     /// The cell of the line text at window position `x`, `None` over the line numbers. With
     /// `nearest` the edge closest to `x` is meant (where a caret goes), else the cell it is in.
     fn cell_under(&self, x: Pixels, nearest: bool) -> Option<usize> {
-        let x = f32::from(x - self.editor_bounds.get().origin.x) - self.gutter_width();
+        // the list may be scrolled sideways: the text is that much left of where it started
+        let scrolled = f32::from(self.scroll.0.borrow().base_handle.offset().x);
+        let x = f32::from(x - self.editor_bounds.get().origin.x) - scrolled - self.gutter_width();
         let cells = x / self.cell_width.unwrap_or(8.);
         (x >= 0.).then_some((if nearest { cells + 0.5 } else { cells }) as usize)
     }
@@ -1487,7 +1489,22 @@ impl Viewer {
         };
         let start = matches[index].start;
         self.vim.set_cursor(&self.buffer, start);
-        self.reveal_cursor();
+        self.reveal_match();
+    }
+
+    /// Brings the cursor, sitting on a match, into view: left alone when its row is on screen,
+    /// else centered vertically. Sideways it always follows.
+    fn reveal_match(&mut self) {
+        self.unfold_hiding(self.cursor_line());
+        let row = self.rows.row_of(self.cursor_line());
+        let on_screen = self
+            .view_metrics()
+            .is_some_and(|(top, rows)| row >= top && row < top + rows);
+        if on_screen {
+            return self.reveal_cursor();
+        }
+        self.reveal_cursor_column();
+        self.scroll.scroll_to_item(row, ScrollStrategy::Center);
     }
 
     fn match_at_cursor(&self) -> Option<usize> {
@@ -1596,6 +1613,7 @@ impl Viewer {
     fn reveal_cursor(&mut self) {
         self.unfold_hiding(self.cursor_line());
         let row = self.rows.row_of(self.cursor_line());
+        self.reveal_cursor_column();
         // a cursor under the pinned declarations is out of sight: scroll until it is right
         // below them
         if let Some((top, _)) = self.view_metrics()
@@ -1609,6 +1627,37 @@ impl Viewer {
             return;
         }
         self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+    }
+
+    /// Scrolls sideways the least that brings the caret into view; back to the left edge when
+    /// the caret is within the first columns.
+    fn reveal_cursor_column(&mut self) {
+        let (line, cell) = self.cursor_cell();
+        let Some(shown) = self.lines.get(line) else {
+            return;
+        };
+        let cell_width = self.cell_width.unwrap_or(8.);
+        let column = shown.text[..cell.start.min(shown.text.len())]
+            .chars()
+            .count();
+        let gutter = self.gutter_width();
+        let left = gutter + column as f32 * cell_width;
+        let right = left + cell_width;
+        let viewport = f32::from(self.editor_bounds.get().size.width);
+        let margin = 2. * cell_width;
+        let state = self.scroll.0.borrow();
+        let offset = state.base_handle.offset();
+        let shift = -f32::from(offset.x); // how far the content is scrolled left
+        let target = if left < shift + gutter {
+            left - gutter // the gutter comes back into view with the first column
+        } else if viewport > 0. && right > shift + viewport - margin {
+            right + margin - viewport
+        } else {
+            return;
+        };
+        state
+            .base_handle
+            .set_offset(point(px(-target.max(0.)), offset.y));
     }
 
     /// The header lines pinned above the code when `top` is the first row on screen.
@@ -1914,6 +1963,9 @@ impl Viewer {
                 }))
         });
         let minimap = self.minimap_shown.then(|| self.minimap());
+        // the list is as wide as its widest visible line, so a longer one scrolls sideways
+        let widest = (0..rows.len())
+            .max_by_key(|&row| lines.get(rows.line(row)).map_or(0, |line| line.text.len()));
         let list = uniform_list("viewer", rows.len(), move |range, _, _| {
             range
                 .map(|row| {
@@ -2086,6 +2138,8 @@ impl Viewer {
                 .collect()
         })
         .track_scroll(&self.scroll)
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+        .with_width_from_item(widest)
         .size_full();
         div()
             .flex()
