@@ -1045,18 +1045,29 @@ impl Viewer {
             .row_of(self.buffer.position_of(self.vim.cursor()).line);
         let row = self.row_height();
         let y = line as f32 * row;
-        self.glide_to(
-            |viewport| match strategy {
-                ScrollStrategy::Center => y - (viewport - row) / 2.,
+        let Some((viewport, _)) = self.view_pixels() else {
+            return self.scroll.scroll_to_item_strict(line, strategy);
+        };
+        // the pinned declarations cover the first rows of the view, which then start below
+        // them; how many there are depends on the top the view ends up at, so settle on it
+        let mut covered = 0.;
+        let mut top = y;
+        for _ in 0..=MAX_STICKY {
+            top = match strategy {
+                ScrollStrategy::Center => y - (viewport - row + covered) / 2.,
                 ScrollStrategy::Bottom => y + row - viewport,
-                _ => y,
-            },
-            |this| this.scroll.scroll_to_item_strict(line, strategy),
-        );
+                _ => y - covered,
+            };
+            let first = (top.max(0.) / row) as usize;
+            covered = self.pinned_at(first).len() as f32 * row;
+        }
+        self.glide_to(|_| top, |_| {});
     }
 
     /// `Ctrl-D` / `Ctrl-U`: the cursor and the view move half a page.
-    fn scroll_half_page(&mut self, down: bool) {
+    /// `gliding_to` is where a glide cut short by this very key press was headed: the next
+    /// half page goes from there, not from the frame the view froze at.
+    fn scroll_half_page(&mut self, down: bool, gliding_to: Option<f32>) {
         let (top, rows) = self.view_metrics().unwrap_or((0, 20));
         let half = (rows / 2).max(1);
         let row = self
@@ -1070,7 +1081,10 @@ impl Viewer {
         };
         self.vim.move_to_line(&self.buffer, self.rows.line(row));
         let shift = half as f32 * self.row_height();
-        let top = top as f32 * self.row_height();
+        let top = gliding_to.unwrap_or_else(|| {
+            self.view_pixels()
+                .map_or(top as f32 * self.row_height(), |(_, top)| top)
+        });
         self.glide_to(|_| if down { top + shift } else { top - shift }, |_| {});
     }
 
@@ -1089,7 +1103,7 @@ impl Viewer {
     }
 
     pub fn handle_key(&mut self, key: Key) -> Effect {
-        self.anim = None; // a key press takes over from a glide
+        let gliding_to = self.anim.take().map(|anim| anim.to); // a key press takes over from a glide
         if self.z_pending {
             self.z_pending = false;
             if let Key::Char(command @ ('a' | 'o' | 'c' | 'M' | 'R')) = key {
@@ -1121,11 +1135,11 @@ impl Viewer {
                     return Effect::None;
                 }
                 Key::Ctrl('d') => {
-                    self.scroll_half_page(true);
+                    self.scroll_half_page(true, gliding_to);
                     return Effect::None;
                 }
                 Key::Ctrl('u') => {
-                    self.scroll_half_page(false);
+                    self.scroll_half_page(false, gliding_to);
                     return Effect::None;
                 }
                 _ => {}
