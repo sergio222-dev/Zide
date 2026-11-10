@@ -557,6 +557,22 @@ fn action_registry() -> Vec<ActionDef> {
             state: Some(|ws| ws.minimap),
             run: |ws, _, cx| ws.toggle_minimap(cx),
         },
+        ActionDef {
+            name: "Show Ignored Files",
+            synonyms: &[
+                "hidden",
+                "gitignore",
+                "ignored",
+                "dotfiles",
+                "tree",
+                "files",
+            ],
+            action: None,
+            closes_popup: false,
+            only_when_conflicted: false,
+            state: Some(|ws| ws.show_ignored),
+            run: |ws, _, cx| ws.toggle_show_ignored(cx),
+        },
     ]
 }
 
@@ -664,6 +680,8 @@ struct Workspace {
     font_size: f32,
     /// Whether the editor shows the minimap.
     minimap: bool,
+    /// Whether the tree and the searches list what git ignores.
+    show_ignored: bool,
     /// When the last Space was pressed in Normal mode: two in a row open the popup.
     last_space: Option<Instant>,
     /// The diff of a commit panel file is on screen, in a dialog.
@@ -850,6 +868,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             font_size: viewer::DEFAULT_FONT_SIZE,
             minimap: true,
+            show_ignored: false,
             last_space: None,
             diff_open: false,
             meter: meter::FrameMeter::from_env(),
@@ -907,6 +926,7 @@ impl Workspace {
             registry: std::rc::Rc::new(registry),
             window: window.window_handle(),
         };
+        workspace.show_ignored = session::show_ignored(&workspace.root).unwrap_or(false);
         workspace.rescan(cx);
         workspace.minimap = session::minimap(&workspace.root).unwrap_or(true);
         if let Some(size) = session::font_size(&workspace.root) {
@@ -924,6 +944,7 @@ impl Workspace {
         self.scan_generation += 1;
         let generation = self.scan_generation;
         let root = self.root.clone();
+        let show_ignored = self.show_ignored;
         let changes = self.changes_tx.clone();
         cx.spawn(async move |this, cx| {
             let started = Instant::now();
@@ -932,7 +953,7 @@ impl Workspace {
             let (paths, dirs, watcher) = cx
                 .background_executor()
                 .spawn(async move {
-                    let scan = scan_project(&root).unwrap_or_else(|e| {
+                    let scan = scan_project(&root, show_ignored).unwrap_or_else(|e| {
                         eprintln!("scan failed: {e}");
                         Scan::default()
                     });
@@ -2565,6 +2586,14 @@ impl Workspace {
         if let Some(viewer) = &mut self.viewer {
             viewer.set_minimap(self.minimap);
         }
+        cx.notify();
+    }
+
+    /// Lists or hides what git ignores, in the tree and the searches; the project remembers it.
+    fn toggle_show_ignored(&mut self, cx: &mut Context<Self>) {
+        self.show_ignored = !self.show_ignored;
+        session::remember_show_ignored(&self.root, self.show_ignored);
+        self.rescan(cx);
         cx.notify();
     }
 
