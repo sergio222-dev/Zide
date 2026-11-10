@@ -343,6 +343,8 @@ pub struct Branches {
     pub remote: Vec<String>,
     /// Local branches checked out lately, the latest first.
     pub recent: Vec<String>,
+    /// The tags, by name.
+    pub tags: Vec<String>,
 }
 
 impl Branches {
@@ -358,6 +360,9 @@ impl Branches {
         }
         for recent in &self.recent {
             out += &format!("recent\t{recent}\n");
+        }
+        for tag in &self.tags {
+            out += &format!("tag\t{tag}\n");
         }
         out
     }
@@ -378,6 +383,7 @@ impl Branches {
                 }),
                 "remote" if !name.is_empty() => branches.remote.push(name.to_string()),
                 "recent" if !name.is_empty() => branches.recent.push(name.to_string()),
+                "tag" if !name.is_empty() => branches.tags.push(name.to_string()),
                 _ => {}
             }
         }
@@ -407,6 +413,7 @@ pub fn branches(root: &Path) -> Option<Branches> {
         "--format=%(refname)\t%(upstream:short)\t%(HEAD)",
         "refs/heads",
         "refs/remotes",
+        "refs/tags",
     ])?;
     let reflog = git(&["reflog", "show", "--format=%gs", "-n", "300"]).unwrap_or_default();
     Some(parse_branches(&refs, &reflog))
@@ -434,6 +441,8 @@ fn parse_branches(refs: &str, reflog: &str) -> Branches {
             && !remote.ends_with("/HEAD")
         {
             branches.remote.push(remote.to_string());
+        } else if let Some(tag) = name.strip_prefix("refs/tags/") {
+            branches.tags.push(tag.to_string());
         }
     }
     for subject in reflog.lines() {
@@ -716,6 +725,8 @@ pub enum Switch {
     /// A remote-tracking branch (`origin/feat/x`): its local branch, created to track it when
     /// there is none yet.
     Remote(String),
+    /// A tag: checked out detached, at the commit it names.
+    Tag(String),
 }
 
 /// Checks out `target` in the repository at `root`. The error is what git said (for instance
@@ -731,6 +742,7 @@ pub fn switch(root: &Path, target: &Switch) -> Result<(), String> {
     };
     let output = match target {
         Switch::Local(name) => git(&["switch", name])?,
+        Switch::Tag(name) => git(&["switch", "--detach", &format!("refs/tags/{name}")])?,
         Switch::Remote(full) => {
             let short = full
                 .split_once('/')
@@ -778,6 +790,7 @@ mod tests {
             ],
             remote: vec!["origin/main".into()],
             recent: vec!["feat/x".into(), "main".into()],
+            tags: vec!["v1".into(), "rel/2".into()],
         };
         assert_eq!(Branches::from_cache(&branches.to_cache()), branches);
         let detached = Branches::default();
@@ -793,7 +806,7 @@ mod tests {
     fn branches_are_read_from_refs_and_the_reflog() {
         let refs = "refs/heads/main\torigin/main\t*\nrefs/heads/feat/x\t\t \n\
                     refs/remotes/origin/HEAD\t\t \nrefs/remotes/origin/main\t\t \n\
-                    refs/remotes/origin/feat/y\t\t \n";
+                    refs/remotes/origin/feat/y\t\t \nrefs/tags/v1\t\t \n";
         let reflog = "checkout: moving from feat/x to main\ncommit: work\n\
                       checkout: moving from main to feat/x\ncheckout: moving from a1b2c3 to main\n\
                       checkout: moving from main to gone\n";
@@ -813,6 +826,7 @@ mod tests {
             ]
         );
         assert_eq!(found.remote, ["origin/main", "origin/feat/y"]);
+        assert_eq!(found.tags, ["v1"]);
         // latest first, each once, and only branches that still exist
         assert_eq!(found.recent, ["main", "feat/x"]);
     }
@@ -1281,6 +1295,10 @@ mod tests {
         );
         git_in(&clone, &["branch", "local-only"]);
 
+        git_in(&clone, &["tag", "v0"]);
+        assert_eq!(branches(&clone).unwrap().tags, ["v0"]);
+        assert_eq!(switch(&clone, &Switch::Tag("v0".into())), Ok(()));
+        assert_ne!(branch_status(&clone).unwrap().name, "main"); // detached, at the tag
         assert_eq!(switch(&clone, &Switch::Local("local-only".into())), Ok(()));
         assert_eq!(branch_status(&clone).unwrap().name, "local-only");
         // no local `feat/y` yet: it is created and tracks the remote one

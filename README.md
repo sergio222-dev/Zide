@@ -34,9 +34,9 @@ Only Linux x86_64 is published for now.
   symbol index and the status line says so.
 - **Status bar**: messages on the left; on the right the branch's state against its upstream (`↑` to push, `↓` to pull,
   `Δ` when diverged), the branch name, the cursor position and the vim mode.
-- **Branch switcher** (``Ctrl+Shift+` ``, click the branch in the status bar, or Find Action → *Switch Branch*): Recent, Local and
-  Remote branches as folder trees (`feat/` holds `feat/*`), searchable; Enter checks out, a remote branch gets a
-  tracking local one.
+- **Branch switcher** (``Ctrl+Shift+` ``, click the branch in the status bar, or Find Action → *Switch Branch*): Recent, Local, Remote and
+  Tags as folder trees (`feat/` holds `feat/*`), searchable; Enter checks out, a remote branch gets a
+  tracking local one and a tag is checked out detached.
   Right-click a branch for its menu: *New Branch from…*, *Update* (fast-forward only), *Push…* (asks first, never forced)
   and *Rename* (the dialog refuses a name that already exists).
 - **Push dialog** (`Ctrl+Shift+K`, or Find Action → *Push Commits*): the commits the remote lacks on the left, the files of the
@@ -172,7 +172,7 @@ In the Claude chat (`Alt+2` opens it): `Alt+Up` / `Alt+Down` switch between open
 `Ctrl+V` pastes an image (click one, in the message or above the input, to see it large; `Esc` closes it), and `/` and `@` open the command and file menus. Earlier conversations
 are also listed by **Claude: Resume Session** in Find Action (`Ctrl+Shift+A`).
 
-In the Git log (`Alt+3` opens it): the refs tree on the left (HEAD, Local, Remote) narrows the history to
+In the Git log (`Alt+3` opens it): the refs tree on the left (HEAD, Local, Remote, Tags) narrows the history to
 the ref you pick, and picking it again goes back to every branch. `/` focuses the search box (message,
 author or the start of a hash), `Tab` moves between refs, commits and files, `j` / `k` or the arrows move,
 `Enter` on a file (or a double click) opens that commit's diff, and `Esc` closes the tab.

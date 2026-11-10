@@ -33,7 +33,7 @@ const PAGE: usize = 600;
 /// How long a pause in typing waits before the search runs.
 const TYPING_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
 /// The sections of the refs tree.
-const SECTIONS: [(&str, &str); 2] = [("local", "Local"), ("remote", "Remote")];
+const SECTIONS: [(&str, &str); 3] = [("local", "Local"), ("remote", "Remote"), ("tags", "Tags")];
 const LANE_COLORS: [u32; 8] = [
     0x61afef, 0xe5c07b, 0x98c379, 0xc678dd, 0xe06c75, 0x56b6c2, 0xd19a66, 0xabb2bf,
 ];
@@ -203,6 +203,7 @@ fn scope_after_pick(current: &Scope, target: &Switch) -> Scope {
     let wanted = match target {
         Switch::Local(name) => Scope::Ref(format!("refs/heads/{name}")),
         Switch::Remote(full) => Scope::Ref(format!("refs/remotes/{full}")),
+        Switch::Tag(name) => Scope::Ref(format!("refs/tags/{name}")),
     };
     if *current == wanted {
         Scope::All
