@@ -730,7 +730,7 @@ struct Workspace {
     /// Whether the editor, the chat or the git log fills the area.
     center: Center,
     /// The git log tab, created the first time it is opened.
-    log: Option<gitlog::LogPanel>,
+    log: Option<Entity<gitlog::LogPanel>>,
     /// What was last written as the layout, to write it only when it changes.
     saved_layout: Option<session::Layout>,
     commit: Option<commit::CommitPanel>,
@@ -3621,91 +3621,95 @@ impl Workspace {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(if self.center == Center::Log {
-                self.log_view(cx).into_any_element()
-            } else if self.center == Center::Chat
-                && let Some(chats) = &self.claude
-            {
-                chats.clone().into_any_element()
-            } else {
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .children(self.tree_visible.then(|| self.project_tree(cx)))
-                    .children(
-                        (self.commit_open && self.commit.is_some()).then(|| self.commit_view(cx)),
-                    )
-                    .child(match &self.viewer {
-                        Some(viewer) => div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .text_color(rgb(theme::TEXT))
-                            .children(self.find_panel(cx))
-                            .child(viewer.render(
-                                std::rc::Rc::new({
-                                    let workspace = cx.entity();
-                                    move |line, cx| {
-                                        workspace.update(cx, |this, cx| {
-                                            if let Some(viewer) = &mut this.viewer {
-                                                viewer.toggle_fold(line);
-                                                cx.notify();
-                                            }
-                                        });
+            .child(
+                if self.center == Center::Log
+                    && let Some(log) = &self.log
+                {
+                    log.clone().into_any_element()
+                } else if self.center == Center::Chat
+                    && let Some(chats) = &self.claude
+                {
+                    chats.clone().into_any_element()
+                } else {
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .children(self.tree_visible.then(|| self.project_tree(cx)))
+                        .children(
+                            (self.commit_open && self.commit.is_some()).then(|| self.commit_view(cx)),
+                        )
+                        .child(match &self.viewer {
+                            Some(viewer) => div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .text_color(rgb(theme::TEXT))
+                                .children(self.find_panel(cx))
+                                .child(viewer.render(
+                                    std::rc::Rc::new({
+                                        let workspace = cx.entity();
+                                        move |line, cx| {
+                                            workspace.update(cx, |this, cx| {
+                                                if let Some(viewer) = &mut this.viewer {
+                                                    viewer.toggle_fold(line);
+                                                    cx.notify();
+                                                }
+                                            });
+                                        }
+                                    }),
+                                    std::rc::Rc::new({
+                                        let workspace = cx.entity();
+                                        move |over, cx| {
+                                            workspace.update(cx, |this, cx| {
+                                                if let Some(viewer) = &mut this.viewer
+                                                    && viewer.set_hover(over)
+                                                {
+                                                    cx.notify();
+                                                }
+                                            });
+                                        }
+                                    }),
+                                    std::rc::Rc::new({
+                                        let workspace = cx.entity();
+                                        move |row, at, cx| {
+                                            workspace.update(cx, |this, cx| {
+                                                if let Some(viewer) = &mut this.viewer
+                                                    && viewer.click(row, at)
+                                                {
+                                                    this.tree_focused = false; // keys are the editor's
+                                                    this.leave_commit_list();
+                                                    cx.notify();
+                                                }
+                                            });
+                                        }
+                                    }),
+                                ))
+                                .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
+                                    if event.modifiers.control {
+                                        this.zoom(event, window, cx);
                                     }
-                                }),
-                                std::rc::Rc::new({
-                                    let workspace = cx.entity();
-                                    move |over, cx| {
-                                        workspace.update(cx, |this, cx| {
-                                            if let Some(viewer) = &mut this.viewer
-                                                && viewer.set_hover(over)
-                                            {
-                                                cx.notify();
-                                            }
-                                        });
-                                    }
-                                }),
-                                std::rc::Rc::new({
-                                    let workspace = cx.entity();
-                                    move |row, at, cx| {
-                                        workspace.update(cx, |this, cx| {
-                                            if let Some(viewer) = &mut this.viewer
-                                                && viewer.click(row, at)
-                                            {
-                                                this.tree_focused = false; // keys are the editor's
-                                                this.leave_commit_list();
-                                                cx.notify();
-                                            }
-                                        });
-                                    }
-                                }),
-                            ))
-                            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
-                                if event.modifiers.control {
-                                    this.zoom(event, window, cx);
-                                }
-                            })),
-                        None => div().flex_1().p_4().text_color(rgb(theme::DIM)).child(
-                            "Press Space twice to open the popup. Alt+1 shows the project tree.",
-                        ),
-                    })
-                    .children(preview.map(|view| {
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .p_4()
-                            .border_l_1()
-                            .border_color(rgb(theme::BORDER))
-                            .child(view)
-                    }))
-                    .into_any_element()
-            })
+                                })),
+                            None => div().flex_1().p_4().text_color(rgb(theme::DIM)).child(
+                                "Press Space twice to open the popup. Alt+1 shows the project tree.",
+                            ),
+                        })
+                        .children(preview.map(|view| {
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .p_4()
+                                .border_l_1()
+                                .border_color(rgb(theme::BORDER))
+                                .child(view)
+                        }))
+                        .into_any_element()
+                },
+            )
             .child(statusbar::render(
                 self.viewer.as_ref().map(Viewer::status),
                 self.busy_label(),

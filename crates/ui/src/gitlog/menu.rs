@@ -12,7 +12,7 @@ use zide_git::Op;
 use zide_git::commit_ops::{self, ResetMode};
 use zide_git::{FileChange, Switch};
 
-use super::LogPanel;
+use super::{LogEvent, LogPanel};
 use crate::branches::NameKind;
 use crate::changed_files::plural;
 use crate::{Workspace, theme};
@@ -184,7 +184,7 @@ impl Render for ResetDialog {
     }
 }
 
-impl Workspace {
+impl LogPanel {
     /// Opens the menu of commit `index` at the mouse; the commit becomes the selected one.
     pub(super) fn open_context_menu(
         &mut self,
@@ -193,10 +193,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.select_log_commit(index, cx);
-        if let Some(panel) = &mut self.log
-            && let Some(entry) = panel.selected_entry()
-        {
-            panel.context_menu = Some(ContextMenu {
+        if let Some(entry) = self.selected_entry() {
+            self.context_menu = Some(ContextMenu {
                 hash: entry.commit.hash.clone(),
                 subject: entry.commit.subject.clone(),
                 on: Subject::Commit,
@@ -216,42 +214,33 @@ impl Workspace {
         at: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(panel) = &mut self.log {
-            if !panel.picked_files().contains(&index) {
-                panel.click_file(index, false, false);
-            }
-            let files = panel.selected_files();
-            if let Some(entry) = panel.selected_entry().filter(|_| !files.is_empty()) {
-                panel.context_menu = Some(ContextMenu {
-                    hash: entry.commit.hash.clone(),
-                    subject: entry.commit.subject.clone(),
-                    on: Subject::Files(files),
-                    entries: table(true),
-                    at,
-                    row: 0,
-                });
-            }
+        if !self.picked_files().contains(&index) {
+            self.click_file(index, false, false);
+        }
+        let files = self.selected_files();
+        if let Some(entry) = self.selected_entry().filter(|_| !files.is_empty()) {
+            self.context_menu = Some(ContextMenu {
+                hash: entry.commit.hash.clone(),
+                subject: entry.commit.subject.clone(),
+                on: Subject::Files(files),
+                entries: table(true),
+                at,
+                row: 0,
+            });
         }
         cx.notify();
     }
 
     /// Opens the menu of the branch or tag on row `index` of the tree, which becomes the selected
-    /// row. Folders and sections have none.
+    /// row; `into` is the current branch. Folders and sections have none.
     pub(super) fn open_ref_menu(
         &mut self,
         index: usize,
         at: Point<Pixels>,
+        into: String,
         cx: &mut Context<Self>,
     ) {
-        let into = self
-            .branch
-            .as_ref()
-            .map(|b| b.name.clone())
-            .unwrap_or_default();
-        let Some(panel) = &mut self.log else {
-            return;
-        };
-        let Some(model) = &mut panel.refs else {
+        let Some(model) = &mut self.refs else {
             return;
         };
         let Some(crate::branches::Kind::Branch {
@@ -261,17 +250,17 @@ impl Workspace {
             return;
         };
         model.select(index);
-        panel.head_cursor = false;
-        let remote = panel.remote.clone().unwrap_or_else(|| "origin".into());
+        self.head_cursor = false;
+        let remote = self.remote.clone().unwrap_or_else(|| "origin".into());
         let on_remote = match &target {
             Switch::Local(name) => model.remote_names().contains(&format!("{remote}/{name}")),
-            Switch::Tag(name) => panel
+            Switch::Tag(name) => self
                 .remote_tags
                 .as_ref()
                 .is_some_and(|(of, tags)| *of == remote && tags.contains(name)),
             Switch::Remote(_) => true,
         };
-        panel.context_menu = Some(ContextMenu {
+        self.context_menu = Some(ContextMenu {
             hash: String::new(),
             subject: String::new(),
             entries: ref_entries(&target, current, on_remote, &remote, &into),
@@ -286,6 +275,22 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(super) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    /// Closes the menu and asks the workspace to run `action` on what it was opened on.
+    pub(super) fn menu_action(&mut self, action: MenuAction, cx: &mut Context<Self>) {
+        if let Some(menu) = self.context_menu.take() {
+            cx.emit(LogEvent::Menu { action, menu });
+        }
+        cx.notify();
+    }
+}
+
+/// The actions of the menus: they are git's, run the way the workspace runs every git operation.
+impl Workspace {
     /// Runs `action` on the branch or tag of the open menu.
     fn ref_action(
         &mut self,
@@ -344,27 +349,14 @@ impl Workspace {
         }
     }
 
-    pub(super) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
-        if let Some(panel) = &mut self.log {
-            panel.context_menu = None;
-        }
-        cx.notify();
-    }
-
-    /// Runs `action` on the commit of the open menu, and closes the menu.
-    pub(super) fn menu_action(
+    /// Runs `action` on what `menu` was opened on.
+    pub(super) fn run_menu_action(
         &mut self,
         action: MenuAction,
+        menu: ContextMenu,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = self
-            .log
-            .as_mut()
-            .and_then(|panel| panel.context_menu.take())
-        else {
-            return;
-        };
         let ContextMenu {
             hash, subject, on, ..
         } = menu;
@@ -439,8 +431,7 @@ impl Workspace {
                 let existing = self
                     .log
                     .as_ref()
-                    .and_then(|panel| panel.refs.as_ref())
-                    .map(|model| model.local_names())
+                    .and_then(|log| log.read(cx).refs.as_ref().map(|model| model.local_names()))
                     .unwrap_or_default();
                 self.ask_name(
                     NameKind::Branch,
@@ -526,9 +517,9 @@ impl Workspace {
 
 /// The menu, drawn over everything at the mouse, with a layer under it that closes it on a click
 /// anywhere else.
-pub fn view(menu: &ContextMenu, workspace: &Entity<Workspace>) -> impl IntoElement {
+pub fn view(menu: &ContextMenu, entity: &Entity<LogPanel>) -> impl IntoElement {
     let backdrop = {
-        let (left, right) = (workspace.clone(), workspace.clone());
+        let (left, right) = (entity.clone(), entity.clone());
         deferred(
             div()
                 .id("commit-menu-backdrop")
@@ -549,7 +540,7 @@ pub fn view(menu: &ContextMenu, workspace: &Entity<Workspace>) -> impl IntoEleme
         .iter()
         .enumerate()
         .map(|(position, (action, label))| {
-            let (action, label, workspace) = (*action, label.clone(), workspace.clone());
+            let (action, label, entity) = (*action, label.clone(), entity.clone());
             div()
                 .id(("commit-menu", position))
                 .h(px(ROW_HEIGHT))
@@ -560,8 +551,8 @@ pub fn view(menu: &ContextMenu, workspace: &Entity<Workspace>) -> impl IntoEleme
                 .cursor_pointer()
                 .when(position == menu.row, |d| d.bg(rgb(theme::TREE_FOCUSED)))
                 .hover(|d| d.bg(rgb(theme::SELECTION)))
-                .on_click(move |_, window, cx| {
-                    workspace.update(cx, |this, cx| this.menu_action(action, window, cx))
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.menu_action(action, cx))
                 })
                 .child(label)
         });
