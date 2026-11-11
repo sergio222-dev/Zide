@@ -10,7 +10,7 @@ pub mod history;
 mod session;
 mod transcript;
 
-pub use cli::{MIN_VERSION, Version, installed};
+pub use cli::{Launcher, MIN_VERSION, Version, installed, launcher, probe, set_launcher};
 pub use defaults::{Defaults, defaults};
 pub use event::{Event, Limits, Question, QuestionOption, Usage, Window, parse_events};
 pub use serde_json::Value;

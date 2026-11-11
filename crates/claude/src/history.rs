@@ -4,7 +4,7 @@
 //! not understand.
 
 use std::{
-    env, fs,
+    fs,
     io::{self, BufRead, BufReader},
     path::{Path, PathBuf},
     time::SystemTime,
@@ -28,10 +28,7 @@ pub struct SessionInfo {
 /// `projects/`, then the path with every character that is not a letter or digit
 /// turned into `-`.
 pub fn project_dir(root: &Path) -> Option<PathBuf> {
-    let config = match env::var_os("CLAUDE_CONFIG_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(env::var_os("HOME")?).join(".claude"),
-    };
+    let config = crate::cli::config_dir()?;
     let name: String = root
         .to_string_lossy()
         .chars()
@@ -316,7 +313,7 @@ mod tests {
 
     impl Scratch {
         fn new() -> Scratch {
-            let dir = env::temp_dir().join(format!(
+            let dir = std::env::temp_dir().join(format!(
                 "zide-claude-history-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)

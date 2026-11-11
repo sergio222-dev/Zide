@@ -1,7 +1,7 @@
 use std::{
     io::{self, BufRead, BufReader, Write},
     path::Path,
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
 };
@@ -67,7 +67,7 @@ pub struct Session {
 impl Session {
     /// Starts `claude` in `cwd` (its config is looked up from there).
     pub fn spawn(cwd: &Path, options: Options) -> io::Result<(Session, Receiver<Event>)> {
-        let mut command = Command::new(crate::cli::program());
+        let mut command = crate::cli::command();
         command
             .args(["-p", "--verbose", "--include-partial-messages"])
             .args(["--input-format", "stream-json"])

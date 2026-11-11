@@ -1,7 +1,7 @@
 //! The background agents `claude agents --json` knows about: sessions that run on their own,
 //! apart from the chats Zide drives.
 
-use std::{path::Path, process::Command};
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -35,7 +35,7 @@ pub struct Agent {
 /// newest first. Empty when
 /// `claude` is missing, too old for `agents`, or answers something unexpected.
 pub fn list(root: &Path) -> Vec<Agent> {
-    let output = Command::new(crate::cli::program())
+    let output = crate::cli::command()
         .args(["agents", "--all", "--json", "--cwd"])
         .arg(root)
         .output();
@@ -53,7 +53,7 @@ pub fn remove(id: &str) -> Result<String, String> {
     if id.starts_with('-') {
         return Err("not an agent id".into()); // an id never is an option
     }
-    let output = Command::new(crate::cli::program())
+    let output = crate::cli::command()
         .args(["rm", id])
         .output()
         .map_err(|error| error.to_string())?;
