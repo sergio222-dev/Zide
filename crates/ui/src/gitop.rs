@@ -377,7 +377,7 @@ impl Workspace {
             return;
         };
         let op = dialog.op;
-        let done = dialog.done(self.branch.as_ref().map(|b| b.name.as_str()));
+        let done = dialog.done(self.git.branch().map(|b| b.name.as_str()));
         self.close_git_op(window, cx);
         let failure = match op {
             Op::Pull => "Could not pull",

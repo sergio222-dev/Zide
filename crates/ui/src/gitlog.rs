@@ -597,11 +597,7 @@ impl Workspace {
                     this.run_menu_action(*action, menu.clone(), window, cx)
                 }
                 LogEvent::RefMenu { row, at } => {
-                    let into = this
-                        .branch
-                        .as_ref()
-                        .map(|b| b.name.clone())
-                        .unwrap_or_default();
+                    let into = this.git.branch_name();
                     let (row, at) = (*row, *at);
                     if let Some(log) = &this.log {
                         log.update(cx, |log, cx| log.open_ref_menu(row, at, into, cx));

@@ -24,6 +24,7 @@ mod definition;
 mod diff_view;
 mod file_icon;
 mod fileops;
+mod git_state;
 mod gitlog;
 mod gitop;
 mod indent;
@@ -49,6 +50,7 @@ mod usages;
 mod viewer;
 mod welcome;
 
+use git_state::GitState;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::IndexPath;
@@ -742,14 +744,13 @@ struct Workspace {
     tree_clipboard: Option<String>,
     /// A path the next scan selects in the tree (the one just moved or pasted).
     tree_reveal: Option<String>,
-    git_status: Arc<std::collections::HashMap<String, zide_git::ChangeKind>>,
+    /// The checked-out branch and the state of each changed file.
+    git: GitState,
     /// Chats started from now on run `claude` with none of the user's configuration, which
     /// makes a test turn cheap; see `zide_claude::Options::minimal`.
     claude_bare: bool,
     /// Sees the chat's keys before the input box turns them into its own actions.
     _claude_keys: Subscription,
-    /// The checked-out branch and how far it is from its upstream, `None` outside a repository.
-    branch: Option<zide_git::BranchStatus>,
     /// The git dialog floating over the workspace, if any.
     overlay: Overlay,
     /// The rendered Markdown beside the editor (Ctrl+Shift+M), for `.md` files.
@@ -815,8 +816,7 @@ impl Workspace {
                     .spawn(async move { zide_git::branch_status(&root) })
                     .await;
                 let updated = this.update(cx, |this, cx| {
-                    if this.branch != status {
-                        this.branch = status;
+                    if this.git.set_branch(status) {
                         cx.notify();
                     }
                 });
@@ -899,8 +899,7 @@ impl Workspace {
             commit_open: false,
             tree_clipboard: None,
             tree_reveal: None,
-            git_status: Arc::default(),
-            branch: None,
+            git: GitState::default(),
             overlay: Overlay::None,
             md_preview: false,
             md: None,
@@ -1116,8 +1115,7 @@ impl Workspace {
                 .spawn(async move { zide_git::branch_status(&root) })
                 .await;
             this.update(cx, |this, cx| {
-                if this.branch != status {
-                    this.branch = status;
+                if this.git.set_branch(status) {
                     cx.notify();
                 }
             })
@@ -2215,7 +2213,7 @@ impl Workspace {
         let rows = self.tree.shared_rows();
         let selected = self.tree.selected();
         let focused = self.tree_focused;
-        let git_status = self.git_status.clone();
+        let git_status = self.git.status();
         let workspace = cx.entity();
         // the widest row sets the scrollable width (an indent step is about two characters)
         let widest = rows
@@ -2799,11 +2797,7 @@ impl Workspace {
     /// Find Action → *Fetch*: brings every remote's branches and tags, and keeps which tags the
     /// remote of the current branch has, for the menus of the git log.
     fn fetch(&mut self, cx: &mut Context<Self>) {
-        let branch = self
-            .branch
-            .as_ref()
-            .map(|b| b.name.clone())
-            .unwrap_or_default();
+        let branch = self.git.branch_name();
         self.git_task(
             "Could not fetch",
             Some("Fetched every remote".into()),
@@ -2900,7 +2894,7 @@ impl Workspace {
     ) {
         self.commit_finished(ok, cx);
         self.refresh_git(cx);
-        self.branch = status;
+        self.git.set_branch(status);
         if files {
             self.rescan(cx);
         }
@@ -3015,7 +3009,7 @@ impl Workspace {
                 );
             }
             A::Update(name) => {
-                let checked_out = self.branch.as_ref().is_some_and(|b| b.name == name);
+                let checked_out = self.git.is_checked_out(&name);
                 let done = format!("Updated '{name}'");
                 self.git_task(
                     "Could not update the branch",
@@ -3202,10 +3196,7 @@ impl Workspace {
             }
             Tab::Projects => {}
             Tab::Actions => {
-                let conflicted = self
-                    .git_status
-                    .values()
-                    .any(|kind| *kind == zide_git::ChangeKind::Conflicted);
+                let conflicted = self.git.has_conflicts();
                 let hits = search_actions(&self.action_texts, &query, usize::MAX);
                 popup.actions = Arc::new(
                     hits.into_iter()
@@ -3712,7 +3703,7 @@ impl Workspace {
             .child(statusbar::render(
                 self.viewer.as_ref().map(Viewer::status),
                 self.busy_label(),
-                self.branch.as_ref(),
+                self.git.branch(),
                 cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
                 self.claude_installed.then(|| self.claude_overall(cx)),
                 cx.listener(|this, _, window, cx| this.toggle_claude(window, cx)),

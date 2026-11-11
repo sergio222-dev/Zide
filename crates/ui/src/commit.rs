@@ -2,7 +2,6 @@
 //! and the buttons that commit what is ticked.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
@@ -519,7 +518,7 @@ impl Workspace {
         let in_panel = self.commit_open
             && (self.commit_focused(window, cx)
                 || self.commit.as_ref().is_some_and(|panel| panel.list_focused));
-        let merging = self.merging();
+        let merging = self.git.merging();
         let ready = self.commit.as_ref().is_some_and(|panel| {
             !panel.busy && (panel.changes.ticked() > 0 || merging) || panel.amend
         });
@@ -624,22 +623,13 @@ impl Workspace {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                let conflicted = |status: &std::collections::HashMap<_, _>| {
-                    status.values().any(|kind| *kind == ChangeKind::Conflicted)
-                };
-                let before = conflicted(&this.git_status);
-                this.git_status = Arc::new(
-                    changes
-                        .iter()
-                        .map(|change| (change.path.clone(), change.kind))
-                        .collect(),
-                );
+                let conflicts_changed = this.git.set_changes(&changes);
                 if let Some(panel) = &mut this.commit {
                     panel.changes.set_changes(changes);
                 }
                 this.set_stashes(stashes, cx);
                 // the actions on offer depend on it (Resolve Conflicts only shows with conflicts)
-                if this.popup.is_some() && before != conflicted(&this.git_status) {
+                if this.popup.is_some() && conflicts_changed {
                     this.search_again(cx);
                 }
                 cx.notify();
@@ -699,17 +689,6 @@ impl Workspace {
         );
     }
 
-    /// A merge is under way: committing concludes it, whether or not any file is listed (the
-    /// merge may leave nothing to change).
-    fn merging(&self) -> bool {
-        self.branch.as_ref().is_some_and(|branch| {
-            branch
-                .progress
-                .as_ref()
-                .is_some_and(|progress| progress.operation == zide_git::Operation::Merge)
-        })
-    }
-
     pub(crate) fn commit_view(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let workspace = cx.entity();
         if self
@@ -719,7 +698,7 @@ impl Workspace {
         {
             return self.stash_view(cx);
         }
-        let merging = self.merging();
+        let merging = self.git.merging();
         let panel = self.commit.as_ref().expect("the panel is open");
         let rows = panel.changes.rows();
         let (count, ticked, amend, busy) = (
