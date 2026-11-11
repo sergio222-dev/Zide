@@ -124,6 +124,11 @@ impl Model {
         self.data.local.iter().map(|b| b.name.clone()).collect()
     }
 
+    /// The remote branches, as `origin/main`.
+    pub fn remote_names(&self) -> &[String] {
+        &self.data.remote
+    }
+
     /// What the selected row checks out, when it is a branch.
     pub fn selected_target(&self) -> Option<Switch> {
         match &self.rows.get(self.selected)?.kind {

@@ -46,7 +46,8 @@ Only Linux x86_64 is published for now.
 - **Push dialog** (`Ctrl+Shift+K`, or Find Action → *Push Commits*): the commits the remote lacks on the left, the files of the
   selected commit on the right with its message, author and date under them. `Enter` or a double click on a file opens what
   the commit changed in it, side by side (green added, gray removed, blue replaced); `Ctrl+Enter` or **Push** pushes (never
-  forced), and *Push tags* sends the tags too.
+  forced), even with no new commits (it still sets the branch's upstream), and *Push tags* sends the tags too. The header says
+  where it goes: `branch → remote : branch`.
 - **Pull, Merge and Rebase dialogs** (`Ctrl+Shift+U` pulls; Find Action → *Pull*, *Merge*, *Rebase*): `git <command>` with the
   branch taken from a dropdown (`Tab` switches, `Up`/`Down` open and move, `Enter` picks, then `Enter` runs; typing in a dropdown narrows its list down). *Modify options*
   (`Alt+O`) lists what git accepts, shown as chips once picked; what cannot go with a picked option is dimmed. Options that take
@@ -229,6 +230,12 @@ Right click on a commit opens its menu (`Up`/`Down` and `Enter` work too, `Esc` 
 *Cherry-Pick*, *Reset Current Branch to Here...* (asks for Soft, Mixed, Hard or Keep), *Revert Commit*, *New Branch...*
 (created from that commit and checked out) and *New Tag...*. A cherry-pick or revert that clashes leaves its conflicts
 for the resolver, as a merge does.
+
+Right click on a branch or tag of the tree opens its menu. One the remote does not have yet only offers *Push to origin*
+(the remote the current branch pushes to); one it has offers *Checkout*, *Merge 'x' into 'current'*, *Push to origin* and
+*Delete* (a branch with unmerged commits is kept; a tag is deleted here only, the remote keeps it). A remote branch offers
+*Checkout* and *Merge*, the current branch only *Push*. Find Action → *Fetch* brings the branches and tags of every remote
+(dropping the remote branches that are gone) and reads which tags the remote has, which is how the menu of a tag knows.
 
 The files of the selected commit take `Ctrl+click` to add or drop a file, `Shift+click` (or `Shift+Up`/`Down`) for a
 range and `Space` to toggle the one under the cursor. Right click on them opens *Show Diff*, *Revert Selected Changes*

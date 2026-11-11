@@ -1,14 +1,16 @@
 //! The context menus of the git log (right click). On a commit: copy its hash, cherry-pick it,
 //! reset the branch to it, revert it, start a branch or a tag on it. On the files of a commit: show
 //! their diff, revert or cherry-pick their changes into the working tree, or get them as they
-//! were in that commit.
+//! were in that commit. On a branch or a tag of the tree: check it out, merge it into the current
+//! branch, push it or delete it once the remote has it; only push it while the remote does not.
 
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use zide_git::FileChange;
+use zide_git::Op;
 use zide_git::commit_ops::{self, ResetMode};
+use zide_git::{FileChange, Switch};
 
 use super::LogPanel;
 use crate::branches::NameKind;
@@ -30,6 +32,10 @@ pub enum MenuAction {
     RevertChanges,
     CherryPickChanges,
     GetFromRevision,
+    Checkout,
+    Merge,
+    Push,
+    Delete,
 }
 
 /// What the menu was opened on.
@@ -38,6 +44,13 @@ pub enum Subject {
     Commit,
     /// The files picked in the list of the commit.
     Files(Vec<FileChange>),
+    /// A branch or a tag of the tree, with the remote it goes to and the current branch (or
+    /// commit) it would be merged into.
+    Ref {
+        target: Switch,
+        remote: String,
+        into: String,
+    },
 }
 
 const FILE_ENTRIES: [(MenuAction, &str); 4] = [
@@ -50,11 +63,46 @@ const FILE_ENTRIES: [(MenuAction, &str); 4] = [
     (MenuAction::GetFromRevision, "Get from Revision"),
 ];
 
-/// The entries of the menu of `subject`.
-pub fn entries(subject: &Subject) -> &'static [(MenuAction, &'static str)] {
-    match subject {
-        Subject::Commit => &ENTRIES,
-        Subject::Files(_) => &FILE_ENTRIES,
+/// The entries of the menu of a commit or of its files.
+fn table(files: bool) -> Vec<(MenuAction, String)> {
+    let table: &[(MenuAction, &str)] = if files { &FILE_ENTRIES } else { &ENTRIES };
+    table
+        .iter()
+        .map(|(action, label)| (*action, label.to_string()))
+        .collect()
+}
+
+/// The name of a branch or tag, as git takes it.
+fn ref_name(target: &Switch) -> &str {
+    match target {
+        Switch::Local(name) | Switch::Remote(name) | Switch::Tag(name) => name,
+    }
+}
+
+/// The entries of the menu of a branch or tag. One the remote does not have yet can only be
+/// pushed; one it has can be checked out, merged into `into`, pushed and deleted. A remote branch
+/// is checked out or merged; the current branch is only pushed.
+pub fn ref_entries(
+    target: &Switch,
+    current: bool,
+    on_remote: bool,
+    remote: &str,
+    into: &str,
+) -> Vec<(MenuAction, String)> {
+    let name = ref_name(target);
+    let push = (MenuAction::Push, format!("Push to {remote}"));
+    let checkout = (MenuAction::Checkout, "Checkout".to_string());
+    let merge = (MenuAction::Merge, format!("Merge '{name}' into '{into}'"));
+    match target {
+        Switch::Remote(_) => vec![checkout, merge],
+        _ if current => vec![push],
+        _ if !on_remote => vec![push],
+        _ => vec![
+            checkout,
+            merge,
+            push,
+            (MenuAction::Delete, "Delete".to_string()),
+        ],
     }
 }
 
@@ -67,19 +115,22 @@ pub const ENTRIES: [(MenuAction, &str); 6] = [
     (MenuAction::NewTag, "New Tag..."),
 ];
 
-/// An open menu: the commit it was asked on, where, and the entry the keyboard is on.
+/// An open menu: the commit (or ref) it was asked on, its entries, where, and the entry the
+/// keyboard is on.
 #[derive(Debug, Clone)]
 pub struct ContextMenu {
+    /// Empty for a ref.
     pub hash: String,
     pub subject: String,
     pub on: Subject,
+    pub entries: Vec<(MenuAction, String)>,
     pub at: Point<Pixels>,
     pub row: usize,
 }
 
 impl ContextMenu {
     pub fn move_row(&mut self, delta: isize) {
-        let last = entries(&self.on).len() - 1;
+        let last = self.entries.len().saturating_sub(1);
         self.row = self.row.saturating_add_signed(delta).min(last);
     }
 }
@@ -149,6 +200,7 @@ impl Workspace {
                 hash: entry.commit.hash.clone(),
                 subject: entry.commit.subject.clone(),
                 on: Subject::Commit,
+                entries: table(false),
                 at,
                 row: 0,
             });
@@ -174,12 +226,122 @@ impl Workspace {
                     hash: entry.commit.hash.clone(),
                     subject: entry.commit.subject.clone(),
                     on: Subject::Files(files),
+                    entries: table(true),
                     at,
                     row: 0,
                 });
             }
         }
         cx.notify();
+    }
+
+    /// Opens the menu of the branch or tag on row `index` of the tree, which becomes the selected
+    /// row. Folders and sections have none.
+    pub(super) fn open_ref_menu(
+        &mut self,
+        index: usize,
+        at: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let into = self
+            .branch
+            .as_ref()
+            .map(|b| b.name.clone())
+            .unwrap_or_default();
+        let Some(panel) = &mut self.log else {
+            return;
+        };
+        let Some(model) = &mut panel.refs else {
+            return;
+        };
+        let Some(crate::branches::Kind::Branch {
+            target, current, ..
+        }) = model.rows().get(index).map(|row| row.kind.clone())
+        else {
+            return;
+        };
+        model.select(index);
+        panel.head_cursor = false;
+        let remote = panel.remote.clone().unwrap_or_else(|| "origin".into());
+        let on_remote = match &target {
+            Switch::Local(name) => model.remote_names().contains(&format!("{remote}/{name}")),
+            Switch::Tag(name) => panel
+                .remote_tags
+                .as_ref()
+                .is_some_and(|(of, tags)| *of == remote && tags.contains(name)),
+            Switch::Remote(_) => true,
+        };
+        panel.context_menu = Some(ContextMenu {
+            hash: String::new(),
+            subject: String::new(),
+            entries: ref_entries(&target, current, on_remote, &remote, &into),
+            on: Subject::Ref {
+                target,
+                remote,
+                into,
+            },
+            at,
+            row: 0,
+        });
+        cx.notify();
+    }
+
+    /// Runs `action` on the branch or tag of the open menu.
+    fn ref_action(
+        &mut self,
+        action: MenuAction,
+        target: Switch,
+        remote: String,
+        into: String,
+        cx: &mut Context<Self>,
+    ) {
+        let name = ref_name(&target).to_string();
+        match (action, target) {
+            (MenuAction::Checkout, target) => self.switch_branch(target, cx),
+            (MenuAction::Merge, _) => self.git_task(
+                "Could not merge",
+                Some(format!("Merged '{name}' into '{into}'")),
+                move |root| zide_git::integrate(&root, Op::Merge, &[name]),
+                cx,
+            ),
+            (MenuAction::Push, Switch::Tag(_)) => self.git_task(
+                "Could not push the tag",
+                Some(format!("Pushed '{name}' to {remote}")),
+                move |root| {
+                    zide_git::push_tag(&root, &remote, &name)?;
+                    // the menu offers what the remote has: it has this tag now
+                    if let Some((of, mut tags)) = crate::session::remote_tags(&root)
+                        && of == remote
+                    {
+                        tags.push(name);
+                        tags.sort();
+                        tags.dedup();
+                        crate::session::remember_remote_tags(&root, &remote, &tags);
+                    }
+                    Ok(())
+                },
+                cx,
+            ),
+            (MenuAction::Push, _) => self.git_task(
+                "Could not push",
+                Some(format!("Pushed '{name}' to {remote}")),
+                move |root| zide_git::push_branch(&root, &name, &remote),
+                cx,
+            ),
+            (MenuAction::Delete, Switch::Tag(_)) => self.git_task(
+                "Could not delete the tag",
+                Some(format!("Deleted the tag '{name}'")),
+                move |root| zide_git::delete_tag(&root, &name),
+                cx,
+            ),
+            (MenuAction::Delete, _) => self.git_task(
+                "Could not delete the branch",
+                Some(format!("Deleted the branch '{name}'")),
+                move |root| zide_git::delete_branch(&root, &name),
+                cx,
+            ),
+            _ => {}
+        }
     }
 
     pub(super) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
@@ -210,6 +372,11 @@ impl Workspace {
         let files = match on {
             Subject::Files(files) => files,
             Subject::Commit => Vec::new(),
+            Subject::Ref {
+                target,
+                remote,
+                into,
+            } => return self.ref_action(action, target, remote, into, cx),
         };
         match action {
             MenuAction::CopyHash => {
@@ -295,6 +462,7 @@ impl Workspace {
                     cx,
                 );
             }
+            MenuAction::Checkout | MenuAction::Merge | MenuAction::Push | MenuAction::Delete => {}
             MenuAction::NewTag => self.ask_name(
                 NameKind::Tag,
                 "New Tag",
@@ -376,11 +544,12 @@ pub fn view(menu: &ContextMenu, workspace: &Entity<Workspace>) -> impl IntoEleme
         )
         .with_priority(1)
     };
-    let rows = entries(&menu.on)
+    let rows = menu
+        .entries
         .iter()
         .enumerate()
         .map(|(position, (action, label))| {
-            let (action, workspace) = (*action, workspace.clone());
+            let (action, label, workspace) = (*action, label.clone(), workspace.clone());
             div()
                 .id(("commit-menu", position))
                 .h(px(ROW_HEIGHT))
@@ -394,7 +563,7 @@ pub fn view(menu: &ContextMenu, workspace: &Entity<Workspace>) -> impl IntoEleme
                 .on_click(move |_, window, cx| {
                     workspace.update(cx, |this, cx| this.menu_action(action, window, cx))
                 })
-                .child(*label)
+                .child(label)
         });
     let list = deferred(
         anchored()
@@ -431,7 +600,10 @@ impl LogPanel {
                 self.context_menu = None;
                 MenuKey::Handled
             }
-            "enter" => MenuKey::Run(entries(&menu.on)[menu.row].0),
+            "enter" => match menu.entries.get(menu.row) {
+                Some((action, _)) => MenuKey::Run(*action),
+                None => MenuKey::Handled,
+            },
             _ if down => {
                 menu.move_row(1);
                 MenuKey::Handled
@@ -454,8 +626,9 @@ pub enum MenuKey {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContextMenu, ENTRIES, name};
+    use super::{ContextMenu, ENTRIES, MenuAction, name, ref_entries, table};
     use gpui_kit::{point, px};
+    use zide_git::Switch;
 
     #[::core::prelude::v1::test]
     fn the_menu_has_the_six_entries_in_order() {
@@ -479,6 +652,7 @@ mod tests {
             hash: "abc".into(),
             subject: "s".into(),
             on: super::Subject::Commit,
+            entries: table(false),
             at: point(px(0.), px(0.)),
             row: 0,
         };
@@ -486,6 +660,65 @@ mod tests {
         assert_eq!(menu.row, 0);
         menu.move_row(99);
         assert_eq!(menu.row, ENTRIES.len() - 1);
+    }
+
+    fn labels(entries: Vec<(MenuAction, String)>) -> Vec<String> {
+        entries.into_iter().map(|(_, label)| label).collect()
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_ref_the_remote_does_not_have_can_only_be_pushed() {
+        for target in [
+            Switch::Tag("v0.1.15".into()),
+            Switch::Local("feat/x".into()),
+        ] {
+            assert_eq!(
+                labels(ref_entries(&target, false, false, "origin", "main")),
+                ["Push to origin"]
+            );
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_ref_on_the_remote_is_checked_out_merged_pushed_or_deleted() {
+        let tag = Switch::Tag("v0.1.13".into());
+        assert_eq!(
+            labels(ref_entries(&tag, false, true, "origin", "f90e90b7")),
+            [
+                "Checkout",
+                "Merge 'v0.1.13' into 'f90e90b7'",
+                "Push to origin",
+                "Delete"
+            ]
+        );
+        let branch = Switch::Local("feat/x".into());
+        let actions: Vec<_> = ref_entries(&branch, false, true, "upstream", "main")
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                MenuAction::Checkout,
+                MenuAction::Merge,
+                MenuAction::Push,
+                MenuAction::Delete
+            ]
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_current_branch_is_only_pushed_and_a_remote_one_checked_out_or_merged() {
+        let current = Switch::Local("main".into());
+        assert_eq!(
+            labels(ref_entries(&current, true, true, "origin", "main")),
+            ["Push to origin"]
+        );
+        let remote = Switch::Remote("origin/feat/x".into());
+        assert_eq!(
+            labels(ref_entries(&remote, false, true, "origin", "main")),
+            ["Checkout", "Merge 'origin/feat/x' into 'main'"]
+        );
     }
 
     #[::core::prelude::v1::test]
