@@ -27,7 +27,5 @@ zide-update = { path = "../update" }
 zide-vim = { path = "../vim" }
 async-channel = "2"
 dirs = "6"
-rodio = { version = "0.23.0", default-features = false, features = ["playback", "symphonia-mp3"] }
-
-[dev-dependencies]
 serde_json = "1.0.154"
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "symphonia-mp3"] }
