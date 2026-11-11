@@ -12,7 +12,9 @@ mod session;
 mod transcript;
 
 pub use agent::{AgentSession, CANCELLED};
-pub use cli::{Launcher, MIN_VERSION, Version, installed, launcher, probe, set_launcher};
+pub use cli::{
+    Launcher, MIN_VERSION, Version, command_for, installed, launcher, probe, set_launcher,
+};
 pub use defaults::{Defaults, defaults};
 pub use event::{Event, Limits, Question, QuestionOption, Usage, Window, parse_events};
 pub use serde_json::Value;
