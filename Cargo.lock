@@ -8972,7 +8972,7 @@ dependencies = [
 
 [[package]]
 name = "zide-acp"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "base64 0.22.1",
  "serde_json",
@@ -8981,7 +8981,7 @@ dependencies = [
 
 [[package]]
 name = "zide-claude"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "base64 0.22.1",
  "serde_json",
@@ -8989,7 +8989,7 @@ dependencies = [
 
 [[package]]
 name = "zide-core"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "ignore",
  "notify",
@@ -8997,18 +8997,18 @@ dependencies = [
 
 [[package]]
 name = "zide-git"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "similar 3.2.1",
 ]
 
 [[package]]
 name = "zide-index"
-version = "0.1.15"
+version = "0.1.16"
 
 [[package]]
 name = "zide-lsp"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "dirs 6.0.0",
  "lsp-types",
@@ -9017,11 +9017,11 @@ dependencies = [
 
 [[package]]
 name = "zide-matcher"
-version = "0.1.15"
+version = "0.1.16"
 
 [[package]]
 name = "zide-search"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "globset",
  "grep-matcher",
@@ -9035,7 +9035,7 @@ dependencies = [
 
 [[package]]
 name = "zide-stubs"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "dirs 6.0.0",
  "postcard",
@@ -9054,7 +9054,7 @@ dependencies = [
 
 [[package]]
 name = "zide-syntax"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "streaming-iterator",
  "tree-sitter",
@@ -9069,7 +9069,7 @@ dependencies = [
 
 [[package]]
 name = "zide-text"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "regex",
  "ropey 1.6.1",
@@ -9077,11 +9077,11 @@ dependencies = [
 
 [[package]]
 name = "zide-tree"
-version = "0.1.15"
+version = "0.1.16"
 
 [[package]]
 name = "zide-ui"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-channel",
  "dirs 6.0.0",
@@ -9108,7 +9108,7 @@ dependencies = [
 
 [[package]]
 name = "zide-update"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "flate2",
  "minisign",
@@ -9122,7 +9122,7 @@ dependencies = [
 
 [[package]]
 name = "zide-vim"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "zide-text",
 ]
