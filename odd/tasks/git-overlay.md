@@ -14,10 +14,11 @@ Branch: refactor/improvements. Delivery: single-pr. Test runner: `cargo test --w
 
 ## Tasks
 
-- T1 S1-S6. Route: inline (one behavior unit, no writer trigger). Status: done in "refactor(ui): one Overlay enum for the git dialogs"; manual app check pending.
+- T1 S1-S6. Route: inline (one behavior unit, no writer trigger). Status: done in "refactor(ui): one Overlay enum for the git dialogs"; manual app check passed.
 
 ## Log
 
 - L1 (2026-11-11) "podemos seguir con lo de gitDialog", then "dale" to step 1 (`enum Overlay`, accepting that the search popup closes the branch switcher).
 - L2 (2026-11-11) Explorer map: exclusion by hand in open_branches (main.rs), toggle_push, toggle_git_op, show_conflicts, open_popup (which misses `branches`); nothing clears `merge`, it stacks over conflicts and reads `self.conflicts`; `proceed` duplicates git_task's completion block.
 - L3 (2026-11-11) Implemented inline: crates/ui/src/overlay.rs (`Overlay` + accessors, close_x only closes its own variant, `merging`, `clear`), openers guard on merging, main.rs gate/keys/render as one match, `Workspace::after_git` shared by git_task and proceed. Risk item 6 -> independent verifier: no blockers, S1-S6 pass. Advisory fixed: conflicts reported while the merge editor is open now update the list under it (HEAD replaced the popup); imports tidied. Not done (new behavior, not asked): a toast when an opener is refused while merging. build, clippy --all-targets, fmt --check, workspace tests pass.
+- L4 (2026-11-11) User checked it in the app: "funciona bien". Feature closed.
