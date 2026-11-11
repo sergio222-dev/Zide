@@ -1242,6 +1242,11 @@ impl Workspace {
 
     /// Opens the find panel (with the replace row when `replace`) for the open file.
     fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // the panel is the editor's: under the chat or the log its box is not drawn, and the
+        // focus would go to nothing on screen, leaving every key unheard until a click
+        if self.center != Center::Editor {
+            return;
+        }
         let Some(viewer) = &self.viewer else {
             return;
         };
