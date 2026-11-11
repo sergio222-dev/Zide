@@ -6,7 +6,8 @@ use gpui_kit::component::input::Position;
 use gpui_kit::*;
 use zide_search::{FileQuery, search_files};
 
-use crate::{Workspace, theme};
+use super::Chats;
+use crate::theme;
 
 /// Rows the menu shows at most.
 const MAX_ROWS: usize = 8;
@@ -66,17 +67,16 @@ struct Entry {
     message: String,
 }
 
-impl Workspace {
+impl Chats {
     /// The rows the menu offers for the active chat, `None` while it is closed.
     fn menu_entries(&self, cx: &App) -> Option<Vec<Entry>> {
-        let chats = self.claude.as_ref()?;
-        let chat = chats.active();
-        if chat.menu_dismissed || chats.sessions.is_some() {
+        let chat = self.active();
+        if chat.menu_dismissed || self.sessions.is_some() {
             return None;
         }
         let message = chat.input.read(cx).value().to_string();
         let entries: Vec<Entry> = match trigger(&message)? {
-            Trigger::Command(word) => matching(&chats.commands, word)
+            Trigger::Command(word) => matching(&self.commands, word)
                 .into_iter()
                 .map(|name| Entry {
                     message: complete(&message, 0, &format!("/{name}")),
@@ -84,7 +84,7 @@ impl Workspace {
                 })
                 .collect(),
             Trigger::File { start, word } => {
-                let index = self.index.as_ref()?;
+                let index = self.files.as_ref()?;
                 let files: Vec<usize> = if word.is_empty() {
                     self.recent.iter().copied().take(MAX_ROWS).collect()
                 } else {
@@ -114,10 +114,7 @@ impl Workspace {
 
     pub(super) fn menu_move(&mut self, by: isize, cx: &App) {
         let last = self.menu_matches(cx).unwrap_or(1).saturating_sub(1);
-        let Some(chats) = &mut self.claude else {
-            return;
-        };
-        let chat = chats.active_mut();
+        let chat = self.active_mut();
         chat.menu_selected = chat.menu_selected.saturating_add_signed(by).min(last);
     }
 
@@ -129,16 +126,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.claude.as_ref().map(|c| c.active().id) != Some(id) {
+        if self.active().id != id {
             return false;
         }
         let Some(mut entries) = self.menu_entries(cx) else {
             return false;
         };
-        let Some(chats) = &mut self.claude else {
-            return false;
-        };
-        let chat = chats.active_mut();
+        let chat = self.active_mut();
         let picked = entries.swap_remove(chat.menu_selected.min(entries.len() - 1));
         // `set_value` leaves the caret at the start; the user keeps typing after the mention
         chat.input.update(cx, |state, cx| {
@@ -153,7 +147,7 @@ impl Workspace {
     /// The menu, to draw above the input box.
     pub(super) fn menu_view(&self, cx: &mut Context<Self>) -> Option<Div> {
         let entries = self.menu_entries(cx)?;
-        let selected = self.claude.as_ref()?.active().menu_selected;
+        let selected = self.active().menu_selected;
         let selected = selected.min(entries.len() - 1);
         let rows = entries.into_iter().enumerate().map(|(index, entry)| {
             div()
@@ -170,11 +164,8 @@ impl Workspace {
                 }))
                 .child(entry.label)
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    let Some(chats) = &mut this.claude else {
-                        return;
-                    };
-                    chats.active_mut().menu_selected = index;
-                    let id = chats.active().id;
+                    this.active_mut().menu_selected = index;
+                    let id = this.active().id;
                     this.claude_complete(id, window, cx);
                 }))
         });

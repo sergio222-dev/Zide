@@ -11,7 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{Chat, Chats, footer, gauges, options};
-use crate::{Workspace, theme};
+use crate::theme;
 
 /// The look every panel over the buttons shares, in Zide's own colors.
 fn panel(width: f32) -> Div {
@@ -27,7 +27,7 @@ fn panel(width: f32) -> Div {
         .text_color(rgb(theme::TEXT))
 }
 
-impl Workspace {
+impl Chats {
     /// The input box and the line of settings under it.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn composer(
@@ -132,9 +132,7 @@ impl Workspace {
                 .label("↵")
                 .on_click(cx.listener(move |this, _, window, cx| {
                     let text = this
-                        .claude
-                        .as_mut()
-                        .and_then(|c| c.find(id))
+                        .find(id)
                         .map(|chat| chat.input.read(cx).value().to_string());
                     if let Some(text) = text {
                         this.claude_send(id, text, window, cx);

@@ -7,7 +7,7 @@ use gpui_kit::*;
 use zide_claude::{Defaults, Event};
 
 use super::Chat;
-use crate::Workspace;
+use super::Chats;
 
 /// The models offered, as the dropdown names them and as `claude --model` takes them.
 const MODELS: [(&str, &str); 4] = [
@@ -112,7 +112,7 @@ impl Chat {
     pub(super) fn new_effort_slider(
         defaults: &Defaults,
         window: &mut Window,
-        cx: &mut Context<Workspace>,
+        cx: &mut Context<Chats>,
     ) -> Entity<SliderState> {
         let _ = window;
         cx.new(|_| {
@@ -129,12 +129,12 @@ impl Chat {
         id: u64,
         slider: &Entity<SliderState>,
         window: &mut Window,
-        cx: &mut Context<Workspace>,
+        cx: &mut Context<Chats>,
     ) -> Subscription {
         cx.subscribe_in(
             slider,
             window,
-            move |this: &mut Workspace, _, event: &SliderEvent, _, cx| {
+            move |this: &mut Chats, _, event: &SliderEvent, _, cx| {
                 let SliderEvent::Change(value) = event else {
                     return;
                 };
@@ -147,15 +147,12 @@ impl Chat {
     }
 }
 
-impl Workspace {
+impl Chats {
     /// Makes the effort slider of the active chat stand where its effort is, after that changed
     /// behind it (a stored conversation was loaded, the default was chosen again).
     pub(super) fn sync_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chats) = &mut self.claude else {
-            return;
-        };
-        let defaults = chats.defaults.clone();
-        let chat = chats.active_mut();
+        let defaults = self.defaults.clone();
+        let chat = self.active_mut();
         if !chat.options_stale {
             return;
         }
@@ -168,13 +165,10 @@ impl Workspace {
     /// The slider moved to `effort`. Landing where the chat already is (the slider was set to
     /// show it) changes nothing.
     fn claude_slide_effort(&mut self, id: u64, effort: &str, cx: &mut Context<Self>) {
-        let Some(chats) = &mut self.claude else {
-            return;
-        };
-        let shown = chats
+        let shown = self
             .find(id)
             .and_then(|chat| chat.effort.clone())
-            .or_else(|| chats.defaults.effort.clone());
+            .or_else(|| self.defaults.effort.clone());
         if shown.as_deref() == Some(effort) {
             return;
         }
@@ -183,13 +177,10 @@ impl Workspace {
 
     /// The row the user picked in the model menu.
     pub(super) fn claude_pick_model(&mut self, id: u64, row: &str, cx: &mut Context<Self>) {
-        let Some(chats) = &mut self.claude else {
-            return;
-        };
-        let current = chats.find(id).and_then(|chat| chat.model.clone());
-        let rows = model_rows(&chats.defaults, current.as_deref());
+        let current = self.find(id).and_then(|chat| chat.model.clone());
+        let rows = model_rows(&self.defaults, current.as_deref());
         let value = model_value(row, &rows);
-        let Some(chat) = chats.find(id) else { return };
+        let Some(chat) = self.find(id) else { return };
         if chat.model == value {
             return;
         }
@@ -207,12 +198,9 @@ impl Workspace {
 
     /// The row the user picked for the effort.
     pub(super) fn claude_pick_effort(&mut self, id: u64, row: &str, cx: &mut Context<Self>) {
-        let Some(chats) = &mut self.claude else {
-            return;
-        };
-        let rows = effort_rows(&chats.defaults);
+        let rows = effort_rows(&self.defaults);
         let value = effort_value(row, &rows);
-        let Some(chat) = chats.find(id) else { return };
+        let Some(chat) = self.find(id) else { return };
         if chat.effort == value {
             return;
         }

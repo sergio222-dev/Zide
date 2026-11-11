@@ -6,8 +6,8 @@ use std::{collections::HashMap, sync::Arc};
 use gpui_kit::*;
 use zide_claude::Image as Picture;
 
-use super::Chat;
-use crate::{Workspace, theme};
+use super::{Chat, Chats};
+use crate::theme;
 
 /// The largest picture Claude takes.
 const MAX_BYTES: usize = 5 * 1024 * 1024;
@@ -81,7 +81,7 @@ impl Chat {
     }
 }
 
-impl Workspace {
+impl Chats {
     /// The pictures of a sent message, under its text. Each takes a fixed box, so the history's
     /// height does not change when the picture finishes loading, and a click opens it large.
     pub(super) fn sent_view(&self, sent: &[Numbered], cx: &mut Context<Self>) -> Div {
@@ -129,15 +129,13 @@ impl Workspace {
 
     /// Opens `image` large over the chat, or closes the preview.
     pub(super) fn claude_preview(&mut self, image: Option<Arc<Image>>, cx: &mut Context<Self>) {
-        if let Some(chats) = &mut self.claude {
-            chats.preview = image;
-        }
+        self.preview = image;
         cx.notify();
     }
 
     /// The picture being previewed, dimming the chat; a click or Esc closes it.
     pub(super) fn preview_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let image = self.claude.as_ref()?.preview.clone()?;
+        let image = self.preview.clone()?;
         Some(
             div()
                 .id("image-preview")
@@ -165,7 +163,7 @@ impl Workspace {
     /// the clipboard also holds text, which the input pastes itself), so the key goes on.
     pub(super) fn claude_paste_image(&mut self, cx: &mut Context<Self>) -> bool {
         // a worker's view is read-only: a picture would land in the hidden chat's message
-        if self.claude.as_ref().is_some_and(|c| c.viewing.is_some()) {
+        if self.viewing.is_some() {
             return false;
         }
         let Some(item) = cx.read_from_clipboard() else {
@@ -179,10 +177,7 @@ impl Workspace {
             _ => None,
         });
         let Some(image) = image else { return false };
-        let Some(chats) = &mut self.claude else {
-            return false;
-        };
-        let chat = chats.active_mut();
+        let chat = self.active_mut();
         if media_type(image.format).is_none() {
             chat.notice = Some("Only PNG, JPEG, GIF and WebP images can be sent.".to_owned());
         } else if image.bytes.len() > MAX_BYTES {
@@ -200,18 +195,16 @@ impl Workspace {
     }
 
     fn claude_remove_image(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(chats) = &mut self.claude {
-            let images = &mut chats.active_mut().images;
-            if index < images.len() {
-                images.remove(index);
-            }
+        let images = &mut self.active_mut().images;
+        if index < images.len() {
+            images.remove(index);
         }
         cx.notify();
     }
 
     /// The chips of the pictures waiting to be sent, to draw inside the input box.
     pub(super) fn images_view(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let chat = self.claude.as_ref()?.active();
+        let chat = self.active();
         if chat.images.is_empty() {
             return None;
         }

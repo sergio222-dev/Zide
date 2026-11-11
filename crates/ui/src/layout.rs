@@ -7,20 +7,20 @@ use crate::{Center, Workspace, commit::CommitPanel, session};
 
 impl Workspace {
     /// The panels showing now and the conversation the chat is on.
-    fn current_layout(&self) -> session::Layout {
+    fn current_layout(&self, cx: &App) -> session::Layout {
         session::Layout {
             tree: self.tree_visible,
             commit: self.commit_open,
             preview: self.md_preview,
             claude: self.center == Center::Chat,
-            chat: self.claude_conversation(),
+            chat: self.claude_conversation(cx),
         }
     }
 
     /// Writes the layout when it differs from what was last written: called on every frame, it
     /// costs a comparison, and no path that changes a panel can forget to save.
-    pub(crate) fn remember_layout_if_changed(&mut self) {
-        let layout = self.current_layout();
+    pub(crate) fn remember_layout_if_changed(&mut self, cx: &App) {
+        let layout = self.current_layout(cx);
         if self.saved_layout.as_ref() != Some(&layout) {
             session::remember_layout(&self.root, &layout);
             self.saved_layout = Some(layout);
@@ -53,7 +53,7 @@ impl Workspace {
                 self.focus.focus(window, cx);
             }
         }
-        self.saved_layout = Some(self.current_layout());
+        self.saved_layout = Some(self.current_layout(cx));
         cx.notify();
     }
 }

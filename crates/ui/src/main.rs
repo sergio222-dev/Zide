@@ -374,10 +374,7 @@ fn action_registry() -> Vec<ActionDef> {
             closes_popup: false,
             only_when_conflicted: false,
             state: Some(|ws| ws.claude_bare),
-            run: |ws, _, cx| {
-                ws.claude_bare = !ws.claude_bare;
-                cx.notify();
-            },
+            run: |ws, _, cx| ws.toggle_claude_bare(cx),
         },
         ActionDef {
             name: "Claude: New Chat",
@@ -727,7 +724,7 @@ struct Workspace {
     tree: Tree,
     tree_visible: bool,
     /// The Claude chat, created the first time it is opened.
-    claude: Option<chat::Chats>,
+    claude: Option<Entity<chat::Chats>>,
     /// Whether a supported `claude` is installed, once known.
     claude_installed: bool,
     /// Whether the editor, the chat or the git log fills the area.
@@ -1006,7 +1003,7 @@ impl Workspace {
                 if let Some(path) = this.tree_reveal.take() {
                     this.tree.reveal(&path);
                 }
-                this.replace_index(FileIndex::new(paths));
+                this.replace_index(FileIndex::new(paths), cx);
                 this._watcher = watcher.ok();
                 // the old store indexes the old file list: keep it only to reuse its stubs
                 let previous = this.symbols.take();
@@ -1073,7 +1070,7 @@ impl Workspace {
     }
 
     /// Swaps in a fresh index, keeping the recent files that still exist.
-    fn replace_index(&mut self, index: FileIndex) {
+    fn replace_index(&mut self, index: FileIndex, cx: &mut App) {
         if let Some(old) = &self.index {
             let wanted: Vec<&String> = self.recent.iter().map(|&i| &old.paths()[i]).collect();
             let found: std::collections::HashMap<&str, usize> = index
@@ -1089,6 +1086,7 @@ impl Workspace {
                 .collect();
         }
         self.index = Some(Arc::new(index));
+        self.sync_chat_files(cx);
     }
 
     /// Shows what another program wrote to the open file, unless it has unsaved edits.
@@ -2560,6 +2558,7 @@ impl Workspace {
             self.recent.retain(|&i| i != file);
             self.recent.insert(0, file);
             self.recent.truncate(MAX_RECENT);
+            self.sync_chat_files(cx);
         }
         self.remember_view();
         if let Some(old) = self.viewer.take() {
@@ -3405,7 +3404,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = Instant::now();
-        self.remember_layout_if_changed();
+        self.remember_layout_if_changed(cx);
         let root = self.view(window, cx);
         let Some(meter) = &mut self.meter else {
             return root;
@@ -3623,9 +3622,11 @@ impl Workspace {
                 cx.notify();
             }))
             .child(if self.center == Center::Log {
-                self.log_view(cx)
-            } else if self.center == Center::Chat {
-                self.claude_view(window, cx)
+                self.log_view(cx).into_any_element()
+            } else if self.center == Center::Chat
+                && let Some(chats) = &self.claude
+            {
+                chats.clone().into_any_element()
             } else {
                 div()
                     .flex()
@@ -3703,17 +3704,14 @@ impl Workspace {
                             .border_color(rgb(theme::BORDER))
                             .child(view)
                     }))
+                    .into_any_element()
             })
             .child(statusbar::render(
                 self.viewer.as_ref().map(Viewer::status),
                 self.busy_label(),
                 self.branch.as_ref(),
                 cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
-                self.claude_installed.then(|| {
-                    self.claude
-                        .as_ref()
-                        .map_or(zide_claude::Overall::Off, chat::Chats::overall)
-                }),
+                self.claude_installed.then(|| self.claude_overall(cx)),
                 cx.listener(|this, _, window, cx| this.toggle_claude(window, cx)),
             ));
         if let Some(branches) = &self.branches {
