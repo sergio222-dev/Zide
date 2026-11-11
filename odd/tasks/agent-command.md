@@ -24,7 +24,7 @@ S7. "se pued elegir que agente/config usar?" / "si, ademas cuando configuras un 
 - [x] T1 (S1-S4) zide-claude: launcher (command + prefix args + config_dir), used by session/cli/agents/history/defaults; tests. Route: inline. 3835160
 - [x] T2 (S1,S2) zide-ui: settings file load/save (preserving other keys), applied at startup; tests. Route: inline. da121a9
 - [x] T3 (S5,S6) zide-ui: "Configure Agent" dialog, Test, re-check on save; README. Route: inline. 79e0a01 (dialog rendering not exercised: no GUI run)
-- [x] T4 (S7) settings: active agent, list, delete; dialog with the list; README. Route: inline.
+- [x] T4 (S7) settings: active agent, list, delete; dialog with the list; README. Route: inline. 3d40df3
 
 ## Log
 L1 (2026-11-11) "nueva feature, se quiere agregar la posibilidad de ejecutar claude/el agente con un comando especifico, esto se debe a que se va a usar un .sh con bubblewrap para aislar el agente, entonces el IDE debe soportar configurar como se llama al agente de claude, actualmente es solo el comando claude desde el PATH, se espera una configuracion como: "agent_servers": { "Agente aislado": { "command": "/home/vos/bin/agente-sandbox.sh", "args": ["mi-agente", "--acp"] } } o una interfaz visual, en un futuro se podra configurar varios agentes pero por ahora encaremos con esto."
