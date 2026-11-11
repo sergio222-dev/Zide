@@ -224,6 +224,25 @@ pub fn remember_branches(root: &Path, branches: &zide_git::Branches) {
     write(root, "branches", &branches.to_cache());
 }
 
+/// The tags a remote had at the last fetch: the remote's name, then its tags. `None` before the
+/// first fetch.
+pub fn remote_tags(root: &Path) -> Option<(String, Vec<String>)> {
+    let text = fs::read_to_string(file_for(root, "remote-tags")).ok()?;
+    let mut lines = text.lines();
+    let remote = lines.next().filter(|name| !name.is_empty())?.to_string();
+    Some((remote, lines.map(String::from).collect()))
+}
+
+/// Keeps the tags `remote` has, for the menus of the git log. Best effort, like `remember_file`.
+pub fn remember_remote_tags(root: &Path, remote: &str, tags: &[String]) {
+    let mut text = remote.to_string();
+    for tag in tags {
+        text.push('\n');
+        text.push_str(tag);
+    }
+    write(root, "remote-tags", &text);
+}
+
 /// Creates the folder with a `.gitignore` that ignores it whole, so the project's own
 /// `.gitignore` stays untouched.
 fn write(root: &Path, kind: &str, content: &str) {
@@ -243,6 +262,22 @@ fn write(root: &Path, kind: &str, content: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tags_of_the_remote_come_back_as_they_were_kept() {
+        let root = std::env::temp_dir().join(format!("zide-remote-tags-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(remote_tags(&root), None);
+        remember_remote_tags(&root, "origin", &["v1".into(), "v2".into()]);
+        assert_eq!(
+            remote_tags(&root),
+            Some(("origin".into(), vec!["v1".into(), "v2".into()]))
+        );
+        remember_remote_tags(&root, "origin", &[]);
+        assert_eq!(remote_tags(&root), Some(("origin".into(), Vec::new())));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_remembered_file_comes_back_only_while_it_exists() {

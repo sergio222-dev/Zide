@@ -301,6 +301,21 @@ fn action_registry() -> Vec<ActionDef> {
             run: |ws, _, cx| ws.reveal_open_file(cx),
         },
         ActionDef {
+            name: "Fetch",
+            synonyms: &[
+                "update branches",
+                "refresh branches",
+                "remote",
+                "tags",
+                "git fetch",
+            ],
+            action: None,
+            closes_popup: true,
+            only_when_conflicted: false,
+            state: None,
+            run: |ws, _, cx| ws.fetch(cx),
+        },
+        ActionDef {
             name: "Resolve Conflicts",
             synonyms: &[
                 "merge",
@@ -2776,6 +2791,28 @@ impl Workspace {
             "Could not switch branch",
             None,
             move |root| zide_git::switch(&root, &target),
+            cx,
+        );
+    }
+
+    /// Find Action → *Fetch*: brings every remote's branches and tags, and keeps which tags the
+    /// remote of the current branch has, for the menus of the git log.
+    fn fetch(&mut self, cx: &mut Context<Self>) {
+        let branch = self
+            .branch
+            .as_ref()
+            .map(|b| b.name.clone())
+            .unwrap_or_default();
+        self.git_task(
+            "Could not fetch",
+            Some("Fetched every remote".into()),
+            move |root| {
+                zide_git::fetch(&root)?;
+                let remote = zide_git::push_remote(&root, &branch)?;
+                let tags = zide_git::remote_tags(&root, &remote)?;
+                session::remember_remote_tags(&root, &remote, &tags);
+                Ok(())
+            },
             cx,
         );
     }
