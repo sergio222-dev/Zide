@@ -9,6 +9,10 @@ A fast, keyboard-driven code editor with Vim motions and an IntelliJ-style keyma
   <img src="docs/search-actions.png" alt="Search Everywhere, Actions tab" width="49%">
 </p>
 
+> [!NOTE]
+> Zide is a personal project: an IDE built for my own use and workflow. It is shared as is, with no
+> support, stability or roadmap promises, and features land when I need them.
+
 > Zide was built with [Claude](https://claude.com/claude-code) (Claude Code) and is written in
 > [Rust](https://www.rust-lang.org/), on top of the [GPUI](https://www.gpui.rs/) UI framework.
 
