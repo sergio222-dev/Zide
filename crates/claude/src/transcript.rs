@@ -348,6 +348,11 @@ impl Transcript {
                     self.blocks.push(Block::Error(message));
                 }
             }
+            // a worker keeps its own transcript: none of it is this conversation's
+            Event::WorkerStarted { .. }
+            | Event::Worker { .. }
+            | Event::WorkerActivity { .. }
+            | Event::WorkerEnded { .. } => {}
             Event::Exit => {
                 self.alive = false;
                 self.waiting = 0;

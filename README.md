@@ -172,6 +172,9 @@ In the Claude chat (`Alt+2` opens it): `Alt+Up` / `Alt+Down` switch between open
 `Alt+I` focuses the message input, `Alt+H` opens (or closes) the list of earlier conversations, `Esc` interrupts a running turn (or closes the chat when idle),
 `Ctrl+V` pastes an image (click one, in the message or above the input, to see it large; `Esc` closes it), and `/` and `@` open the command and file menus. Earlier conversations
 are also listed by **Claude: Resume Session** in Find Action (`Ctrl+Shift+A`).
+While Claude runs subagents, a **Workers** section at the bottom of the chat list shows each one
+with what it is doing; click one to watch its messages and tool calls (read-only, nothing can be
+sent to it), and `Esc` or **Back** returns to the chat. A worker leaves the list when it finishes.
 
 Zide starts `claude` from `PATH` by default. To start it some other way, for example through a
 sandbox wrapper, run **Configure Agent** in Find Action, or edit `~/.config/zide/settings.json`:

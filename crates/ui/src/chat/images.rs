@@ -164,6 +164,10 @@ impl Workspace {
     /// Takes the picture on the clipboard into the active chat. `false` when there is none (or
     /// the clipboard also holds text, which the input pastes itself), so the key goes on.
     pub(super) fn claude_paste_image(&mut self, cx: &mut Context<Self>) -> bool {
+        // a worker's view is read-only: a picture would land in the hidden chat's message
+        if self.claude.as_ref().is_some_and(|c| c.viewing.is_some()) {
+            return false;
+        }
         let Some(item) = cx.read_from_clipboard() else {
             return false;
         };

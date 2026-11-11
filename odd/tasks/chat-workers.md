@@ -17,10 +17,11 @@ S5. The main conversation is unchanged: worker messages never enter the chat's o
 - In `-p` mode every Agent call runs in the background (`is_backgrounded: true`, tool_result "Async agent launched").
 
 ## Tasks
-- [ ] T1 (S1-S5) Parse worker events in zide-claude (started / message events / progress / ended) without touching the main transcript; per-chat workers with their own Transcript in the UI; Workers section in the chat list; read-only worker view; removal rules. Route: delegated (context backstop: parent context is long).
+- [x] T1 (S1-S5) Parse worker events in zide-claude (started / message events / progress / ended) without touching the main transcript; per-chat workers with their own Transcript in the UI; Workers section in the chat list; read-only worker view; removal rules. Route: delegated (context backstop: parent context is long).
 
 ## Log
 L1 (2026-11-11) "hoy en dia los writter o procesos que larga claude no se muestran, deberia haber en la lista de chats debajo de todo un panel que aparece cuando hay un worker/writer corriendo, no se puede chatear con ese worker"
 L2 Found: event.rs:169 drops every line with parent_tool_use_id; the list's "Background" section is `claude agents` (separate sessions), not in-chat workers.
 L3 "me gustaria poder ver lo que va haciendo tambien, pero cuando un worker termino deberia borrarse de la lista, es posible eso?" -> proposed: live read-only view; removed when finished; an open view stays until the user leaves it -> "dale".
 L4 Captured one real stream (haiku, no user settings, tools Agent+Read, scratch dir) and committed a sanitized fixture (hostname, paths, session ids replaced; capture deleted).
+L5 (2026-11-11) T1 done by one writer: Event::{WorkerStarted, Worker, WorkerActivity, WorkerEnded} (Transcript ignores them), chat/workers.rs model, Workers section + read-only view (Esc/back), README. Parent check: 0 clippy warnings, workspace green (zide-claude 79 + 5 fixture tests, zide-ui 242). Parent fix: Ctrl+V ignored while a worker view is open. Not seen on screen. Open: a nested worker (Agent inside a worker) shows only if its task_started arrives.
