@@ -1,8 +1,10 @@
 //! The conflict resolver: when a merge, rebase, cherry-pick or revert stops on conflicts, a dialog
 //! lists the files in conflict with what each side did to them. *Accept Yours* keeps the current
 //! branch's version of the selected file, *Accept Theirs* the incoming one; *Merge…* opens
-//! the file in the merge editor to settle it by hand. It is reached from Find Action, which offers it only while
-//! there are conflicts.
+//! the file in the merge editor to settle it by hand. Once the last file is settled, a rebase,
+//! cherry-pick or revert goes on by itself (and the dialog opens again when a later commit clashes
+//! too); a merge is finished by committing. It is reached from Find Action, which offers it only
+//! while there are conflicts.
 
 use std::sync::Arc;
 
@@ -51,6 +53,22 @@ pub struct ConflictsPopup {
 /// The folder a path is in, `""` at the top.
 fn folder(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+/// What `operation` is called in a sentence: `rebase`, `cherry-pick`...
+fn noun(operation: Operation) -> &'static str {
+    match operation {
+        Operation::Merge => "merge",
+        Operation::Rebase => "rebase",
+        Operation::CherryPick => "cherry-pick",
+        Operation::Revert => "revert",
+    }
+}
+
+/// What `operation` is called at the start of a sentence: `Rebase`, `Cherry-pick`...
+fn capitalized(operation: Operation) -> String {
+    let noun = noun(operation);
+    noun[..1].to_uppercase() + &noun[1..]
 }
 
 impl ConflictsPopup {
@@ -151,15 +169,7 @@ impl Workspace {
                 .spawn(async move { zide_git::conflicts(&root) })
                 .await;
             this.update_in(cx, |this, window, cx| match found {
-                Some(found) => {
-                    this.popup = None;
-                    this.branches = None;
-                    this.push = None;
-                    this.git_op = None;
-                    this.conflicts = Some(ConflictsPopup::new(found));
-                    this.focus.focus(window, cx); // the keys are read by the workspace
-                    cx.notify();
-                }
+                Some(found) => this.show_conflicts(found, window, cx),
                 None => this.notify(Notification::info("There are no conflicts to resolve"), cx),
             })
             .ok();
@@ -221,21 +231,90 @@ impl Workspace {
         }
         match (remaining, &mut self.conflicts) {
             (Some(remaining), Some(popup)) => popup.replace(remaining),
-            (None, Some(_)) => {
-                let finish = self.conflicts.as_ref().map(|popup| popup.data.operation);
+            (None, Some(popup)) => {
+                let operation = popup.data.operation;
                 self.close_conflicts(window, cx);
-                let done = match finish {
-                    Some(Operation::Merge) => {
-                        "Every conflict is resolved: commit to finish the merge"
-                    }
-                    _ => "Every conflict is resolved",
-                };
-                self.notify(Notification::success(done), cx);
+                if operation == Operation::Merge {
+                    // its commit is written in the commit panel, which has git's message ready
+                    self.notify(
+                        Notification::success(
+                            "Every conflict is resolved: commit to finish the merge",
+                        ),
+                        cx,
+                    );
+                } else {
+                    self.proceed(operation, window, cx);
+                }
             }
             _ => {}
         }
         self.rescan(cx); // the files changed on disk
         self.refresh_commit(cx);
+        cx.notify();
+    }
+
+    /// Goes on with the rebase, cherry-pick or revert whose conflicts are all resolved. When a
+    /// later commit clashes too, the dialog opens again with its files.
+    fn proceed(&mut self, operation: Operation, window: &mut Window, cx: &mut Context<Self>) {
+        const BUSY: &str = "Continuing...";
+        self.autosave(cx);
+        self.begin_busy(BUSY, cx);
+        let root = self.root.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let (result, left, status) = cx
+                .background_executor()
+                .spawn(async move {
+                    let result = zide_git::proceed(&root, operation);
+                    let left = zide_git::conflicts(&root);
+                    (result, left, zide_git::branch_status(&root))
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.end_busy(BUSY, cx);
+                this.commit_finished(result.is_ok(), cx);
+                this.refresh_git(cx); // the gutter compares with the new HEAD
+                this.branch = status;
+                this.rescan(cx);
+                this.reload_log(cx);
+                let what = capitalized(operation);
+                match (left, result) {
+                    (Some(found), _) => {
+                        this.notify(
+                            Notification::info("The next commit has conflicts to resolve")
+                                .title(what),
+                            cx,
+                        );
+                        this.show_conflicts(found, window, cx);
+                    }
+                    (None, Ok(())) => {
+                        this.notify(Notification::success(format!("{what} finished")), cx)
+                    }
+                    (None, Err(why)) => this.notify(
+                        Notification::error(why)
+                            .title(format!("Could not continue the {}", noun(operation))),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Shows `found` in the dialog, in place of any other dialog.
+    pub(crate) fn show_conflicts(
+        &mut self,
+        found: Conflicts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.popup = None;
+        self.branches = None;
+        self.push = None;
+        self.git_op = None;
+        self.conflicts = Some(ConflictsPopup::new(found));
+        self.focus.focus(window, cx); // the keys are read by the workspace
         cx.notify();
     }
 

@@ -2803,12 +2803,17 @@ impl Workspace {
                     {
                         session::remember_branches(&root, &found);
                     }
-                    (result, zide_git::branch_status(&root))
+                    // a merge, rebase, cherry-pick... that clashes leaves files to resolve
+                    let left = result
+                        .is_err()
+                        .then(|| zide_git::conflicts(&root))
+                        .flatten();
+                    (result, left, zide_git::branch_status(&root))
                 })
                 .await;
-            this.update(cx, |this, cx| {
+            let (result, left, status) = outcome;
+            let window = this.update(cx, |this, cx| {
                 this.end_busy("Running git...", cx);
-                let (result, status) = outcome;
                 match result {
                     Ok(()) => {
                         this.commit_finished(true, cx);
@@ -2827,11 +2832,27 @@ impl Workspace {
                         this.refresh_git(cx);
                         this.branch = status;
                         this.reload_log(cx);
-                        this.notify(Notification::error(why).title(failure), cx)
+                        if left.is_some() {
+                            this.rescan(cx); // the files now hold conflict markers
+                            this.notify(
+                                Notification::info("Resolve the conflicts to continue")
+                                    .title(failure),
+                                cx,
+                            );
+                        } else {
+                            this.notify(Notification::error(why).title(failure), cx);
+                        }
                     }
                 }
-            })
-            .ok();
+                this.window
+            });
+            // the dialog takes the keyboard, which needs the window
+            if let (Ok(window), Some(found)) = (window, left) {
+                cx.update_window(window, |_, window, cx| {
+                    this.update(cx, |this, cx| this.show_conflicts(found, window, cx))
+                })
+                .ok();
+            }
         })
         .detach();
     }
