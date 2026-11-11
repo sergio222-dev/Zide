@@ -14,6 +14,7 @@ use zide_git::{
     pull_args, rebase_args,
 };
 
+use crate::overlay::Overlay;
 use crate::{Center, Workspace, theme};
 
 /// Rows a list shows before it scrolls.
@@ -311,13 +312,13 @@ impl OpDialog {
 impl Workspace {
     /// Opens the dialog of `op`; from the dialog, closes it.
     pub(crate) fn toggle_git_op(&mut self, op: Op, window: &mut Window, cx: &mut Context<Self>) {
-        if self.git_op.is_some() {
+        if self.overlay.git_op().is_some() {
             return self.close_git_op(window, cx);
         }
+        if self.overlay.merging() {
+            return;
+        }
         self.popup = None;
-        self.branches = None;
-        self.conflicts = None;
-        self.push = None;
         self.cancel_running_search();
         let input = op
             .options()
@@ -327,7 +328,7 @@ impl Workspace {
                 _ => None,
             })
             .map(|placeholder| cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)));
-        self.git_op = Some(OpDialog::new(op, input));
+        self.overlay = Overlay::GitOp(OpDialog::new(op, input));
         self.focus.focus(window, cx); // the keys are read by the workspace
         let root = self.root.clone();
         self.begin_busy("Loading branches...", cx);
@@ -343,7 +344,7 @@ impl Workspace {
                 .await;
             this.update(cx, |this, cx| {
                 this.end_busy("Loading branches...", cx);
-                if let Some(dialog) = &mut this.git_op {
+                if let Some(dialog) = this.overlay.git_op_mut() {
                     match found {
                         Ok(found) => dialog.set_pull(found),
                         Err(found) => dialog.set_branches(found),
@@ -358,7 +359,7 @@ impl Workspace {
     }
 
     pub(crate) fn close_git_op(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.git_op = None;
+        self.overlay.close_git_op();
         if self.center == Center::Chat {
             self.focus_active_chat(window, cx); // back to the message box
         } else {
@@ -369,7 +370,7 @@ impl Workspace {
 
     /// Runs it and closes the dialog; the outcome comes as a notification.
     fn run_git_op(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = &self.git_op else {
+        let Some(dialog) = self.overlay.git_op() else {
             return;
         };
         let Some(args) = dialog.arguments(cx) else {
@@ -393,7 +394,7 @@ impl Workspace {
 
     /// Picks or drops the option `id`; the one that takes text gets the keyboard.
     fn toggle_git_option(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = &mut self.git_op else {
+        let Some(dialog) = self.overlay.git_op_mut() else {
             return;
         };
         let input = dialog.input.clone();
@@ -409,8 +410,8 @@ impl Workspace {
     }
 
     fn git_op_typing(&self, window: &Window, cx: &App) -> bool {
-        self.git_op
-            .as_ref()
+        self.overlay
+            .git_op()
             .and_then(|d| d.input.as_ref())
             .is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
     }
@@ -419,7 +420,7 @@ impl Workspace {
     pub(crate) fn git_op_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.git_op_typing(window, cx) {
             self.focus.focus(window, cx);
-        } else if let Some(dialog) = &mut self.git_op {
+        } else if let Some(dialog) = self.overlay.git_op_mut() {
             dialog.switch_field();
         }
         cx.notify();
@@ -440,7 +441,7 @@ impl Workspace {
         cx.stop_propagation();
         let modifiers = event.keystroke.modifiers;
         let alt = modifiers.alt;
-        let Some(dialog) = &mut self.git_op else {
+        let Some(dialog) = self.overlay.git_op_mut() else {
             return;
         };
         if dialog.menu.is_none() && !(modifiers.control || alt || modifiers.platform) {
@@ -483,7 +484,7 @@ impl Workspace {
     }
 
     pub(crate) fn git_op_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let dialog = self.git_op.as_ref().expect("the dialog is open");
+        let dialog = self.overlay.git_op().expect("the dialog is open");
         let workspace = cx.entity();
         let op = dialog.op;
         let (run_button, cancel_button, menu_toggle, outside) = (
@@ -590,7 +591,7 @@ impl Workspace {
             // a click anywhere else closes the options menu; the menu and its link stop theirs
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 outside.update(cx, |this, cx| {
-                    if let Some(d) = this.git_op.as_mut().filter(|d| d.menu.is_some()) {
+                    if let Some(d) = this.overlay.git_op_mut().filter(|d| d.menu.is_some()) {
                         d.menu = None;
                         cx.notify();
                     }
@@ -657,7 +658,7 @@ impl Workspace {
                                             .child("Modify options ⌄")
                                             .on_click(move |_, _, cx| {
                                                 menu_toggle.update(cx, |this, cx| {
-                                                    if let Some(d) = &mut this.git_op {
+                                                    if let Some(d) = this.overlay.git_op_mut() {
                                                         d.menu = d.menu.is_none().then_some(0);
                                                         cx.notify();
                                                     }
@@ -817,7 +818,7 @@ fn field(dialog: &OpDialog, which: Field, width: f32, workspace: &Entity<Workspa
                 .child(div().text_color(rgb(theme::DIM)).child("⌄"))
                 .on_click(move |_, _, cx| {
                     toggle.update(cx, |this, cx| {
-                        if let Some(dialog) = &mut this.git_op {
+                        if let Some(dialog) = this.overlay.git_op_mut() {
                             dialog.toggle_list(which);
                             cx.notify();
                         }
@@ -841,7 +842,7 @@ fn field(dialog: &OpDialog, which: Field, width: f32, workspace: &Entity<Workspa
                     .child(item.clone())
                     .on_click(move |_, _, cx| {
                         pick.update(cx, |this, cx| {
-                            if let Some(dialog) = &mut this.git_op {
+                            if let Some(dialog) = this.overlay.git_op_mut() {
                                 dialog.pick(which, row);
                                 cx.notify();
                             }

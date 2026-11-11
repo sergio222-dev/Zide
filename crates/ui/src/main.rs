@@ -33,6 +33,7 @@ mod merge_editor;
 mod meter;
 mod minimap;
 mod nav;
+mod overlay;
 mod projects;
 mod push;
 mod rows;
@@ -60,6 +61,7 @@ use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use overlay::Overlay;
 use viewer::{Effect, FindStatus, FormatRequest, HighlightKey, Viewer};
 use welcome::{OpenProject, Welcome};
 use zide_core::{Change, DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
@@ -748,14 +750,8 @@ struct Workspace {
     _claude_keys: Subscription,
     /// The checked-out branch and how far it is from its upstream, `None` outside a repository.
     branch: Option<zide_git::BranchStatus>,
-    /// The branch switcher, while it is open.
-    branches: Option<branches::BranchPopup>,
-    /// The push dialog (Ctrl+Shift+K), while it is open.
-    push: Option<push::PushPopup>,
-    git_op: Option<gitop::OpDialog>,
-    /// The conflict resolver, while it is open.
-    conflicts: Option<conflicts::ConflictsPopup>,
-    merge: Option<merge_editor::MergeEditor>,
+    /// The git dialog floating over the workspace, if any.
+    overlay: Overlay,
     /// The rendered Markdown beside the editor (Ctrl+Shift+M), for `.md` files.
     md_preview: bool,
     md: Option<MdPreview>,
@@ -874,11 +870,7 @@ impl Workspace {
                 // the popups and dialogs over the chat own the keys (Esc closes them, not the chat)
                 if this.center == Center::Chat
                     && this.popup.is_none()
-                    && this.branches.is_none()
-                    && this.push.is_none()
-                    && this.git_op.is_none()
-                    && this.conflicts.is_none()
-                    && this.merge.is_none()
+                    && !this.overlay.is_open()
                     && !window.has_active_dialog(cx)
                 {
                     this.claude_key(&event.keystroke, window, cx);
@@ -909,11 +901,7 @@ impl Workspace {
             tree_reveal: None,
             git_status: Arc::default(),
             branch: None,
-            branches: None,
-            push: None,
-            git_op: None,
-            conflicts: None,
-            merge: None,
+            overlay: Overlay::None,
             md_preview: false,
             md: None,
             nav: nav::NavHistory::default(),
@@ -1173,9 +1161,7 @@ impl Workspace {
     fn open_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.autosave(cx);
         self.refresh_commit(cx); // what git says now, for the actions that depend on it
-        self.push = None;
-        self.git_op = None;
-        self.conflicts = None;
+        self.overlay.clear();
         let input = cx.new(|cx| InputState::new(window, cx));
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -2680,15 +2666,15 @@ impl Workspace {
 
     /// Opens the branch switcher (the status bar's branch, or the Switch Branch action).
     fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay.merging() {
+            return;
+        }
         self.popup = None;
-        self.push = None;
-        self.git_op = None;
-        self.conflicts = None;
         self.cancel_running_search();
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search for branches"));
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change)
-                && let Some(popup) = &mut this.branches
+                && let Some(popup) = this.overlay.branches_mut()
             {
                 popup.model.set_query(input.read(cx).value().as_ref());
                 popup.reveal_selected();
@@ -2707,7 +2693,7 @@ impl Workspace {
             _subscription: subscription,
         };
         popup.reveal_selected();
-        self.branches = Some(popup);
+        self.overlay = Overlay::Branches(popup);
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let found = cx
@@ -2718,7 +2704,7 @@ impl Workspace {
                     Some(found)
                 })
                 .await;
-            this.update(cx, |this, cx| match (found, &mut this.branches) {
+            this.update(cx, |this, cx| match (found, this.overlay.branches_mut()) {
                 (Some(found), Some(popup)) => {
                     popup.model.replace(found);
                     popup.loading = false;
@@ -2726,7 +2712,7 @@ impl Workspace {
                     cx.notify();
                 }
                 (None, Some(_)) => {
-                    this.branches = None;
+                    this.overlay.close_branches();
                     let note = Notification::warning("This project is not a git repository.");
                     this.notify(note.title("Switch branch"), cx);
                 }
@@ -2740,14 +2726,14 @@ impl Workspace {
     }
 
     fn close_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.branches = None;
+        self.overlay.close_branches();
         self.focus.focus(window, cx);
         cx.notify();
     }
 
     /// Keys of the open branch switcher; the others go to its search box.
     fn branches_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(popup) = &mut self.branches else {
+        let Some(popup) = self.overlay.branches_mut() else {
             return;
         };
         if let Some(chosen) = popup.menu {
@@ -2782,7 +2768,7 @@ impl Workspace {
 
     /// A click or Enter on `row` of the switcher: opens a folder, or checks out a branch.
     fn activate_branch_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(popup) = &mut self.branches else {
+        let Some(popup) = self.overlay.branches_mut() else {
             return;
         };
         popup.menu = None;
@@ -2868,24 +2854,17 @@ impl Workspace {
                 this.end_busy("Running git...", cx);
                 match result {
                     Ok(()) => {
-                        this.commit_finished(true, cx);
-                        this.refresh_git(cx); // the gutter compares with the new HEAD
-                        this.branch = status;
-                        this.rescan(cx);
-                        this.reload_log(cx);
+                        this.after_git(true, status, true, cx);
                         if let Some(done) = done {
                             this.notify(Notification::success(done), cx);
                         }
                         cx.notify();
                     }
                     Err(why) => {
-                        this.commit_finished(false, cx);
-                        // a cherry-pick that clashes leaves the repository half way
-                        this.refresh_git(cx);
-                        this.branch = status;
-                        this.reload_log(cx);
+                        // a cherry-pick that clashes leaves the repository half way, and the
+                        // files hold conflict markers
+                        this.after_git(false, status, left.is_some(), cx);
                         if left.is_some() {
-                            this.rescan(cx); // the files now hold conflict markers
                             this.notify(
                                 Notification::info("Resolve the conflicts to continue")
                                     .title(failure),
@@ -2909,9 +2888,28 @@ impl Workspace {
         .detach();
     }
 
+    /// Reads back what a git operation changed: the commit panel (`ok`: the operation went
+    /// through), the gutter (it compares with the new HEAD), the branch, the history and, when
+    /// `files`, the project's files.
+    pub(crate) fn after_git(
+        &mut self,
+        ok: bool,
+        status: Option<zide_git::BranchStatus>,
+        files: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_finished(ok, cx);
+        self.refresh_git(cx);
+        self.branch = status;
+        if files {
+            self.rescan(cx);
+        }
+        self.reload_log(cx);
+    }
+
     /// Opens the menu of the selected branch (of `row` when given: a right click selects it).
     fn open_branch_menu(&mut self, row: Option<usize>, cx: &mut Context<Self>) {
-        let Some(popup) = &mut self.branches else {
+        let Some(popup) = self.overlay.branches_mut() else {
             return;
         };
         if let Some(row) = row {
@@ -2932,7 +2930,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(popup) = &mut self.branches else {
+        let Some(popup) = self.overlay.branches_mut() else {
             return;
         };
         let entries = popup
@@ -2964,8 +2962,8 @@ impl Workspace {
     ) {
         use branches::BranchAction as A;
         let existing = self
-            .branches
-            .as_ref()
+            .overlay
+            .branches()
             .map(|popup| popup.model.local_names())
             .unwrap_or_default();
         self.close_branches(window, cx);
@@ -3556,9 +3554,9 @@ impl Workspace {
                 cx.listener(|this, _: &PreviousMethod, _, cx| this.jump_to_method(false, cx)),
             )
             .on_action(cx.listener(|this, _: &SwitchTab, window, cx| {
-                if this.git_op.is_some() {
+                if this.overlay.git_op().is_some() {
                     this.git_op_tab(window, cx);
-                } else if this.push.is_some() {
+                } else if this.overlay.push().is_some() {
                     this.push_switch_pane(cx);
                 } else if this.center == Center::Log && this.popup.is_none() {
                     this.log_tab(window, cx);
@@ -3587,20 +3585,14 @@ impl Workspace {
                     return;
                 }
                 this.diff_open = false;
-                if this.merge.is_some() {
-                    return this.merge_key(event, window, cx);
-                }
-                if this.conflicts.is_some() {
-                    return this.conflicts_key(event, window, cx);
-                }
-                if this.git_op.is_some() {
-                    return this.git_op_key(event, window, cx);
-                }
-                if this.push.is_some() {
-                    return this.push_key(event, window, cx);
-                }
-                if this.branches.is_some() {
-                    return this.branches_key(event, window, cx);
+                // an open git dialog takes the keys; the merge editor before the conflicts under it
+                match &this.overlay {
+                    Overlay::Conflicts(_, Some(_)) => return this.merge_key(event, window, cx),
+                    Overlay::Conflicts(_, None) => return this.conflicts_key(event, window, cx),
+                    Overlay::GitOp(_) => return this.git_op_key(event, window, cx),
+                    Overlay::Push(_) => return this.push_key(event, window, cx),
+                    Overlay::Branches(_) => return this.branches_key(event, window, cx),
+                    Overlay::None => {}
                 }
                 let Some(popup) = &mut this.popup else {
                     // the chat's keys are seen earlier, by the interceptor
@@ -3725,20 +3717,17 @@ impl Workspace {
                 self.claude_installed.then(|| self.claude_overall(cx)),
                 cx.listener(|this, _, window, cx| this.toggle_claude(window, cx)),
             ));
-        if let Some(branches) = &self.branches {
-            root = root.child(branches::render(branches, cx));
-        }
-        if self.push.is_some() {
-            root = root.child(self.push_view(cx));
-        }
-        if self.git_op.is_some() {
-            root = root.child(self.git_op_view(cx));
-        }
-        if self.conflicts.is_some() {
-            root = root.child(self.conflicts_view(cx));
-        }
-        if self.merge.is_some() {
-            root = root.child(self.merge_view(cx));
+        match &self.overlay {
+            Overlay::None => {}
+            Overlay::Branches(branches) => root = root.child(branches::render(branches, cx)),
+            Overlay::Push(_) => root = root.child(self.push_view(cx)),
+            Overlay::GitOp(_) => root = root.child(self.git_op_view(cx)),
+            Overlay::Conflicts(_, merge) => {
+                root = root.child(self.conflicts_view(cx));
+                if merge.is_some() {
+                    root = root.child(self.merge_view(cx));
+                }
+            }
         }
 
         let Some(popup) = &self.popup else {
