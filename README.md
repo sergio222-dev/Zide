@@ -173,6 +173,28 @@ In the Claude chat (`Alt+2` opens it): `Alt+Up` / `Alt+Down` switch between open
 `Ctrl+V` pastes an image (click one, in the message or above the input, to see it large; `Esc` closes it), and `/` and `@` open the command and file menus. Earlier conversations
 are also listed by **Claude: Resume Session** in Find Action (`Ctrl+Shift+A`).
 
+Zide starts `claude` from `PATH` by default. To start it some other way, for example through a
+sandbox wrapper, run **Configure Agent** in Find Action, or edit `~/.config/zide/settings.json`:
+
+```json
+{
+  "agent_servers": {
+    "Sandboxed": {
+      "command": "~/bin/agent-sandbox.sh",
+      "args": ["claude"],
+      "config_dir": "~/.sandbox-agent/.claude"
+    }
+  }
+}
+```
+
+Zide runs `command args…` followed by Claude's own arguments (it speaks Claude Code's
+stream-json, not ACP), so the command must end up running `claude`. `config_dir` is where that
+Claude keeps its sessions, when it is not `~/.claude` (a sandbox with its own home): the chat
+history is read from there. Only the first entry is used. New chats use the new command; open
+ones keep theirs. **Test** in the dialog runs `--version` through the command and shows what
+failed. Uninstalling with `--purge` leaves `~/.config/zide` in place.
+
 In the Git log (`Alt+3` opens it): the refs tree on the left (HEAD, Local, Remote, Tags) narrows the history to
 the ref you pick, and picking it again goes back to every branch. `/` focuses the search box (message,
 author or the start of a hash), `Tab` moves between refs, commits and files, `j` / `k` or the arrows move,
