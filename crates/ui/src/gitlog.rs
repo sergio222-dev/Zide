@@ -126,8 +126,12 @@ pub struct LogPanel {
     /// The popup of a filter, when open, with the row the keyboard is on (the user list; the
     /// date popup is for the mouse).
     menu: Option<(Filter, usize)>,
-    /// The context menu of a commit, when open.
+    /// The context menu of a commit, of its files or of a ref, when open.
     context_menu: Option<menu::ContextMenu>,
+    /// The remote the current branch pushes to, for the menu of a ref.
+    remote: Option<String>,
+    /// The tags a remote had at the last fetch: its name and the tags.
+    remote_tags: Option<(String, HashSet<String>)>,
     /// Counts the pauses in typing: a search waits for its own to end.
     typed: u64,
     refs: Option<Model>,
@@ -232,6 +236,8 @@ impl LogPanel {
             before_day: String::new(),
             preset: 0,
             context_menu: None,
+            remote: None,
+            remote_tags: None,
             menu: None,
             typed: 0,
             refs: None,
@@ -560,15 +566,24 @@ impl Workspace {
     fn load_log_refs(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
-            let (found, authors) = cx
+            let (found, authors, remote, remote_tags) = cx
                 .background_executor()
-                .spawn(async move { (zide_git::branches(&root), log::authors(&root)) })
+                .spawn(async move {
+                    let found = zide_git::branches(&root);
+                    let current = found.as_ref().and_then(|b| b.current.clone());
+                    let remote = zide_git::push_remote(&root, &current.unwrap_or_default()).ok();
+                    let remote_tags = crate::session::remote_tags(&root)
+                        .map(|(remote, tags)| (remote, tags.into_iter().collect()));
+                    (found, log::authors(&root), remote, remote_tags)
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if let Some(panel) = &mut this.log {
                     if let Some(found) = found {
                         panel.set_refs(found);
                     }
+                    panel.remote = remote;
+                    panel.remote_tags = remote_tags;
                     if let Ok(authors) = authors {
                         panel.authors = authors;
                     }
@@ -1274,9 +1289,19 @@ fn refs_pane(panel: &LogPanel, workspace: &Entity<Workspace>) -> Div {
                                     .pr_2()
                                     .whitespace_nowrap()
                                     .cursor_pointer()
-                                    .on_click(move |_, _, cx| {
-                                        workspace
-                                            .update(cx, |this, cx| this.activate_log_ref(index, cx))
+                                    .on_click({
+                                        let workspace = workspace.clone();
+                                        move |_, _, cx| {
+                                            workspace.update(cx, |this, cx| {
+                                                this.activate_log_ref(index, cx)
+                                            })
+                                        }
+                                    })
+                                    .on_mouse_down(MouseButton::Right, move |event, _, cx| {
+                                        let at = event.position;
+                                        workspace.update(cx, |this, cx| {
+                                            this.open_ref_menu(index, at, cx)
+                                        })
                                     });
                                 let picked = scope_key.as_deref() == Some(row.key.as_str());
                                 let line = match &row.kind {
