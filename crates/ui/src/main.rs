@@ -36,6 +36,7 @@ mod projects;
 mod push;
 mod rows;
 mod session;
+mod settings;
 mod sound;
 mod stash_tab;
 mod statusbar;
@@ -4605,6 +4606,7 @@ fn main() {
         gpui_kit::init(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         apply_palette(cx);
+        settings::apply();
         // Root binds Tab to focus-next; a deeper context wins over it.
         cx.bind_keys([
             KeyBinding::new("tab", SwitchTab, Some("Workspace")),
