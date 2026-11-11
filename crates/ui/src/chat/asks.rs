@@ -223,6 +223,9 @@ impl Chats {
                     let item = name(index);
                     let choices = options(question).into_iter().map(|option| {
                         QuestionnaireChoice::new(st, item.clone(), option.label.clone())
+                            // flex items keep their text's width unless allowed to shrink,
+                            // and then long descriptions run past the card instead of wrapping
+                            .content_style(StyleRefinement::default().min_w_0())
                             .child(div().child(option.label.clone()))
                             .child(
                                 QuestionnaireChoiceDescription::new()
