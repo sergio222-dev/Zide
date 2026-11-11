@@ -1,19 +1,20 @@
-//! The Configure Agent dialog: how Claude is started (a sandbox wrapper, say), saved in
-//! Zide's settings file.
+//! The Configure Agent dialog: the agents Claude can be started through (a sandbox wrapper,
+//! say), which one is in use, and each one's command; saved in Zide's settings file.
 
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Disableable, Sizable as _};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use serde_json::Value;
 
 use crate::settings::{self, AgentServer};
 use crate::{Workspace, theme};
 
 /// The name of an entry saved without one.
-pub const DEFAULT_NAME: &str = "Claude";
+pub const DEFAULT_NAME: &str = "Agent";
 
 /// Splits `text` into arguments as a shell would (quotes keep spaces).
 pub fn parse_args(text: &str) -> Result<Vec<String>, String> {
@@ -25,73 +26,113 @@ pub fn join_args(args: &[String]) -> String {
     shlex::try_join(args.iter().map(String::as_str)).unwrap_or_else(|_| args.join(" "))
 }
 
-/// The entry the form describes; `None` when it names no command (Claude from `PATH`).
+/// The entry the form describes.
 pub fn agent_from_form(
     name: &str,
     command: &str,
     args: &str,
     config_dir: &str,
-) -> Result<Option<AgentServer>, String> {
+) -> Result<AgentServer, String> {
     let command = command.trim();
     if command.is_empty() {
-        return Ok(None);
+        return Err("Command is empty: name the script or program that runs claude".into());
     }
     let name = name.trim();
     let config_dir = config_dir.trim();
-    Ok(Some(AgentServer {
+    Ok(AgentServer {
         name: if name.is_empty() { DEFAULT_NAME } else { name }.to_string(),
         command: command.to_string(),
         args: parse_args(args)?,
         config_dir: (!config_dir.is_empty()).then(|| config_dir.to_string()),
-    }))
+    })
+}
+
+/// What the dialog shows on the right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Selected {
+    /// Claude from `PATH`: nothing to edit.
+    Path,
+    Agent(String),
+    New,
 }
 
 pub struct AgentForm {
     workspace: WeakEntity<Workspace>,
-    /// The entry being edited, as the file had it: saving replaces it.
-    previous: Option<String>,
+    /// The settings as last read or written.
+    file: Value,
+    selected: Selected,
     name: Entity<InputState>,
     command: Entity<InputState>,
     args: Entity<InputState>,
     config_dir: Entity<InputState>,
     testing: bool,
-    /// The outcome of the last Test or a failed Save, and whether it went well.
+    /// The outcome of the last action, and whether it went well.
     message: Option<(bool, String)>,
 }
 
 impl AgentForm {
     fn new(
         workspace: WeakEntity<Workspace>,
-        current: Result<Option<AgentServer>, String>,
+        file: Result<Value, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (agent, message) = match current {
-            Ok(agent) => (agent.unwrap_or_default(), None),
-            // the file is kept as it is; saving will say so again
-            Err(why) => (AgentServer::default(), Some((false, why))),
+        let mut field = |placeholder: &str| {
+            cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()))
         };
-        let mut field = |value: String, placeholder: &str| {
-            cx.new(|cx| {
-                let mut state = InputState::new(window, cx).placeholder(placeholder.to_string());
-                state.set_value(value, window, cx);
-                state
-            })
-        };
-
-        Self {
+        let mut form = Self {
             workspace,
-            previous: (!agent.name.is_empty()).then(|| agent.name.clone()),
-            name: field(agent.name.clone(), DEFAULT_NAME),
-            command: field(agent.command.clone(), "claude from PATH"),
-            args: field(join_args(&agent.args), "claude"),
-            config_dir: field(agent.config_dir.clone().unwrap_or_default(), "~/.claude"),
+            file: Value::Null,
+            selected: Selected::Path,
+            name: field(DEFAULT_NAME),
+            command: field("/path/to/agent-sandbox.sh"),
+            args: field("claude"),
+            config_dir: field("~/.claude"),
             testing: false,
-            message,
+            message: None,
+        };
+        match file {
+            Ok(file) => {
+                form.file = file;
+                let selected = match settings::active(&form.file) {
+                    Some(agent) => Selected::Agent(agent.name),
+                    None => Selected::Path,
+                };
+                form.select(selected, window, cx);
+            }
+            // the file is kept as it is: every change will say so again
+            Err(why) => form.message = Some((false, why)),
         }
+        form
     }
 
-    fn agent(&self, cx: &App) -> Result<Option<AgentServer>, String> {
+    /// Shows `selected` on the right, its fields filled in.
+    fn select(&mut self, selected: Selected, window: &mut Window, cx: &mut Context<Self>) {
+        let agent = match &selected {
+            Selected::Agent(name) => settings::agents(&self.file)
+                .into_iter()
+                .find(|agent| &agent.name == name)
+                .unwrap_or_default(),
+            _ => AgentServer::default(),
+        };
+        let values = [
+            (&self.name, agent.name.clone()),
+            (&self.command, agent.command.clone()),
+            (&self.args, join_args(&agent.args)),
+            (
+                &self.config_dir,
+                agent.config_dir.clone().unwrap_or_default(),
+            ),
+        ];
+        for (input, value) in values {
+            input.update(cx, |state, cx| state.set_value(value, window, cx));
+        }
+        self.selected = selected;
+        self.message = None;
+        cx.notify();
+    }
+
+    fn form(&self, cx: &App) -> Result<AgentServer, String> {
         let value = |input: &Entity<InputState>| input.read(cx).value().to_string();
         agent_from_form(
             &value(&self.name),
@@ -101,14 +142,125 @@ impl AgentForm {
         )
     }
 
-    /// Runs `--version` through the command as typed, without saving it.
-    fn test(&mut self, cx: &mut Context<Self>) {
-        let launcher = match self.agent(cx) {
-            Ok(agent) => agent.map(|a| a.launcher()).unwrap_or_default(),
+    /// Changes the settings file with `change`; on success Claude starts as it now says (new
+    /// chats only), and `done` is shown.
+    fn change(
+        &mut self,
+        change: impl FnOnce(Value) -> Value,
+        done: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let outcome = settings::path()
+            .ok_or_else(|| "no config folder to save the settings in".to_string())
+            .and_then(|path| {
+                settings::update(&path, change)
+                    .map_err(|e| format!("Could not save {}: {e}", path.display()))
+            });
+        match outcome {
+            Ok(file) => {
+                settings::use_file(&file);
+                self.file = file;
+                self.workspace
+                    .update(cx, |_, cx| Workspace::check_claude(cx))
+                    .ok();
+                self.message = Some((true, done));
+                cx.notify();
+                true
+            }
+            Err(why) => {
+                self.message = Some((false, why));
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let agent = match self.form(cx) {
+            Ok(agent) => agent,
             Err(why) => {
                 self.message = Some((false, why));
                 return cx.notify();
             }
+        };
+        let previous = match &self.selected {
+            Selected::Agent(name) => Some(name.clone()),
+            _ => None,
+        };
+        let taken = settings::agents(&self.file)
+            .iter()
+            .any(|other| other.name == agent.name && Some(&other.name) != previous.as_ref());
+        if taken {
+            self.message = Some((
+                false,
+                format!("There is already an agent named '{}'", agent.name),
+            ));
+            return cx.notify();
+        }
+        let name = agent.name.clone();
+        let saved = self.change(
+            |file| settings::with_agent(file, previous.as_deref(), &agent),
+            String::new(),
+            cx,
+        );
+        if saved {
+            self.select(Selected::Agent(name.clone()), window, cx);
+            let in_use = settings::active(&self.file).is_some_and(|a| a.name == name);
+            self.message = Some((
+                true,
+                if in_use {
+                    format!("Saved: new chats start Claude with '{name}'")
+                } else {
+                    format!("Saved '{name}'. Use it to start new chats with it")
+                },
+            ));
+        }
+    }
+
+    fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Selected::Agent(name) = self.selected.clone() else {
+            return;
+        };
+        let file = |file| settings::without_agent(file, &name);
+        if self.change(file, String::new(), cx) {
+            let selected = match settings::active(&self.file) {
+                Some(agent) => Selected::Agent(agent.name),
+                None => Selected::Path,
+            };
+            self.select(selected, window, cx);
+            self.message = Some((true, format!("Deleted '{name}'")));
+        }
+    }
+
+    /// Makes the selected agent (or Claude from `PATH`) the one new chats start.
+    fn use_selected(&mut self, cx: &mut Context<Self>) {
+        let name = match &self.selected {
+            Selected::Agent(name) => Some(name.clone()),
+            Selected::Path => None,
+            Selected::New => return,
+        };
+        let done = match &name {
+            Some(name) => format!("New chats start Claude with '{name}'"),
+            None => "New chats start Claude from PATH".to_string(),
+        };
+        self.change(
+            |file| settings::with_active(file, name.as_deref()),
+            done,
+            cx,
+        );
+    }
+
+    /// Runs `--version` through what the form says (unsaved), or through `PATH`'s claude.
+    fn test(&mut self, cx: &mut Context<Self>) {
+        let launcher = match &self.selected {
+            Selected::Path => zide_claude::Launcher::default(),
+            _ => match self.form(cx) {
+                Ok(agent) => agent.launcher(),
+                Err(why) => {
+                    self.message = Some((false, why));
+                    return cx.notify();
+                }
+            },
         };
         self.testing = true;
         self.message = None;
@@ -120,24 +272,17 @@ impl AgentForm {
                 .await;
             this.update(cx, |this, cx| {
                 this.testing = false;
+                let text = |v: zide_claude::Version| format!("{}.{}.{}", v.major, v.minor, v.patch);
                 this.message = Some(match outcome {
-                    Ok(version) if version.is_supported() => (
-                        true,
-                        format!(
-                            "Claude {}.{}.{} answered",
-                            version.major, version.minor, version.patch
-                        ),
-                    ),
+                    Ok(version) if version.is_supported() => {
+                        (true, format!("Claude {} answered", text(version)))
+                    }
                     Ok(version) => (
                         false,
                         format!(
-                            "Claude {}.{}.{} is too old (needs {}.{}.{})",
-                            version.major,
-                            version.minor,
-                            version.patch,
-                            zide_claude::MIN_VERSION.major,
-                            zide_claude::MIN_VERSION.minor,
-                            zide_claude::MIN_VERSION.patch
+                            "Claude {} is too old (needs {})",
+                            text(version),
+                            text(zide_claude::MIN_VERSION)
                         ),
                     ),
                     Err(why) => (false, why),
@@ -149,39 +294,46 @@ impl AgentForm {
         .detach();
     }
 
-    /// Writes the entry and starts new chats with it; open chats keep their process.
-    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let outcome = self.agent(cx).and_then(|agent| {
-            let path = settings::path().ok_or("no config folder to save the settings in")?;
-            settings::save_agent(&path, self.previous.as_deref(), agent.as_ref())
-                .map_err(|e| format!("Could not save {}: {e}", path.display()))?;
-            Ok(agent)
-        });
-        match outcome {
-            Ok(agent) => {
-                zide_claude::set_launcher(
-                    agent
-                        .as_ref()
-                        .map(AgentServer::launcher)
-                        .unwrap_or_default(),
-                );
-                let said = match &agent {
-                    Some(agent) => format!("New chats start Claude with '{}'", agent.name),
-                    None => "New chats start Claude from PATH".to_string(),
-                };
-                self.workspace
-                    .update(cx, |workspace, cx| {
-                        Workspace::check_claude(cx);
-                        workspace.notify(Notification::success(said), cx);
-                    })
-                    .ok();
-                window.close_dialog(cx);
-            }
-            Err(why) => {
-                self.message = Some((false, why));
-                cx.notify();
-            }
+    /// Whether `selected` is the one new chats start with.
+    fn in_use(&self, selected: &Selected) -> bool {
+        let active = settings::active(&self.file).map(|agent| agent.name);
+        match selected {
+            Selected::Path => active.is_none(),
+            Selected::Agent(name) => active.as_ref() == Some(name),
+            Selected::New => false,
         }
+    }
+
+    fn list_row(
+        &self,
+        id: usize,
+        label: String,
+        selected: Selected,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let current = self.selected == selected;
+        let in_use = self.in_use(&selected);
+        div()
+            .id(("agent", id))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_color(rgb(if current { theme::STRONG } else { theme::TEXT }))
+            .when(current, |row| row.bg(rgb(theme::ACTIVE_BG)))
+            .child(
+                div()
+                    .size_2()
+                    .rounded_full()
+                    .when(in_use, |dot| dot.bg(rgb(theme::OK))),
+            )
+            .child(div().flex_1().truncate().child(label))
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.select(selected.clone(), window, cx)),
+            )
     }
 }
 
@@ -203,28 +355,60 @@ fn row(label: &'static str, hint: &'static str, input: &Entity<InputState>) -> D
 
 impl Render for AgentForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let agents = settings::agents(&self.file);
+        let editing = self.selected != Selected::Path;
+        let saved = matches!(self.selected, Selected::Agent(_));
+        let in_use = self.in_use(&self.selected);
+
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w(px(200.))
+            .pr_3()
+            .border_r_1()
+            .border_color(rgb(theme::BORDER))
+            .child(self.list_row(0, "Claude (PATH)".into(), Selected::Path, cx));
+        for (i, agent) in agents.into_iter().enumerate() {
+            let selected = Selected::Agent(agent.name.clone());
+            list = list.child(self.list_row(i + 1, agent.name, selected, cx));
+        }
+        list = list.child(
+            Button::new("agent-new")
+                .label("+ New Agent")
+                .ghost()
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.select(Selected::New, window, cx)),
+                ),
+        );
+
+        let details = div()
+            .flex_1()
             .flex()
             .flex_col()
             .gap_3()
-            .text_sm()
-            .child(div().text_color(rgb(theme::MUTED)).child(
-                "Zide runs `command args…` followed by Claude's own arguments, so the \
-                     command must end up running claude. Leave Command empty to use claude \
-                     from PATH.",
-            ))
-            .child(row("Name", "", &self.name))
-            .child(row(
-                "Command",
-                "a wrapper script, e.g. a sandbox",
-                &self.command,
-            ))
-            .child(row("Args", "before Claude's, e.g. claude", &self.args))
-            .child(row(
-                "Config dir",
-                "where that Claude keeps its sessions",
-                &self.config_dir,
-            ))
+            .child(div().text_color(rgb(theme::MUTED)).child(if editing {
+                "Zide runs `command args…` followed by Claude's own arguments, so the command \
+                 must end up running claude."
+            } else {
+                "Claude found on PATH (or its usual install places), with its own config in \
+                 ~/.claude."
+            }))
+            .when(editing, |details| {
+                details
+                    .child(row("Name", "", &self.name))
+                    .child(row(
+                        "Command",
+                        "a wrapper script, e.g. a sandbox",
+                        &self.command,
+                    ))
+                    .child(row("Args", "before Claude's, e.g. claude", &self.args))
+                    .child(row(
+                        "Config dir",
+                        "where that Claude keeps its sessions",
+                        &self.config_dir,
+                    ))
+            })
             .children(self.message.as_ref().map(|(ok, text)| {
                 div()
                     .text_color(rgb(if *ok { theme::OK } else { theme::ERROR }))
@@ -246,34 +430,62 @@ impl Render for AgentForm {
                             .disabled(self.testing)
                             .on_click(cx.listener(|this, _, _, cx| this.test(cx))),
                     )
+                    .when(saved, |buttons| {
+                        buttons.child(
+                            Button::new("agent-delete")
+                                .label("Delete")
+                                .danger()
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.delete(window, cx)),
+                                ),
+                        )
+                    })
+                    .when(self.selected != Selected::New, |buttons| {
+                        buttons.child(
+                            Button::new("agent-use")
+                                .label(if in_use { "In Use" } else { "Use" })
+                                .disabled(in_use)
+                                .on_click(cx.listener(|this, _, _, cx| this.use_selected(cx))),
+                        )
+                    })
+                    .when(editing, |buttons| {
+                        buttons.child(
+                            Button::new("agent-save")
+                                .primary()
+                                .label("Save")
+                                .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
+                        )
+                    })
                     .child(
-                        Button::new("agent-cancel")
-                            .label("Cancel")
+                        Button::new("agent-close")
+                            .label("Close")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(
-                        Button::new("agent-save")
-                            .primary()
-                            .label("Save")
-                            .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     ),
-            )
+            );
+
+        div()
+            .flex()
+            .gap_3()
+            .text_sm()
+            .min_h(px(320.))
+            .child(list)
+            .child(details)
     }
 }
 
 impl Workspace {
     /// The Configure Agent command: edits how Claude is started.
     pub(crate) fn configure_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = match settings::path() {
-            Some(path) => settings::load_agent(&path).map_err(|e| e.to_string()),
-            None => Ok(None),
+        let file = match settings::path() {
+            Some(path) => settings::read(&path).map_err(|e| e.to_string()),
+            None => Ok(serde_json::json!({})),
         };
         let workspace = cx.entity().downgrade();
-        let form = cx.new(|cx| AgentForm::new(workspace, current, window, cx));
+        let form = cx.new(|cx| AgentForm::new(workspace, file, window, cx));
         window.open_dialog(cx, move |dialog, _, _| {
             dialog
                 .title("Configure Agent")
-                .width(px(560.))
+                .width(px(760.))
                 .child(form.clone())
         });
     }
@@ -300,22 +512,22 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn the_form_becomes_an_entry_or_the_default() {
+    fn the_form_becomes_an_entry() {
         assert_eq!(
             agent_from_form("Sandboxed", " ~/bin/a.sh ", "claude", " ~/.s/.claude "),
-            Ok(Some(AgentServer {
+            Ok(AgentServer {
                 name: "Sandboxed".into(),
                 command: "~/bin/a.sh".into(),
                 args: vec!["claude".into()],
                 config_dir: Some("~/.s/.claude".into()),
-            }))
+            })
         );
         // no name: a generic one; no config dir: none
-        let unnamed = agent_from_form(" ", "/bin/a.sh", "", "").unwrap().unwrap();
+        let unnamed = agent_from_form(" ", "/bin/a.sh", "", "").unwrap();
         assert_eq!(unnamed.name, DEFAULT_NAME);
         assert_eq!(unnamed.config_dir, None);
-        // no command: Claude from PATH, the entry is removed
-        assert_eq!(agent_from_form("x", "  ", "claude", ""), Ok(None));
+        // an agent needs a command; quotes must close
+        assert!(agent_from_form("x", "  ", "claude", "").is_err());
         assert!(agent_from_form("x", "/bin/a.sh", "\"oops", "").is_err());
     }
 }

@@ -1,6 +1,7 @@
 //! Zide's own settings, in `~/.config/zide/settings.json`. For now they only say how to start
 //! the agent: `agent_servers` maps a name to the command that runs Claude (a sandbox wrapper,
-//! say). Keys Zide does not know are kept when the file is saved.
+//! say), and `agent` names the one in use. Keys Zide does not know are kept when the file is
+//! saved.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -51,12 +52,10 @@ pub fn path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("zide").join("settings.json"))
 }
 
-/// The first entry of `agent_servers` (in the order the file is read), if there is one.
-pub fn agent_from(file: &Value) -> Option<AgentServer> {
-    let (name, entry) = file.get("agent_servers")?.as_object()?.iter().next()?;
+fn entry(name: &str, entry: &Value) -> AgentServer {
     let text = |key: &str| entry.get(key).and_then(Value::as_str).map(str::to_owned);
-    Some(AgentServer {
-        name: name.clone(),
+    AgentServer {
+        name: name.to_string(),
         command: text("command").unwrap_or_default(),
         args: entry
             .get("args")
@@ -69,38 +68,87 @@ pub fn agent_from(file: &Value) -> Option<AgentServer> {
             })
             .unwrap_or_default(),
         config_dir: text("config_dir"),
-    })
+    }
 }
 
-/// `file` with the entry `previous` replaced by `agent` (or just removed, without one); the
-/// other entries and settings stay.
-pub fn with_agent(mut file: Value, previous: Option<&str>, agent: Option<&AgentServer>) -> Value {
-    if !file.is_object() {
-        file = json!({});
+/// Every entry of `agent_servers`, in the order the file is read.
+pub fn agents(file: &Value) -> Vec<AgentServer> {
+    file.get("agent_servers")
+        .and_then(Value::as_object)
+        .map(|servers| servers.iter().map(|(name, e)| entry(name, e)).collect())
+        .unwrap_or_default()
+}
+
+/// The agent in use: the one `agent` names; without that key (or naming none that exists), the
+/// first entry; `"agent": null` is Claude from `PATH`, as is a file without entries.
+pub fn active(file: &Value) -> Option<AgentServer> {
+    let agents = agents(file);
+    match file.get("agent") {
+        Some(Value::Null) => None,
+        Some(Value::String(name)) => agents
+            .iter()
+            .find(|agent| &agent.name == name)
+            .or(agents.first())
+            .cloned(),
+        _ => agents.into_iter().next(),
     }
-    let root = file.as_object_mut().expect("an object");
-    let servers = root
+}
+
+/// The `agent_servers` object of `file`, created when missing.
+fn servers(file: &mut Value) -> &mut Map<String, Value> {
+    if !file.is_object() {
+        *file = json!({});
+    }
+    let servers = file
+        .as_object_mut()
+        .expect("an object")
         .entry("agent_servers")
         .or_insert_with(|| Value::Object(Map::new()));
     if !servers.is_object() {
         *servers = Value::Object(Map::new());
     }
-    let servers = servers.as_object_mut().expect("an object");
+    servers.as_object_mut().expect("an object")
+}
+
+/// `file` with the entry `previous` replaced by `agent` (a new one without `previous`); the
+/// other entries and settings stay, and a renamed active entry stays the active one.
+pub fn with_agent(mut file: Value, previous: Option<&str>, agent: &AgentServer) -> Value {
+    let servers = servers(&mut file);
     if let Some(previous) = previous {
         servers.remove(previous);
     }
-    if let Some(agent) = agent {
-        let mut entry = json!({ "command": agent.command, "args": agent.args });
-        if let Some(dir) = &agent.config_dir {
-            entry["config_dir"] = json!(dir);
-        }
-        servers.insert(agent.name.clone(), entry);
+    let mut entry = json!({ "command": agent.command, "args": agent.args });
+    if let Some(dir) = &agent.config_dir {
+        entry["config_dir"] = json!(dir);
+    }
+    servers.insert(agent.name.clone(), entry);
+    if previous.is_some() && file.get("agent").and_then(Value::as_str) == previous {
+        file["agent"] = json!(agent.name);
     }
     file
 }
 
-/// The file as JSON: `{}` when it does not exist, an error when it is not JSON.
-fn read(path: &Path) -> io::Result<Value> {
+/// `file` without the entry `name`; when it was the active one, the first entry left is.
+pub fn without_agent(mut file: Value, name: &str) -> Value {
+    servers(&mut file).remove(name);
+    if file.get("agent").and_then(Value::as_str) == Some(name) {
+        file.as_object_mut().expect("an object").remove("agent");
+    }
+    file
+}
+
+/// `file` with `name` as the agent in use; `None` is Claude from `PATH`.
+pub fn with_active(mut file: Value, name: Option<&str>) -> Value {
+    if !file.is_object() {
+        file = json!({});
+    }
+    file["agent"] = name.map_or(Value::Null, |name| json!(name));
+    file
+}
+
+/// The file as JSON: `{}` when it does not exist, an error when it is not JSON (which is then
+/// never overwritten: it is the user's, and rewriting it would lose what they wrote).
+pub fn read(path: &Path) -> io::Result<Value> {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| {
             io::Error::new(
@@ -113,43 +161,40 @@ fn read(path: &Path) -> io::Result<Value> {
     }
 }
 
-pub fn load_agent(path: &Path) -> io::Result<Option<AgentServer>> {
-    Ok(agent_from(&read(path)?))
-}
-
-/// Writes `agent` in place of `previous`. A file that is not JSON is left alone: it is the
-/// user's, and rewriting it would lose what they wrote.
-pub fn save_agent(
-    path: &Path,
-    previous: Option<&str>,
-    agent: Option<&AgentServer>,
-) -> io::Result<()> {
-    let file = with_agent(read(path)?, previous, agent);
+pub fn write(path: &Path, file: &Value) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let text = serde_json::to_string_pretty(&file).map_err(io::Error::other)?;
+    let text = serde_json::to_string_pretty(file).map_err(io::Error::other)?;
     std::fs::write(path, text + "\n")
 }
 
-/// Reads the settings and makes Claude start as they say; problems are logged, and Claude then
-/// starts as by default.
-pub fn apply() -> Option<AgentServer> {
-    let agent = match path().map(|path| load_agent(&path)) {
-        Some(Ok(agent)) => agent,
-        Some(Err(e)) => {
-            eprintln!("settings: {e}");
-            None
-        }
-        None => None,
-    };
+/// Reads the file at `path`, changes it with `change` and writes it back; a file that is not
+/// JSON is left alone. Returns what was written.
+pub fn update(path: &Path, change: impl FnOnce(Value) -> Value) -> io::Result<Value> {
+    let file = change(read(path)?);
+    write(path, &file)?;
+    Ok(file)
+}
+
+/// Makes Claude start as `file` says.
+pub fn use_file(file: &Value) {
     zide_claude::set_launcher(
-        agent
+        active(file)
             .as_ref()
             .map(AgentServer::launcher)
             .unwrap_or_default(),
     );
-    agent
+}
+
+/// Reads the settings and makes Claude start as they say; a problem is logged, and Claude then
+/// starts as by default.
+pub fn apply() {
+    match path().map(|path| read(&path)) {
+        Some(Ok(file)) => use_file(&file),
+        Some(Err(e)) => eprintln!("settings: {e}"),
+        None => {}
+    }
 }
 
 #[cfg(test)]
@@ -165,8 +210,16 @@ mod tests {
         }
     }
 
+    fn named(name: &str) -> Option<String> {
+        Some(name.to_string())
+    }
+
+    fn active_name(file: &Value) -> Option<String> {
+        active(file).map(|agent| agent.name)
+    }
+
     #[::core::prelude::v1::test]
-    fn the_first_agent_server_is_read_in_the_documented_shape() {
+    fn the_first_agent_server_is_used_in_the_documented_shape() {
         let file = json!({
             "agent_servers": {
                 "Agente aislado": {
@@ -176,7 +229,7 @@ mod tests {
             }
         });
         assert_eq!(
-            agent_from(&file),
+            active(&file),
             Some(AgentServer {
                 name: "Agente aislado".into(),
                 command: "/home/vos/bin/agente-sandbox.sh".into(),
@@ -184,17 +237,41 @@ mod tests {
                 config_dir: None,
             })
         );
-        assert_eq!(agent_from(&json!({})), None);
-        assert_eq!(agent_from(&json!({"agent_servers": {}})), None);
+        assert_eq!(active(&json!({})), None);
+        assert_eq!(active(&json!({"agent_servers": {}})), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn agent_picks_the_one_in_use() {
+        let file = json!({
+            "agent_servers": { "A": { "command": "a" }, "B": { "command": "b" } },
+            "agent": "B"
+        });
+        assert_eq!(
+            agents(&file)
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B"]
+        );
+        assert_eq!(active_name(&file), named("B"));
+        // naming one that is gone: the first
+        assert_eq!(
+            active_name(&with_active(file.clone(), Some("Gone"))),
+            named("A")
+        );
+        // null: claude from PATH even with entries
+        assert_eq!(active(&with_active(file, None)), None);
     }
 
     #[::core::prelude::v1::test]
     fn saving_keeps_the_other_settings_and_replaces_the_edited_entry() {
         let file = json!({
             "theme": "dark",
-            "agent_servers": { "Old": { "command": "x" }, "Other": { "command": "y" } }
+            "agent_servers": { "Old": { "command": "x" }, "Other": { "command": "y" } },
+            "agent": "Old"
         });
-        let saved = with_agent(file, Some("Old"), Some(&sandbox()));
+        let saved = with_agent(file, Some("Old"), &sandbox());
         assert_eq!(saved["theme"], "dark");
         assert_eq!(saved["agent_servers"].get("Old"), None);
         assert_eq!(saved["agent_servers"]["Other"]["command"], "y");
@@ -202,14 +279,29 @@ mod tests {
             saved["agent_servers"]["Sandboxed"],
             json!({"command": "/bin/agent.sh", "args": ["claude"], "config_dir": "/sandbox/.claude"})
         );
+        // the renamed entry is still the one in use
+        assert_eq!(saved["agent"], "Sandboxed");
+        // a new entry does not take over
+        let mut other = sandbox();
+        other.name = "New".into();
+        assert_eq!(with_agent(saved, None, &other)["agent"], "Sandboxed");
     }
 
     #[::core::prelude::v1::test]
-    fn clearing_the_agent_removes_its_entry() {
-        let file = json!({ "agent_servers": { "Old": { "command": "x" } } });
-        let saved = with_agent(file, Some("Old"), None);
-        assert_eq!(saved, json!({ "agent_servers": {} }));
-        assert_eq!(agent_from(&saved), None);
+    fn deleting_an_entry_removes_it_and_hands_over_the_active_one() {
+        let file = json!({
+            "agent_servers": { "A": { "command": "a" }, "B": { "command": "b" } },
+            "agent": "B"
+        });
+        let left = without_agent(file.clone(), "B");
+        assert_eq!(
+            left,
+            json!({ "agent_servers": { "A": { "command": "a" } } })
+        );
+        assert_eq!(active_name(&left), named("A"));
+        // deleting another one keeps the active one
+        assert_eq!(active_name(&without_agent(file, "A")), named("B"));
+        assert_eq!(active(&without_agent(left, "A")), None);
     }
 
     #[::core::prelude::v1::test]
@@ -233,12 +325,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
         std::fs::write(&path, "{ broken").unwrap();
-        assert!(save_agent(&path, None, Some(&sandbox())).is_err());
+        assert!(update(&path, |file| with_agent(file, None, &sandbox())).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");
         // a missing file is created, and reads back
         let fresh = dir.join("sub/settings.json");
-        save_agent(&fresh, None, Some(&sandbox())).unwrap();
-        assert_eq!(load_agent(&fresh).unwrap(), Some(sandbox()));
+        update(&fresh, |file| with_agent(file, None, &sandbox())).unwrap();
+        assert_eq!(active(&read(&fresh).unwrap()), Some(sandbox()));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
