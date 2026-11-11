@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod agent_settings;
 mod branches;
 mod changed_files;
 mod chat;
@@ -499,6 +500,15 @@ fn action_registry() -> Vec<ActionDef> {
             run: |ws, _, cx| ws.rescan(cx),
         },
         ActionDef {
+            name: "Configure Agent",
+            synonyms: &["claude command", "sandbox", "agent servers", "settings"],
+            action: None,
+            closes_popup: true,
+            only_when_conflicted: false,
+            state: None,
+            run: |ws, window, cx| ws.configure_agent(window, cx),
+        },
+        ActionDef {
             name: "Update Zide",
             synonyms: &["upgrade", "check for updates", "new version"],
             action: None,
@@ -776,19 +786,7 @@ impl Workspace {
     fn new(root: PathBuf, window: &Window, cx: &mut Context<Self>) -> Self {
         // file-system changes arrive on a watcher thread; a foreground task reacts to them
         let (changes_tx, changes_rx) = async_channel::unbounded::<Change>();
-        // asking `claude` for its version starts a process: not on the UI thread
-        cx.spawn(async move |this, cx| {
-            let version = cx
-                .background_executor()
-                .spawn(async { zide_claude::installed() })
-                .await;
-            this.update(cx, |this, cx| {
-                this.claude_installed = version.is_some_and(zide_claude::Version::is_supported);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        Self::check_claude(cx);
         // the branch moves with commits, checkouts and fetches, none of which the watcher reports
         let git_root = root.clone();
         cx.spawn(async move |this, cx| {
@@ -1581,6 +1579,23 @@ impl Workspace {
             viewer.set_notice(Some(text));
         }
         cx.notify();
+    }
+
+    /// Asks the configured `claude` for its version (it starts a process: not on the UI
+    /// thread); Claude's features show only when it answers with a supported one.
+    fn check_claude(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let version = cx
+                .background_executor()
+                .spawn(async { zide_claude::installed() })
+                .await;
+            this.update(cx, |this, cx| {
+                this.claude_installed = version.is_some_and(zide_claude::Version::is_supported);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Background work started: the status bar shows `label` until [`Self::end_busy`].

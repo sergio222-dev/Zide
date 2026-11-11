@@ -9079,6 +9079,7 @@ dependencies = [
  "gpui-kit",
  "rodio",
  "serde_json",
+ "shlex",
  "similar 3.2.1",
  "zide-claude",
  "zide-core",
