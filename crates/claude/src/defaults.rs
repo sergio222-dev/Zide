@@ -2,7 +2,7 @@
 //! files, the project's over the user's.
 
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -30,10 +30,7 @@ impl Defaults {
 
 /// The defaults for the project at `root`.
 pub fn defaults(root: &Path) -> Defaults {
-    let config = match env::var_os("CLAUDE_CONFIG_DIR") {
-        Some(dir) => Some(PathBuf::from(dir)),
-        None => env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")),
-    };
+    let config = crate::cli::config_dir();
     let files = [
         config.map(|dir| dir.join("settings.json")),
         Some(root.join(".claude/settings.json")),
