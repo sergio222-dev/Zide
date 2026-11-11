@@ -2,6 +2,7 @@
 //! stands against its upstream, the branch, and the position and mode of the editor.
 
 use gpui_kit::component::status_bar::StatusBar;
+use gpui_kit::component::{Sizable as _, spinner::Spinner};
 use gpui_kit::*;
 use zide_claude::Overall;
 use zide_git::BranchStatus;
@@ -39,10 +40,11 @@ pub fn claude_color(overall: Overall) -> u32 {
     }
 }
 
-/// `on_branch` runs when the branch name is clicked; `claude` is `None` when Claude is not
+/// `busy` names the background work in progress, if any. `on_branch` runs when the branch name is clicked; `claude` is `None` when Claude is not
 /// installed, and `on_claude` runs when its indicator is clicked.
 pub fn render(
     status: Option<ViewerStatus>,
+    busy: Option<&'static str>,
     branch: Option<&BranchStatus>,
     on_branch: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     claude: Option<Overall>,
@@ -54,6 +56,17 @@ pub fn render(
         .text_color(rgb(theme::MUTED));
     if let Some(notice) = status.as_ref().and_then(|s| s.notice.clone()) {
         bar = bar.left(notice);
+    }
+    // something runs in the background (git, an update): a spinner so it does not look frozen
+    if let Some(label) = busy {
+        bar = bar.left(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(Spinner::new().small().color(rgb(theme::WORKING).into()))
+                .child(label),
+        );
     }
     if let Some(overall) = claude {
         bar = bar.right(

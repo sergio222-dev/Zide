@@ -330,6 +330,7 @@ impl Workspace {
         self.git_op = Some(OpDialog::new(op, input));
         self.focus.focus(window, cx); // the keys are read by the workspace
         let root = self.root.clone();
+        self.begin_busy("Loading branches...", cx);
         cx.spawn(async move |this, cx| {
             let found = cx
                 .background_executor()
@@ -341,6 +342,7 @@ impl Workspace {
                 })
                 .await;
             this.update(cx, |this, cx| {
+                this.end_busy("Loading branches...", cx);
                 if let Some(dialog) = &mut this.git_op {
                     match found {
                         Ok(found) => dialog.set_pull(found),

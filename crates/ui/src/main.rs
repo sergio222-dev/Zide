@@ -767,6 +767,8 @@ struct Workspace {
     action_texts: Vec<ActionText>,
     /// Where notifications are shown.
     window: AnyWindowHandle,
+    /// What runs in the background, oldest first; the status bar shows a loader for the last.
+    busy: Vec<&'static str>,
 }
 
 impl Workspace {
@@ -925,6 +927,7 @@ impl Workspace {
                 .collect(),
             registry: std::rc::Rc::new(registry),
             window: window.window_handle(),
+            busy: Vec::new(),
         };
         workspace.show_ignored = session::show_ignored(&workspace.root).unwrap_or(false);
         workspace.rescan(cx);
@@ -1001,6 +1004,7 @@ impl Workspace {
         self.symbols_generation += 1;
         let generation = self.symbols_generation;
         let root = self.root.clone();
+        self.begin_busy("Indexing symbols...", cx);
         cx.spawn(async move |this, cx| {
             let started = Instant::now();
             let symbols = cx
@@ -1023,6 +1027,8 @@ impl Workspace {
                 })
                 .await;
             let Some(symbols) = symbols else {
+                this.update(cx, |this, cx| this.end_busy("Indexing symbols...", cx))
+                    .ok();
                 return;
             };
             eprintln!(
@@ -1032,6 +1038,7 @@ impl Workspace {
                 symbols.reused()
             );
             this.update(cx, |this, cx| {
+                this.end_busy("Indexing symbols...", cx);
                 if this.symbols_generation == generation {
                     this.symbols = Some(Arc::new(symbols));
                     this.search_again(cx);
@@ -1573,6 +1580,25 @@ impl Workspace {
             viewer.set_notice(Some(text));
         }
         cx.notify();
+    }
+
+    /// Background work started: the status bar shows `label` until [`Self::end_busy`].
+    fn begin_busy(&mut self, label: &'static str, cx: &mut Context<Self>) {
+        self.busy.push(label);
+        cx.notify();
+    }
+
+    /// The work of one [`Self::begin_busy`] with this `label` is over.
+    fn end_busy(&mut self, label: &'static str, cx: &mut Context<Self>) {
+        if let Some(at) = self.busy.iter().position(|busy| *busy == label) {
+            self.busy.remove(at);
+            cx.notify();
+        }
+    }
+
+    /// What the status bar says is going on in the background, if anything.
+    fn busy_label(&self) -> Option<&'static str> {
+        self.busy.last().copied()
     }
 
     fn notify(&self, notification: Notification, cx: &mut Context<Self>) {
@@ -2741,6 +2767,7 @@ impl Workspace {
     ) {
         self.autosave(cx); // the edits are in the files git may be about to change
         let root = self.root.clone();
+        self.begin_busy("Running git...", cx);
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
@@ -2755,6 +2782,7 @@ impl Workspace {
                 })
                 .await;
             this.update(cx, |this, cx| {
+                this.end_busy("Running git...", cx);
                 let (result, status) = outcome;
                 match result {
                     Ok(()) => {
@@ -3586,6 +3614,7 @@ impl Workspace {
             })
             .child(statusbar::render(
                 self.viewer.as_ref().map(Viewer::status),
+                self.busy_label(),
                 self.branch.as_ref(),
                 cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
                 self.claude_installed.then(|| {
@@ -4267,6 +4296,19 @@ impl Shell {
         self.status_notice(text, cx);
     }
 
+    /// Shows (or stops showing) `label` in the status bar of the open project.
+    fn set_busy(&mut self, label: &'static str, on: bool, cx: &mut Context<Self>) {
+        if let Content::Workspace(workspace) = &self.content {
+            workspace.update(cx, |this, cx| {
+                if on {
+                    this.begin_busy(label, cx)
+                } else {
+                    this.end_busy(label, cx)
+                }
+            });
+        }
+    }
+
     /// The status line and the log, without a toast.
     fn status_notice(&mut self, text: String, cx: &mut Context<Self>) {
         eprintln!("update: {text}");
@@ -4355,6 +4397,7 @@ impl Shell {
         let Ok(current) = zide_update::Version::parse(&version) else {
             return;
         };
+        self.set_busy("Checking for updates...", true, cx);
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
@@ -4362,27 +4405,32 @@ impl Shell {
                     async move { zide_update::check(&zide_update::Online, UPDATE_REPO, &current) },
                 )
                 .await;
-            this.update(cx, |this, cx| match outcome {
-                Ok(Some(update)) => {
-                    let announced = this.update.as_ref().map(|known| &known.version);
-                    if zide_update::should_announce(
-                        &update.version,
-                        announced,
-                        this.installed.as_ref(),
-                        explicit,
-                    ) {
-                        this.announce_update(&update.version, cx);
-                        this.update = Some(update);
-                    } else if explicit {
-                        this.update_notice(
-                            format!("Zide {} is installed: restart to use it", update.version),
-                            cx,
-                        );
+            this.update(cx, |this, cx| {
+                this.set_busy("Checking for updates...", false, cx);
+                match outcome {
+                    Ok(Some(update)) => {
+                        let announced = this.update.as_ref().map(|known| &known.version);
+                        if zide_update::should_announce(
+                            &update.version,
+                            announced,
+                            this.installed.as_ref(),
+                            explicit,
+                        ) {
+                            this.announce_update(&update.version, cx);
+                            this.update = Some(update);
+                        } else if explicit {
+                            this.update_notice(
+                                format!("Zide {} is installed: restart to use it", update.version),
+                                cx,
+                            );
+                        }
                     }
+                    Ok(None) if explicit => this.update_notice("Zide is up to date".into(), cx),
+                    Err(e) if explicit => {
+                        this.update_notice(format!("update check failed: {e}"), cx)
+                    }
+                    _ => {}
                 }
-                Ok(None) if explicit => this.update_notice("Zide is up to date".into(), cx),
-                Err(e) if explicit => this.update_notice(format!("update check failed: {e}"), cx),
-                _ => {}
             })
             .ok();
         })
@@ -4402,6 +4450,7 @@ impl Shell {
             return self.update_notice("update failed: unknown executable path".into(), cx);
         };
         self.updating = true;
+        self.set_busy("Updating Zide...", true, cx);
         self.update_notice(format!("downloading Zide {}...", update.version), cx);
         let installed_at = exe.clone();
         cx.spawn(async move |this, cx| {
@@ -4411,6 +4460,7 @@ impl Shell {
                 .await;
             this.update(cx, |this, cx| {
                 this.updating = false;
+                this.set_busy("Updating Zide...", false, cx);
                 match outcome {
                     Ok(version) => {
                         this.update = None;
@@ -4511,12 +4561,17 @@ impl Render for Shell {
 /// Zide's palette on the colors gpui-kit's components read, so the command list, the
 /// notifications and the rest look like the popup they sit in instead of the library's own dark.
 /// These colors are only read by the components, never by Zide's own elements.
+/// The bar at the bottom of the window: one `text_xs` line, its padding and its border.
+const STATUS_BAR_HEIGHT: Pixels = px(26.);
+
 fn apply_palette(cx: &mut App) {
     // `update` (not `global_mut`) keeps the theme's tokens in step: the dialogs paint their
     // surface from them
     gpui_kit::component::Theme::update(cx, |theme| {
         // the bundled default (`.SystemUIFont`) showed no bold; naming the family finds its bold face
         theme.font_family = "Noto Sans".into();
+        // toasts stack from the bottom right: keep them above the status bar
+        theme.notification.margins.bottom = STATUS_BAR_HEIGHT + px(16.);
         let colors = &mut theme.colors;
         // background and text
         colors.popover = rgb(theme::POPUP).into();
