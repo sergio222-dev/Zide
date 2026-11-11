@@ -335,6 +335,7 @@ impl AgentForm {
         };
         div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_2()
             .child(div().text_color(rgb(theme::TEXT)).child("Protocol"))
@@ -421,6 +422,7 @@ impl Render for AgentForm {
             .flex_col()
             .gap_1()
             .w(px(200.))
+            .flex_none()
             .pr_3()
             .border_r_1()
             .border_color(rgb(theme::BORDER))
@@ -440,6 +442,7 @@ impl Render for AgentForm {
 
         let details = div()
             .flex_1()
+            .min_w_0() // shrinks with the dialog instead of growing to its longest line
             .flex()
             .flex_col()
             .gap_3()
@@ -478,6 +481,7 @@ impl Render for AgentForm {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .justify_end()
                     .items_center()
                     .gap_2()
@@ -525,6 +529,7 @@ impl Render for AgentForm {
             );
 
         div()
+            .w_full()
             .flex()
             .gap_3()
             .text_sm()
@@ -543,10 +548,12 @@ impl Workspace {
         };
         let workspace = cx.entity().downgrade();
         let form = cx.new(|cx| AgentForm::new(workspace, file, window, cx));
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
+            // narrower windows get a narrower dialog rather than a clipped one
+            let width = px(760.).min(window.viewport_size().width * 0.92);
             dialog
                 .title("Configure Agent")
-                .width(px(760.))
+                .width(width)
                 .child(form.clone())
         });
     }
