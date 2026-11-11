@@ -15,7 +15,7 @@ use zide_git::{Commit, FileChange, Outgoing};
 
 use crate::changed_files::{self, FileRow, plural};
 use crate::commit::{Check, check_box};
-use crate::{Workspace, theme};
+use crate::{Center, Workspace, theme};
 
 const ROW_HEIGHT: f32 = 24.;
 
@@ -207,7 +207,7 @@ impl Workspace {
 
     pub(crate) fn close_push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.push = None;
-        if self.claude_open {
+        if self.center == Center::Chat {
             self.focus_active_chat(window, cx); // back to the message box
         } else {
             self.focus.focus(window, cx);

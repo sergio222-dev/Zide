@@ -9,7 +9,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
 use zide_claude::history::{self, SessionInfo};
 
-use crate::{Workspace, theme};
+use crate::{Center, Workspace, theme};
 
 pub struct Sessions {
     input: Entity<InputState>,
@@ -67,7 +67,7 @@ impl Workspace {
             );
             return self.notify(note, cx);
         }
-        if !self.claude_open {
+        if self.center != Center::Chat {
             self.toggle_claude(window, cx);
         }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions"));

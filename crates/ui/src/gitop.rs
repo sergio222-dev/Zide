@@ -14,7 +14,7 @@ use zide_git::{
     pull_args, rebase_args,
 };
 
-use crate::{Workspace, theme};
+use crate::{Center, Workspace, theme};
 
 /// Rows a list shows before it scrolls.
 const LIST_ROWS: f32 = 8.;
@@ -359,7 +359,7 @@ impl Workspace {
 
     pub(crate) fn close_git_op(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.git_op = None;
-        if self.claude_open {
+        if self.center == Center::Chat {
             self.focus_active_chat(window, cx); // back to the message box
         } else {
             self.focus.focus(window, cx);

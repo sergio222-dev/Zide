@@ -700,6 +700,15 @@ struct ProjectRequested(PathBuf);
 
 impl EventEmitter<ProjectRequested> for Workspace {}
 
+/// What fills the area under the toolbar: the editor (with the tree and the commit panel beside
+/// it), or the chat or the git log covering it. One at a time.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Center {
+    Editor,
+    Chat,
+    Log,
+}
+
 struct Workspace {
     focus: FocusHandle,
     /// Editor font size, changed with Ctrl+wheel and shared by every file.
@@ -717,12 +726,13 @@ struct Workspace {
     /// The project tree on the left.
     tree: Tree,
     tree_visible: bool,
-    /// The Claude chat, created the first time it is opened, and whether it fills the editor area.
+    /// The Claude chat, created the first time it is opened.
     claude: Option<chat::Chats>,
     /// Whether a supported `claude` is installed, once known.
     claude_installed: bool,
-    claude_open: bool,
-    log_open: bool,
+    /// Whether the editor, the chat or the git log fills the area.
+    center: Center,
+    /// The git log tab, created the first time it is opened.
     log: Option<gitlog::LogPanel>,
     /// What was last written as the layout, to write it only when it changes.
     saved_layout: Option<session::Layout>,
@@ -865,7 +875,7 @@ impl Workspace {
         let claude_keys = cx.intercept_keystrokes(move |event, window, cx| {
             this.update(cx, |this, cx| {
                 // the popups and dialogs over the chat own the keys (Esc closes them, not the chat)
-                if this.claude_open
+                if this.center == Center::Chat
                     && this.popup.is_none()
                     && this.branches.is_none()
                     && this.push.is_none()
@@ -893,8 +903,7 @@ impl Workspace {
             claude: None,
             claude_installed: false,
             claude_bare: false,
-            claude_open: false,
-            log_open: false,
+            center: Center::Editor,
             log: None,
             saved_layout: None,
             commit: None,
@@ -3545,7 +3554,7 @@ impl Workspace {
                     this.git_op_tab(window, cx);
                 } else if this.push.is_some() {
                     this.push_switch_pane(cx);
-                } else if this.log_open && this.popup.is_none() {
+                } else if this.center == Center::Log && this.popup.is_none() {
                     this.log_tab(window, cx);
                 } else if this.popup.is_some() {
                     this.switch_tab(cx);
@@ -3594,9 +3603,9 @@ impl Workspace {
                             this.focus_commit_list(window, cx); // out of the message, onto the files
                             cx.stop_propagation();
                         }
-                    } else if this.log_open {
+                    } else if this.center == Center::Log {
                         this.log_key(event, window, cx);
-                    } else if !this.claude_open {
+                    } else if this.center != Center::Chat {
                         this.editor_key(event, window, cx);
                     }
                     return;
@@ -3613,9 +3622,9 @@ impl Workspace {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(if self.log_open {
+            .child(if self.center == Center::Log {
                 self.log_view(cx)
-            } else if self.claude_open {
+            } else if self.center == Center::Chat {
                 self.claude_view(window, cx)
             } else {
                 div()

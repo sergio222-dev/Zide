@@ -18,7 +18,7 @@ use gpui_kit::*;
 use zide_git::{Conflict, Conflicts, Edit, Operation, Side};
 
 use crate::commit::{Check, check_box};
-use crate::{Workspace, file_icon, theme};
+use crate::{Center, Workspace, file_icon, theme};
 
 const ROW_HEIGHT: f32 = 24.;
 
@@ -179,7 +179,7 @@ impl Workspace {
 
     pub(crate) fn close_conflicts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.conflicts = None;
-        if self.claude_open {
+        if self.center == Center::Chat {
             self.focus_active_chat(window, cx);
         } else {
             self.focus.focus(window, cx);

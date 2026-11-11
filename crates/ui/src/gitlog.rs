@@ -22,7 +22,7 @@ mod menu;
 
 use crate::branches::{Kind, Model, Row};
 use crate::changed_files::{self, Picks};
-use crate::{Workspace, file_icon, statusbar, theme};
+use crate::{Center, Workspace, file_icon, statusbar, theme};
 
 const ROW_HEIGHT: f32 = 24.;
 const LANE_WIDTH: f32 = 14.;
@@ -492,7 +492,7 @@ impl LogPanel {
 impl Workspace {
     /// Alt+3: shows the tab; from the tab it stays there (Esc, or Alt+1 / Ctrl+K, leaves it).
     pub(crate) fn open_git_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.log_open {
+        if self.center == Center::Log {
             self.focus.focus(window, cx);
             return cx.notify();
         }
@@ -501,9 +501,9 @@ impl Workspace {
 
     /// Leaves the chat or the git log, whichever covers the editor; `false` when none does.
     pub(crate) fn close_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.claude_open {
+        if self.center == Center::Chat {
             self.toggle_claude(window, cx);
-        } else if self.log_open {
+        } else if self.center == Center::Log {
             self.toggle_git_log(window, cx);
         } else {
             return false;
@@ -512,8 +512,8 @@ impl Workspace {
     }
 
     pub(crate) fn toggle_git_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.log_open {
-            self.log_open = false;
+        if self.center == Center::Log {
+            self.center = Center::Editor;
             self.focus.focus(window, cx);
             return cx.notify();
         }
@@ -545,8 +545,7 @@ impl Workspace {
             }
             self.log = Some(LogPanel::new(query, paths, dates, typing));
         }
-        self.claude_open = false; // the tab takes the place of the chat, as the chat does the editor
-        self.log_open = true;
+        self.center = Center::Log; // the tab takes the place of the chat, as the chat does the editor
         self.focus.focus(window, cx); // the keys are read by the workspace
         self.load_log_refs(cx);
         self.load_log(cx);
@@ -555,7 +554,7 @@ impl Workspace {
 
     /// Reads the history again after git changed it, when the tab is showing.
     pub(crate) fn reload_log(&mut self, cx: &mut Context<Self>) {
-        if self.log_open {
+        if self.center == Center::Log {
             self.load_log_refs(cx);
             self.load_log(cx);
         }
@@ -892,7 +891,7 @@ impl Workspace {
         }
         match key {
             "escape" => {
-                self.log_open = false;
+                self.center = Center::Editor;
                 self.focus.focus(window, cx);
                 return cx.notify();
             }

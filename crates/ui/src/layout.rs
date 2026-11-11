@@ -3,7 +3,7 @@
 
 use gpui_kit::*;
 
-use crate::{Workspace, commit::CommitPanel, session};
+use crate::{Center, Workspace, commit::CommitPanel, session};
 
 impl Workspace {
     /// The panels showing now and the conversation the chat is on.
@@ -12,7 +12,7 @@ impl Workspace {
             tree: self.tree_visible,
             commit: self.commit_open,
             preview: self.md_preview,
-            claude: self.claude_open,
+            claude: self.center == Center::Chat,
             chat: self.claude_conversation(),
         }
     }
@@ -49,7 +49,7 @@ impl Workspace {
             }
             if !layout.claude {
                 // the chat only had to be there for the conversation
-                self.claude_open = false;
+                self.center = Center::Editor;
                 self.focus.focus(window, cx);
             }
         }

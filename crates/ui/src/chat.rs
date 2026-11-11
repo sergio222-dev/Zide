@@ -31,7 +31,7 @@ use zide_claude::{
 };
 
 use crate::markdown::{TextView, TextViewState};
-use crate::{Workspace, theme};
+use crate::{Center, Workspace, theme};
 
 /// The conversations that are open, one of them showing.
 pub struct Chats {
@@ -371,7 +371,7 @@ impl Chat {
 impl Workspace {
     /// Alt+2: shows the chat; from the chat it stays there (Esc, or Alt+1 / Ctrl+K, leaves it).
     pub(crate) fn open_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.claude_open {
+        if self.center == Center::Chat {
             self.focus_active_chat(window, cx);
             return cx.notify();
         }
@@ -380,8 +380,8 @@ impl Workspace {
 
     pub(crate) fn toggle_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.autosave(cx); // the chat may edit the files, and leaving the editor is a save
-        if self.claude_open {
-            self.claude_open = false;
+        if self.center == Center::Chat {
+            self.center = Center::Editor;
             self.focus.focus(window, cx);
             return cx.notify();
         }
@@ -393,8 +393,7 @@ impl Workspace {
             self.claude = Some(chats);
             self.watch_agents(cx);
         }
-        self.log_open = false;
-        self.claude_open = true;
+        self.center = Center::Chat;
         self.refresh_agents(cx);
         self.focus_active_chat(window, cx);
         cx.notify();
@@ -407,7 +406,7 @@ impl Workspace {
             loop {
                 cx.background_executor().timer(AGENTS_EVERY).await;
                 let shown = this.update(cx, |this, cx| {
-                    if this.claude_open {
+                    if this.center == Center::Chat {
                         this.refresh_agents(cx);
                     }
                 });
@@ -925,7 +924,7 @@ impl Workspace {
 
     /// Opens an empty conversation next to the others.
     pub(crate) fn claude_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.claude_open {
+        if self.center != Center::Chat {
             self.toggle_claude(window, cx);
         }
         self.claude_leave_worker(window, cx);
