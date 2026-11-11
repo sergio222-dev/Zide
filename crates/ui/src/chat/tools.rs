@@ -6,9 +6,9 @@ use gpui_kit::component::collapsible::Collapsible;
 use gpui_kit::*;
 use zide_claude::{Block, ToolCall, ToolOutput, Value};
 
-use super::{Chat, changes, summary};
+use super::{Chat, Chats, changes, summary};
 use crate::markdown::TextView;
-use crate::{Workspace, theme};
+use crate::theme;
 
 /// Monospace for code and output; GPUI falls back to its default font when it is missing.
 pub(super) const MONO: &str = "JetBrains Mono";
@@ -95,18 +95,15 @@ fn output_view(output: &ToolOutput) -> Option<Div> {
     )
 }
 
-impl Workspace {
+impl Chats {
     /// Finds where in its file each edit of the active chat lies, once, to number the rows.
     pub(super) fn ensure_diffs(&mut self) {
-        let Some(chats) = &mut self.claude else {
-            return;
-        };
-        let viewed = chats
+        let viewed = self
             .viewing
             .as_ref()
-            .filter(|(id, _)| *id == chats.list[chats.active].id)
+            .filter(|(id, _)| *id == self.list[self.active].id)
             .map(|(_, tool)| tool.clone());
-        let chat = chats.active_mut();
+        let chat = self.active_mut();
         // a worker's edits are numbered too; tool call ids never repeat, so they share the map
         let worker = viewed.and_then(|tool| chat.workers.get(&tool));
         let worker_blocks = worker.map_or(&[][..], |w| w.transcript.blocks());
@@ -134,7 +131,7 @@ impl Workspace {
         tool_id: &str,
         cx: &mut Context<Self>,
     ) {
-        if let Some(chat) = self.claude.as_mut().and_then(|c| c.find(chat_id))
+        if let Some(chat) = self.find(chat_id)
             && !chat.toggled.remove(tool_id)
         {
             chat.toggled.insert(tool_id.to_owned());

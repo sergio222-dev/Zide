@@ -17,8 +17,8 @@ use gpui_kit::component::questionnaire::{
 use gpui_kit::*;
 use zide_claude::{Ask, Block, Question, QuestionOption, Resolution};
 
-use super::Chat;
-use crate::{Workspace, theme};
+use super::{Chat, Chats};
+use crate::theme;
 
 /// What a question needs on screen while it waits for the answer.
 pub(super) struct AskState {
@@ -54,11 +54,10 @@ fn joined(choices: &[String], typed: Option<&str>) -> Option<String> {
     (!all.is_empty()).then(|| all.join(", "))
 }
 
-impl Workspace {
+impl Chats {
     /// Gives each question of the active chat that waits for an answer its questionnaire.
     pub(super) fn ensure_asks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chats) = &self.claude else { return };
-        let chat = chats.active();
+        let chat = self.active();
         let chat_id = chat.id;
         let missing: Vec<Ask> = chat
             .transcript
@@ -102,13 +101,13 @@ impl Workspace {
             let subscription = cx.subscribe_in(
                 &state,
                 window,
-                move |this: &mut Workspace, _, event: &QuestionnaireEvent, _, cx| {
+                move |this: &mut Chats, _, event: &QuestionnaireEvent, _, cx| {
                     if let QuestionnaireEvent::Submit(submission) = event {
                         this.claude_answer(chat_id, &request_id, submission, cx);
                     }
                 },
             );
-            if let Some(chat) = self.claude.as_mut().and_then(|c| c.find(chat_id)) {
+            if let Some(chat) = self.find(chat_id) {
                 chat.asks.insert(
                     ask.request_id,
                     AskState {
@@ -127,7 +126,7 @@ impl Workspace {
         submission: &QuestionnaireSubmission,
         cx: &mut Context<Self>,
     ) {
-        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(chat_id)) else {
+        let Some(chat) = self.find(chat_id) else {
             return;
         };
         let Some(ask) = chat
@@ -171,7 +170,7 @@ impl Workspace {
     }
 
     fn claude_dismiss(&mut self, chat_id: u64, request_id: &str, cx: &mut Context<Self>) {
-        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(chat_id)) else {
+        let Some(chat) = self.find(chat_id) else {
             return;
         };
         if let Some(session) = chat.session.as_mut()

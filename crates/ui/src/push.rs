@@ -15,7 +15,8 @@ use zide_git::{Commit, FileChange, Outgoing};
 
 use crate::changed_files::{self, FileRow, plural};
 use crate::commit::{Check, check_box};
-use crate::{Workspace, theme};
+use crate::overlay::Overlay;
+use crate::{Center, Workspace, theme};
 
 const ROW_HEIGHT: f32 = 24.;
 
@@ -175,15 +176,15 @@ impl PushPopup {
 impl Workspace {
     /// Ctrl+Shift+K: shows what a push would publish; from the dialog, closes it.
     pub(crate) fn toggle_push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.push.is_some() {
+        if self.overlay.push().is_some() {
             return self.close_push(window, cx);
         }
+        if self.overlay.merging() {
+            return;
+        }
         self.popup = None;
-        self.branches = None;
-        self.conflicts = None;
-        self.git_op = None;
         self.cancel_running_search();
-        self.push = Some(PushPopup::default());
+        self.overlay = Overlay::Push(PushPopup::default());
         self.focus.focus(window, cx); // the keys are read by the workspace
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
@@ -192,7 +193,7 @@ impl Workspace {
                 .spawn(async move { zide_git::outgoing(&root) })
                 .await;
             this.update(cx, |this, cx| {
-                let Some(popup) = &mut this.push else {
+                let Some(popup) = this.overlay.push_mut() else {
                     return; // closed before git answered
                 };
                 popup.set_outgoing(found);
@@ -206,8 +207,8 @@ impl Workspace {
     }
 
     pub(crate) fn close_push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.push = None;
-        if self.claude_open {
+        self.overlay.close_push();
+        if self.center == Center::Chat {
             self.focus_active_chat(window, cx); // back to the message box
         } else {
             self.focus.focus(window, cx);
@@ -217,7 +218,11 @@ impl Workspace {
 
     /// Reads, off the UI thread, the files of the selected commit.
     fn load_push_files(&mut self, cx: &mut Context<Self>) {
-        let Some(hash) = self.push.as_mut().and_then(PushPopup::start_files_load) else {
+        let Some(hash) = self
+            .overlay
+            .push_mut()
+            .and_then(PushPopup::start_files_load)
+        else {
             return;
         };
         let root = self.root.clone();
@@ -228,7 +233,7 @@ impl Workspace {
                 .spawn(async move { zide_git::commit_files(&root, &hash) })
                 .await;
             this.update(cx, |this, cx| {
-                if let Some(popup) = &mut this.push {
+                if let Some(popup) = this.overlay.push_mut() {
                     popup.set_files(&wanted, files);
                     cx.notify();
                 }
@@ -239,7 +244,7 @@ impl Workspace {
     }
 
     fn select_push_commit(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(popup) = &mut self.push else {
+        let Some(popup) = self.overlay.push_mut() else {
             return;
         };
         popup.pane = Pane::Commits;
@@ -251,7 +256,7 @@ impl Workspace {
 
     /// Shows what the selected commit changed in the selected file.
     fn show_push_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(popup) = &self.push else {
+        let Some(popup) = self.overlay.push() else {
             return;
         };
         let (Some(commit), Some(change)) = (popup.selected_commit(), popup.selected_file()) else {
@@ -264,7 +269,7 @@ impl Workspace {
     /// Pushes the branch (and the tags, when asked) and closes the dialog; the outcome comes as a
     /// notification.
     fn run_push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(popup) = &self.push else {
+        let Some(popup) = self.overlay.push() else {
             return;
         };
         let Some(outgoing) = popup.outgoing().filter(|_| popup.can_push()).cloned() else {
@@ -297,7 +302,7 @@ impl Workspace {
 
     /// Tab: the keyboard goes to the other list.
     pub(crate) fn push_switch_pane(&mut self, cx: &mut Context<Self>) {
-        if let Some(popup) = &mut self.push {
+        if let Some(popup) = self.overlay.push_mut() {
             popup.pane = match popup.pane {
                 Pane::Commits => Pane::Files,
                 Pane::Files => Pane::Commits,
@@ -315,7 +320,7 @@ impl Workspace {
     ) {
         use zide_vim::Key;
         cx.stop_propagation();
-        let Some(popup) = &mut self.push else {
+        let Some(popup) = self.overlay.push_mut() else {
             return;
         };
         let key = crate::vim_key(event);
@@ -349,7 +354,7 @@ impl Workspace {
             ("t", _) if modifiers.alt => popup.tags = !popup.tags,
             _ => return,
         }
-        if let Some(popup) = &self.push {
+        if let Some(popup) = self.overlay.push() {
             popup
                 .commit_scroll
                 .scroll_to_item(popup.commit, ScrollStrategy::Nearest);
@@ -375,7 +380,7 @@ impl Workspace {
     }
 
     pub(crate) fn push_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let popup = self.push.as_ref().expect("the dialog is open");
+        let popup = self.overlay.push().expect("the dialog is open");
         let workspace = cx.entity();
         let root = self.root_name();
 
@@ -482,7 +487,7 @@ impl Workspace {
                                     .child("Push tags")
                                     .on_click(move |_, _, cx| {
                                         tags_toggle.update(cx, |this, cx| {
-                                            if let Some(popup) = &mut this.push {
+                                            if let Some(popup) = this.overlay.push_mut() {
                                                 popup.tags = !popup.tags;
                                                 cx.notify();
                                             }
@@ -618,7 +623,7 @@ fn file_list(popup: &PushPopup, root: &str, workspace: &Entity<Workspace>) -> An
         &popup.file_scroll,
         move |index, clicks, _, window, cx| {
             workspace.update(cx, |this, cx| {
-                if let Some(popup) = &mut this.push {
+                if let Some(popup) = this.overlay.push_mut() {
                     popup.pane = Pane::Files;
                     popup.select_file(index);
                 }

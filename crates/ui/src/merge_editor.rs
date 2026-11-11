@@ -608,8 +608,8 @@ impl Workspace {
     /// *Merge…*: opens the selected conflicted file in the merge editor.
     pub(crate) fn open_merge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(conflict) = self
-            .conflicts
-            .as_ref()
+            .overlay
+            .conflicts()
             .and_then(|popup| popup.selected_conflict().cloned())
         else {
             return;
@@ -617,8 +617,8 @@ impl Workspace {
         self.autosave(cx);
         let root = self.root.clone();
         let (yours, theirs) = self
-            .conflicts
-            .as_ref()
+            .overlay
+            .conflicts()
             .map(|popup| popup.names())
             .unwrap_or_default();
         let (family, cell) = measure_font(window);
@@ -631,7 +631,7 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| match stages {
                 Ok(stages) => {
                     let merge = Merge::new(&stages.base, &stages.yours, &stages.theirs);
-                    this.merge = Some(MergeEditor::new(
+                    this.overlay.set_merge(MergeEditor::new(
                         conflict.path,
                         yours,
                         theirs,
@@ -650,13 +650,13 @@ impl Workspace {
     }
 
     pub(crate) fn close_merge(&mut self, cx: &mut Context<Self>) {
-        self.merge = None;
+        self.overlay.close_merge();
         cx.notify();
     }
 
     /// Writes the result over the file and marks it resolved.
     pub(crate) fn save_merge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = &mut self.merge else {
+        let Some(editor) = self.overlay.merge_mut() else {
             return;
         };
         if !editor.can_apply() {
@@ -676,8 +676,8 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| {
                 let saved = outcome.0.is_ok();
                 if saved {
-                    this.merge = None;
-                } else if let Some(editor) = &mut this.merge {
+                    this.overlay.close_merge();
+                } else if let Some(editor) = this.overlay.merge_mut() {
                     editor.busy = false;
                 }
                 this.finish_resolve(outcome, window, cx);
@@ -708,7 +708,7 @@ impl Workspace {
         let pasted = (held && key == "v")
             .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
             .flatten();
-        let Some(editor) = &mut self.merge else {
+        let Some(editor) = self.overlay.merge_mut() else {
             return;
         };
         match key {
@@ -743,7 +743,7 @@ impl Workspace {
     }
 
     pub(crate) fn merge_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let editor = self.merge.as_ref().expect("the editor is open");
+        let editor = self.overlay.merge().expect("the editor is open");
         let workspace = cx.entity();
         let rows = editor.rows.clone();
         let scroll = editor.scroll.clone();
@@ -925,7 +925,7 @@ impl Workspace {
                                     .disabled(busy)
                                     .on_click(move |_, window, cx| {
                                         accept_yours.update(cx, |this, cx| {
-                                            if let Some(editor) = &mut this.merge {
+                                            if let Some(editor) = this.overlay.merge_mut() {
                                                 editor.accept(Which::Yours);
                                             }
                                             this.save_merge(window, cx);
@@ -938,7 +938,7 @@ impl Workspace {
                                     .disabled(busy)
                                     .on_click(move |_, window, cx| {
                                         accept_theirs.update(cx, |this, cx| {
-                                            if let Some(editor) = &mut this.merge {
+                                            if let Some(editor) = this.overlay.merge_mut() {
                                                 editor.accept(Which::Theirs);
                                             }
                                             this.save_merge(window, cx);
@@ -993,7 +993,7 @@ fn measure_font(window: &Window) -> (SharedString, f32) {
 /// Changes the merge being edited.
 fn edit(workspace: &Entity<Workspace>, cx: &mut App, change: impl FnOnce(&mut MergeEditor)) {
     workspace.update(cx, |this, cx| {
-        if let Some(editor) = &mut this.merge {
+        if let Some(editor) = this.overlay.merge_mut() {
             change(editor);
         }
         cx.notify();
@@ -1045,7 +1045,7 @@ fn row_view(
             .child(glyph)
             .on_click(move |_, _, cx| {
                 workspace.update(cx, |this, cx| {
-                    if let Some(editor) = &mut this.merge {
+                    if let Some(editor) = this.overlay.merge_mut() {
                         if discard {
                             editor.discard(segment, side)
                         } else {

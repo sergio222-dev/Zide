@@ -24,6 +24,7 @@ mod definition;
 mod diff_view;
 mod file_icon;
 mod fileops;
+mod git_state;
 mod gitlog;
 mod gitop;
 mod indent;
@@ -33,6 +34,7 @@ mod merge_editor;
 mod meter;
 mod minimap;
 mod nav;
+mod overlay;
 mod projects;
 mod push;
 mod rows;
@@ -48,6 +50,7 @@ mod usages;
 mod viewer;
 mod welcome;
 
+use git_state::GitState;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::IndexPath;
@@ -60,6 +63,7 @@ use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use overlay::Overlay;
 use viewer::{Effect, FindStatus, FormatRequest, HighlightKey, Viewer};
 use welcome::{OpenProject, Welcome};
 use zide_core::{Change, DoubleShiftDetector, ProjectWatcher, Scan, scan_project, watch_project};
@@ -374,10 +378,7 @@ fn action_registry() -> Vec<ActionDef> {
             closes_popup: false,
             only_when_conflicted: false,
             state: Some(|ws| ws.claude_bare),
-            run: |ws, _, cx| {
-                ws.claude_bare = !ws.claude_bare;
-                cx.notify();
-            },
+            run: |ws, _, cx| ws.toggle_claude_bare(cx),
         },
         ActionDef {
             name: "Claude: New Chat",
@@ -700,6 +701,15 @@ struct ProjectRequested(PathBuf);
 
 impl EventEmitter<ProjectRequested> for Workspace {}
 
+/// What fills the area under the toolbar: the editor (with the tree and the commit panel beside
+/// it), or the chat or the git log covering it. One at a time.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Center {
+    Editor,
+    Chat,
+    Log,
+}
+
 struct Workspace {
     focus: FocusHandle,
     /// Editor font size, changed with Ctrl+wheel and shared by every file.
@@ -717,13 +727,14 @@ struct Workspace {
     /// The project tree on the left.
     tree: Tree,
     tree_visible: bool,
-    /// The Claude chat, created the first time it is opened, and whether it fills the editor area.
-    claude: Option<chat::Chats>,
+    /// The Claude chat, created the first time it is opened.
+    claude: Option<Entity<chat::Chats>>,
     /// Whether a supported `claude` is installed, once known.
     claude_installed: bool,
-    claude_open: bool,
-    log_open: bool,
-    log: Option<gitlog::LogPanel>,
+    /// Whether the editor, the chat or the git log fills the area.
+    center: Center,
+    /// The git log tab, created the first time it is opened.
+    log: Option<Entity<gitlog::LogPanel>>,
     /// What was last written as the layout, to write it only when it changes.
     saved_layout: Option<session::Layout>,
     commit: Option<commit::CommitPanel>,
@@ -733,22 +744,15 @@ struct Workspace {
     tree_clipboard: Option<String>,
     /// A path the next scan selects in the tree (the one just moved or pasted).
     tree_reveal: Option<String>,
-    git_status: Arc<std::collections::HashMap<String, zide_git::ChangeKind>>,
+    /// The checked-out branch and the state of each changed file.
+    git: GitState,
     /// Chats started from now on run `claude` with none of the user's configuration, which
     /// makes a test turn cheap; see `zide_claude::Options::minimal`.
     claude_bare: bool,
     /// Sees the chat's keys before the input box turns them into its own actions.
     _claude_keys: Subscription,
-    /// The checked-out branch and how far it is from its upstream, `None` outside a repository.
-    branch: Option<zide_git::BranchStatus>,
-    /// The branch switcher, while it is open.
-    branches: Option<branches::BranchPopup>,
-    /// The push dialog (Ctrl+Shift+K), while it is open.
-    push: Option<push::PushPopup>,
-    git_op: Option<gitop::OpDialog>,
-    /// The conflict resolver, while it is open.
-    conflicts: Option<conflicts::ConflictsPopup>,
-    merge: Option<merge_editor::MergeEditor>,
+    /// The git dialog floating over the workspace, if any.
+    overlay: Overlay,
     /// The rendered Markdown beside the editor (Ctrl+Shift+M), for `.md` files.
     md_preview: bool,
     md: Option<MdPreview>,
@@ -812,8 +816,7 @@ impl Workspace {
                     .spawn(async move { zide_git::branch_status(&root) })
                     .await;
                 let updated = this.update(cx, |this, cx| {
-                    if this.branch != status {
-                        this.branch = status;
+                    if this.git.set_branch(status) {
                         cx.notify();
                     }
                 });
@@ -865,13 +868,9 @@ impl Workspace {
         let claude_keys = cx.intercept_keystrokes(move |event, window, cx| {
             this.update(cx, |this, cx| {
                 // the popups and dialogs over the chat own the keys (Esc closes them, not the chat)
-                if this.claude_open
+                if this.center == Center::Chat
                     && this.popup.is_none()
-                    && this.branches.is_none()
-                    && this.push.is_none()
-                    && this.git_op.is_none()
-                    && this.conflicts.is_none()
-                    && this.merge.is_none()
+                    && !this.overlay.is_open()
                     && !window.has_active_dialog(cx)
                 {
                     this.claude_key(&event.keystroke, window, cx);
@@ -893,21 +892,15 @@ impl Workspace {
             claude: None,
             claude_installed: false,
             claude_bare: false,
-            claude_open: false,
-            log_open: false,
+            center: Center::Editor,
             log: None,
             saved_layout: None,
             commit: None,
             commit_open: false,
             tree_clipboard: None,
             tree_reveal: None,
-            git_status: Arc::default(),
-            branch: None,
-            branches: None,
-            push: None,
-            git_op: None,
-            conflicts: None,
-            merge: None,
+            git: GitState::default(),
+            overlay: Overlay::None,
             md_preview: false,
             md: None,
             nav: nav::NavHistory::default(),
@@ -997,7 +990,7 @@ impl Workspace {
                 if let Some(path) = this.tree_reveal.take() {
                     this.tree.reveal(&path);
                 }
-                this.replace_index(FileIndex::new(paths));
+                this.replace_index(FileIndex::new(paths), cx);
                 this._watcher = watcher.ok();
                 // the old store indexes the old file list: keep it only to reuse its stubs
                 let previous = this.symbols.take();
@@ -1064,7 +1057,7 @@ impl Workspace {
     }
 
     /// Swaps in a fresh index, keeping the recent files that still exist.
-    fn replace_index(&mut self, index: FileIndex) {
+    fn replace_index(&mut self, index: FileIndex, cx: &mut App) {
         if let Some(old) = &self.index {
             let wanted: Vec<&String> = self.recent.iter().map(|&i| &old.paths()[i]).collect();
             let found: std::collections::HashMap<&str, usize> = index
@@ -1080,6 +1073,7 @@ impl Workspace {
                 .collect();
         }
         self.index = Some(Arc::new(index));
+        self.sync_chat_files(cx);
     }
 
     /// Shows what another program wrote to the open file, unless it has unsaved edits.
@@ -1121,8 +1115,7 @@ impl Workspace {
                 .spawn(async move { zide_git::branch_status(&root) })
                 .await;
             this.update(cx, |this, cx| {
-                if this.branch != status {
-                    this.branch = status;
+                if this.git.set_branch(status) {
                     cx.notify();
                 }
             })
@@ -1166,9 +1159,7 @@ impl Workspace {
     fn open_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.autosave(cx);
         self.refresh_commit(cx); // what git says now, for the actions that depend on it
-        self.push = None;
-        self.git_op = None;
-        self.conflicts = None;
+        self.overlay.clear();
         let input = cx.new(|cx| InputState::new(window, cx));
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -1235,6 +1226,13 @@ impl Workspace {
 
     /// Opens the find panel (with the replace row when `replace`) for the open file.
     fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // the panel is the editor's: under the chat or the log its box is not drawn, and the
+        // focus would go to nothing on screen, leaving every key unheard until a click
+        match self.center {
+            Center::Editor => {}
+            Center::Log => return self.focus_log_search(window, cx),
+            Center::Chat => return,
+        }
         let Some(viewer) = &self.viewer else {
             return;
         };
@@ -2215,7 +2213,7 @@ impl Workspace {
         let rows = self.tree.shared_rows();
         let selected = self.tree.selected();
         let focused = self.tree_focused;
-        let git_status = self.git_status.clone();
+        let git_status = self.git.status();
         let workspace = cx.entity();
         // the widest row sets the scrollable width (an indent step is about two characters)
         let widest = rows
@@ -2551,6 +2549,7 @@ impl Workspace {
             self.recent.retain(|&i| i != file);
             self.recent.insert(0, file);
             self.recent.truncate(MAX_RECENT);
+            self.sync_chat_files(cx);
         }
         self.remember_view();
         if let Some(old) = self.viewer.take() {
@@ -2665,15 +2664,15 @@ impl Workspace {
 
     /// Opens the branch switcher (the status bar's branch, or the Switch Branch action).
     fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay.merging() {
+            return;
+        }
         self.popup = None;
-        self.push = None;
-        self.git_op = None;
-        self.conflicts = None;
         self.cancel_running_search();
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search for branches"));
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change)
-                && let Some(popup) = &mut this.branches
+                && let Some(popup) = this.overlay.branches_mut()
             {
                 popup.model.set_query(input.read(cx).value().as_ref());
                 popup.reveal_selected();
@@ -2692,7 +2691,7 @@ impl Workspace {
             _subscription: subscription,
         };
         popup.reveal_selected();
-        self.branches = Some(popup);
+        self.overlay = Overlay::Branches(popup);
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let found = cx
@@ -2703,7 +2702,7 @@ impl Workspace {
                     Some(found)
                 })
                 .await;
-            this.update(cx, |this, cx| match (found, &mut this.branches) {
+            this.update(cx, |this, cx| match (found, this.overlay.branches_mut()) {
                 (Some(found), Some(popup)) => {
                     popup.model.replace(found);
                     popup.loading = false;
@@ -2711,7 +2710,7 @@ impl Workspace {
                     cx.notify();
                 }
                 (None, Some(_)) => {
-                    this.branches = None;
+                    this.overlay.close_branches();
                     let note = Notification::warning("This project is not a git repository.");
                     this.notify(note.title("Switch branch"), cx);
                 }
@@ -2725,14 +2724,14 @@ impl Workspace {
     }
 
     fn close_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.branches = None;
+        self.overlay.close_branches();
         self.focus.focus(window, cx);
         cx.notify();
     }
 
     /// Keys of the open branch switcher; the others go to its search box.
     fn branches_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(popup) = &mut self.branches else {
+        let Some(popup) = self.overlay.branches_mut() else {
             return;
         };
         if let Some(chosen) = popup.menu {
@@ -2767,7 +2766,7 @@ impl Workspace {
 
     /// A click or Enter on `row` of the switcher: opens a folder, or checks out a branch.
     fn activate_branch_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(popup) = &mut self.branches else {
+        let Some(popup) = self.overlay.branches_mut() else {
             return;
         };
         popup.menu = None;
@@ -2798,11 +2797,7 @@ impl Workspace {
     /// Find Action → *Fetch*: brings every remote's branches and tags, and keeps which tags the
     /// remote of the current branch has, for the menus of the git log.
     fn fetch(&mut self, cx: &mut Context<Self>) {
-        let branch = self
-            .branch
-            .as_ref()
-            .map(|b| b.name.clone())
-            .unwrap_or_default();
+        let branch = self.git.branch_name();
         self.git_task(
             "Could not fetch",
             Some("Fetched every remote".into()),
@@ -2853,24 +2848,17 @@ impl Workspace {
                 this.end_busy("Running git...", cx);
                 match result {
                     Ok(()) => {
-                        this.commit_finished(true, cx);
-                        this.refresh_git(cx); // the gutter compares with the new HEAD
-                        this.branch = status;
-                        this.rescan(cx);
-                        this.reload_log(cx);
+                        this.after_git(true, status, true, cx);
                         if let Some(done) = done {
                             this.notify(Notification::success(done), cx);
                         }
                         cx.notify();
                     }
                     Err(why) => {
-                        this.commit_finished(false, cx);
-                        // a cherry-pick that clashes leaves the repository half way
-                        this.refresh_git(cx);
-                        this.branch = status;
-                        this.reload_log(cx);
+                        // a cherry-pick that clashes leaves the repository half way, and the
+                        // files hold conflict markers
+                        this.after_git(false, status, left.is_some(), cx);
                         if left.is_some() {
-                            this.rescan(cx); // the files now hold conflict markers
                             this.notify(
                                 Notification::info("Resolve the conflicts to continue")
                                     .title(failure),
@@ -2894,9 +2882,28 @@ impl Workspace {
         .detach();
     }
 
+    /// Reads back what a git operation changed: the commit panel (`ok`: the operation went
+    /// through), the gutter (it compares with the new HEAD), the branch, the history and, when
+    /// `files`, the project's files.
+    pub(crate) fn after_git(
+        &mut self,
+        ok: bool,
+        status: Option<zide_git::BranchStatus>,
+        files: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_finished(ok, cx);
+        self.refresh_git(cx);
+        self.git.set_branch(status);
+        if files {
+            self.rescan(cx);
+        }
+        self.reload_log(cx);
+    }
+
     /// Opens the menu of the selected branch (of `row` when given: a right click selects it).
     fn open_branch_menu(&mut self, row: Option<usize>, cx: &mut Context<Self>) {
-        let Some(popup) = &mut self.branches else {
+        let Some(popup) = self.overlay.branches_mut() else {
             return;
         };
         if let Some(row) = row {
@@ -2917,7 +2924,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(popup) = &mut self.branches else {
+        let Some(popup) = self.overlay.branches_mut() else {
             return;
         };
         let entries = popup
@@ -2949,8 +2956,8 @@ impl Workspace {
     ) {
         use branches::BranchAction as A;
         let existing = self
-            .branches
-            .as_ref()
+            .overlay
+            .branches()
             .map(|popup| popup.model.local_names())
             .unwrap_or_default();
         self.close_branches(window, cx);
@@ -3002,7 +3009,7 @@ impl Workspace {
                 );
             }
             A::Update(name) => {
-                let checked_out = self.branch.as_ref().is_some_and(|b| b.name == name);
+                let checked_out = self.git.is_checked_out(&name);
                 let done = format!("Updated '{name}'");
                 self.git_task(
                     "Could not update the branch",
@@ -3189,10 +3196,7 @@ impl Workspace {
             }
             Tab::Projects => {}
             Tab::Actions => {
-                let conflicted = self
-                    .git_status
-                    .values()
-                    .any(|kind| *kind == zide_git::ChangeKind::Conflicted);
+                let conflicted = self.git.has_conflicts();
                 let hits = search_actions(&self.action_texts, &query, usize::MAX);
                 popup.actions = Arc::new(
                     hits.into_iter()
@@ -3396,7 +3400,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = Instant::now();
-        self.remember_layout_if_changed();
+        self.remember_layout_if_changed(cx);
         let root = self.view(window, cx);
         let Some(meter) = &mut self.meter else {
             return root;
@@ -3541,11 +3545,11 @@ impl Workspace {
                 cx.listener(|this, _: &PreviousMethod, _, cx| this.jump_to_method(false, cx)),
             )
             .on_action(cx.listener(|this, _: &SwitchTab, window, cx| {
-                if this.git_op.is_some() {
+                if this.overlay.git_op().is_some() {
                     this.git_op_tab(window, cx);
-                } else if this.push.is_some() {
+                } else if this.overlay.push().is_some() {
                     this.push_switch_pane(cx);
-                } else if this.log_open && this.popup.is_none() {
+                } else if this.center == Center::Log && this.popup.is_none() {
                     this.log_tab(window, cx);
                 } else if this.popup.is_some() {
                     this.switch_tab(cx);
@@ -3572,20 +3576,14 @@ impl Workspace {
                     return;
                 }
                 this.diff_open = false;
-                if this.merge.is_some() {
-                    return this.merge_key(event, window, cx);
-                }
-                if this.conflicts.is_some() {
-                    return this.conflicts_key(event, window, cx);
-                }
-                if this.git_op.is_some() {
-                    return this.git_op_key(event, window, cx);
-                }
-                if this.push.is_some() {
-                    return this.push_key(event, window, cx);
-                }
-                if this.branches.is_some() {
-                    return this.branches_key(event, window, cx);
+                // an open git dialog takes the keys; the merge editor before the conflicts under it
+                match &this.overlay {
+                    Overlay::Conflicts(_, Some(_)) => return this.merge_key(event, window, cx),
+                    Overlay::Conflicts(_, None) => return this.conflicts_key(event, window, cx),
+                    Overlay::GitOp(_) => return this.git_op_key(event, window, cx),
+                    Overlay::Push(_) => return this.push_key(event, window, cx),
+                    Overlay::Branches(_) => return this.branches_key(event, window, cx),
+                    Overlay::None => {}
                 }
                 let Some(popup) = &mut this.popup else {
                     // the chat's keys are seen earlier, by the interceptor
@@ -3594,9 +3592,9 @@ impl Workspace {
                             this.focus_commit_list(window, cx); // out of the message, onto the files
                             cx.stop_propagation();
                         }
-                    } else if this.log_open {
+                    } else if this.center == Center::Log {
                         this.log_key(event, window, cx);
-                    } else if !this.claude_open {
+                    } else if this.center != Center::Chat {
                         this.editor_key(event, window, cx);
                     }
                     return;
@@ -3613,114 +3611,114 @@ impl Workspace {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(if self.log_open {
-                self.log_view(cx)
-            } else if self.claude_open {
-                self.claude_view(window, cx)
-            } else {
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .children(self.tree_visible.then(|| self.project_tree(cx)))
-                    .children(
-                        (self.commit_open && self.commit.is_some()).then(|| self.commit_view(cx)),
-                    )
-                    .child(match &self.viewer {
-                        Some(viewer) => div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .text_color(rgb(theme::TEXT))
-                            .children(self.find_panel(cx))
-                            .child(viewer.render(
-                                std::rc::Rc::new({
-                                    let workspace = cx.entity();
-                                    move |line, cx| {
-                                        workspace.update(cx, |this, cx| {
-                                            if let Some(viewer) = &mut this.viewer {
-                                                viewer.toggle_fold(line);
-                                                cx.notify();
-                                            }
-                                        });
+            .child(
+                if self.center == Center::Log
+                    && let Some(log) = &self.log
+                {
+                    log.clone().into_any_element()
+                } else if self.center == Center::Chat
+                    && let Some(chats) = &self.claude
+                {
+                    chats.clone().into_any_element()
+                } else {
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .children(self.tree_visible.then(|| self.project_tree(cx)))
+                        .children(
+                            (self.commit_open && self.commit.is_some()).then(|| self.commit_view(cx)),
+                        )
+                        .child(match &self.viewer {
+                            Some(viewer) => div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .text_color(rgb(theme::TEXT))
+                                .children(self.find_panel(cx))
+                                .child(viewer.render(
+                                    std::rc::Rc::new({
+                                        let workspace = cx.entity();
+                                        move |line, cx| {
+                                            workspace.update(cx, |this, cx| {
+                                                if let Some(viewer) = &mut this.viewer {
+                                                    viewer.toggle_fold(line);
+                                                    cx.notify();
+                                                }
+                                            });
+                                        }
+                                    }),
+                                    std::rc::Rc::new({
+                                        let workspace = cx.entity();
+                                        move |over, cx| {
+                                            workspace.update(cx, |this, cx| {
+                                                if let Some(viewer) = &mut this.viewer
+                                                    && viewer.set_hover(over)
+                                                {
+                                                    cx.notify();
+                                                }
+                                            });
+                                        }
+                                    }),
+                                    std::rc::Rc::new({
+                                        let workspace = cx.entity();
+                                        move |row, at, cx| {
+                                            workspace.update(cx, |this, cx| {
+                                                if let Some(viewer) = &mut this.viewer
+                                                    && viewer.click(row, at)
+                                                {
+                                                    this.tree_focused = false; // keys are the editor's
+                                                    this.leave_commit_list();
+                                                    cx.notify();
+                                                }
+                                            });
+                                        }
+                                    }),
+                                ))
+                                .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
+                                    if event.modifiers.control {
+                                        this.zoom(event, window, cx);
                                     }
-                                }),
-                                std::rc::Rc::new({
-                                    let workspace = cx.entity();
-                                    move |over, cx| {
-                                        workspace.update(cx, |this, cx| {
-                                            if let Some(viewer) = &mut this.viewer
-                                                && viewer.set_hover(over)
-                                            {
-                                                cx.notify();
-                                            }
-                                        });
-                                    }
-                                }),
-                                std::rc::Rc::new({
-                                    let workspace = cx.entity();
-                                    move |row, at, cx| {
-                                        workspace.update(cx, |this, cx| {
-                                            if let Some(viewer) = &mut this.viewer
-                                                && viewer.click(row, at)
-                                            {
-                                                this.tree_focused = false; // keys are the editor's
-                                                this.leave_commit_list();
-                                                cx.notify();
-                                            }
-                                        });
-                                    }
-                                }),
-                            ))
-                            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
-                                if event.modifiers.control {
-                                    this.zoom(event, window, cx);
-                                }
-                            })),
-                        None => div().flex_1().p_4().text_color(rgb(theme::DIM)).child(
-                            "Press Space twice to open the popup. Alt+1 shows the project tree.",
-                        ),
-                    })
-                    .children(preview.map(|view| {
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .p_4()
-                            .border_l_1()
-                            .border_color(rgb(theme::BORDER))
-                            .child(view)
-                    }))
-            })
+                                })),
+                            None => div().flex_1().p_4().text_color(rgb(theme::DIM)).child(
+                                "Press Space twice to open the popup. Alt+1 shows the project tree.",
+                            ),
+                        })
+                        .children(preview.map(|view| {
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .p_4()
+                                .border_l_1()
+                                .border_color(rgb(theme::BORDER))
+                                .child(view)
+                        }))
+                        .into_any_element()
+                },
+            )
             .child(statusbar::render(
                 self.viewer.as_ref().map(Viewer::status),
                 self.busy_label(),
-                self.branch.as_ref(),
+                self.git.branch(),
                 cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
-                self.claude_installed.then(|| {
-                    self.claude
-                        .as_ref()
-                        .map_or(zide_claude::Overall::Off, chat::Chats::overall)
-                }),
+                self.claude_installed.then(|| self.claude_overall(cx)),
                 cx.listener(|this, _, window, cx| this.toggle_claude(window, cx)),
             ));
-        if let Some(branches) = &self.branches {
-            root = root.child(branches::render(branches, cx));
-        }
-        if self.push.is_some() {
-            root = root.child(self.push_view(cx));
-        }
-        if self.git_op.is_some() {
-            root = root.child(self.git_op_view(cx));
-        }
-        if self.conflicts.is_some() {
-            root = root.child(self.conflicts_view(cx));
-        }
-        if self.merge.is_some() {
-            root = root.child(self.merge_view(cx));
+        match &self.overlay {
+            Overlay::None => {}
+            Overlay::Branches(branches) => root = root.child(branches::render(branches, cx)),
+            Overlay::Push(_) => root = root.child(self.push_view(cx)),
+            Overlay::GitOp(_) => root = root.child(self.git_op_view(cx)),
+            Overlay::Conflicts(_, merge) => {
+                root = root.child(self.conflicts_view(cx));
+                if merge.is_some() {
+                    root = root.child(self.merge_view(cx));
+                }
+            }
         }
 
         let Some(popup) = &self.popup else {

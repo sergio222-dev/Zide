@@ -218,7 +218,7 @@ history is read from there. `agent` names the one in use (without it, the first 
 handshake for an ACP agent) and shows what failed. Uninstalling with `--purge` leaves `~/.config/zide` in place.
 
 In the Git log (`Alt+3` opens it): the refs tree on the left (HEAD, Local, Remote, Tags) narrows the history to
-the ref you pick, and picking it again goes back to every branch. `/` focuses the search box (message,
+the ref you pick, and picking it again goes back to every branch. `/` (or `Ctrl+F`) focuses the search box (message,
 author or the start of a hash), `Tab` moves between refs, commits and files, `j` / `k` or the arrows move,
 `Enter` on a file (or a double click) opens that commit's diff, and `Esc` closes the tab.
 The **User** button (`u`; `Up`/`Down` move, `Enter` picks, `Esc` closes) narrows the history to one author. **Date**

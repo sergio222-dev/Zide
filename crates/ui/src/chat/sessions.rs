@@ -9,7 +9,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
 use zide_claude::history::{self, SessionInfo};
 
-use crate::{Workspace, theme};
+use super::{CLAUDE_HISTORY_ONLY, ChatEvent, Chats};
+use crate::theme;
 
 pub struct Sessions {
     input: Entity<InputState>,
@@ -57,26 +58,20 @@ fn ago(elapsed: Duration) -> String {
     }
 }
 
-impl Workspace {
-    /// Opens the list of earlier conversations over the chat (showing the chat first).
-    pub(crate) fn claude_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+impl Chats {
+    /// Opens the list of earlier conversations over the chat.
+    pub(super) fn claude_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // the earlier conversations are Claude Code's; they would resume through the ACP agent
         if crate::settings::protocol() == crate::settings::Protocol::Acp {
-            let note = gpui_kit::component::notification::Notification::info(
-                "Earlier conversations are Claude's: pick a Claude agent in Configure Agent to resume one",
-            );
-            return self.notify(note, cx);
-        }
-        if !self.claude_open {
-            self.toggle_claude(window, cx);
+            return cx.emit(ChatEvent::Info(CLAUDE_HISTORY_ONLY));
         }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions"));
         let subscription = cx.subscribe_in(
             &input,
             window,
-            |this: &mut Workspace, _, event: &InputEvent, window, cx| match event {
+            |this: &mut Chats, _, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => {
-                    if let Some(sessions) = this.claude.as_mut().and_then(|c| c.sessions.as_mut()) {
+                    if let Some(sessions) = this.sessions.as_mut() {
                         sessions.selected = 0;
                     }
                     cx.notify();
@@ -86,10 +81,7 @@ impl Workspace {
             },
         );
         input.update(cx, |state, cx| state.focus(window, cx));
-        let Some(chats) = &mut self.claude else {
-            return;
-        };
-        chats.sessions = Some(Sessions {
+        self.sessions = Some(Sessions {
             input,
             commands: cx.new(|cx| CommandState::new(window, cx)),
             list: None,
@@ -105,7 +97,7 @@ impl Workspace {
                 .spawn(async move { history::list(&root) })
                 .await;
             this.update(cx, |this, cx| {
-                if let Some(sessions) = this.claude.as_mut().and_then(|c| c.sessions.as_mut()) {
+                if let Some(sessions) = this.sessions.as_mut() {
                     sessions.list = Some(list);
                     cx.notify();
                 }
@@ -117,12 +109,8 @@ impl Workspace {
     }
 
     pub(super) fn close_claude_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chats) = &mut self.claude else {
-            return;
-        };
-        chats.sessions = None;
-        chats
-            .active()
+        self.sessions = None;
+        self.active()
             .input
             .update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
@@ -135,7 +123,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(sessions) = self.claude.as_ref().and_then(|c| c.sessions.as_ref()) else {
+        let Some(sessions) = self.sessions.as_ref() else {
             return;
         };
         let row = row.unwrap_or(sessions.selected);
@@ -152,9 +140,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
-        let chats = self.claude.as_mut()?;
-        let current = chats.active().transcript.session_id().map(str::to_owned);
-        let sessions = chats.sessions.as_mut()?;
+        let current = self.active().transcript.session_id().map(str::to_owned);
+        let sessions = self.sessions.as_mut()?;
         let found = sessions.matching(cx).len();
         sessions.selected = sessions.selected.min(found.saturating_sub(1));
         let (state, selected) = (sessions.commands.clone(), sessions.selected);
@@ -208,11 +195,8 @@ impl Workspace {
             })
             .on_select(move |path, _, cx| {
                 hovered.update(cx, |this, cx| {
-                    if let Some(sessions) = this
-                        .claude
-                        .as_mut()
-                        .and_then(|c| c.sessions.as_mut())
-                        .filter(|s| s.selected != path.row)
+                    if let Some(sessions) =
+                        this.sessions.as_mut().filter(|s| s.selected != path.row)
                     {
                         sessions.selected = path.row;
                         cx.notify();

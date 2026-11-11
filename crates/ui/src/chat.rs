@@ -15,6 +15,8 @@ mod tools;
 mod workers;
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::settings::Protocol;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -31,10 +33,19 @@ use zide_claude::{
 };
 
 use crate::markdown::{TextView, TextViewState};
-use crate::{Workspace, theme};
+use crate::{Center, Workspace, theme};
+use zide_index::FileIndex;
 
 /// The conversations that are open, one of them showing.
 pub struct Chats {
+    /// The project the chats work in.
+    root: PathBuf,
+    /// New processes start in bare mode (Claude: Bare Mode).
+    bare: bool,
+    /// The project's files and the recently opened ones, for the `@` menu: the workspace's,
+    /// handed over whenever they change.
+    files: Option<Arc<FileIndex>>,
+    recent: Vec<usize>,
     list: Vec<Chat>,
     active: usize,
     next_id: u64,
@@ -83,23 +94,22 @@ impl Chats {
         }
     }
 
-    fn new(
-        commands: Vec<String>,
-        defaults: Defaults,
-        window: &mut Window,
-        cx: &mut Context<Workspace>,
-    ) -> Chats {
+    fn new(root: PathBuf, bare: bool, window: &mut Window, cx: &mut Context<Chats>) -> Chats {
         let mut chats = Chats {
+            commands: crate::session::claude_commands(&root),
+            defaults: zide_claude::defaults(&root),
+            titles: crate::session::claude_titles(&root),
+            root,
+            bare,
+            files: None,
+            recent: Vec::new(),
             list: Vec::new(),
             active: 0,
             next_id: 0,
-            commands,
-            defaults,
             limits: None,
             sessions: None,
             agents: Vec::new(),
             preview: None,
-            titles: HashMap::new(),
             viewing: None,
             worker_scroll: ScrollHandle::new(),
         };
@@ -108,7 +118,7 @@ impl Chats {
     }
 
     /// Opens an empty conversation and shows it.
-    fn add(&mut self, window: &mut Window, cx: &mut Context<Workspace>) {
+    fn add(&mut self, window: &mut Window, cx: &mut Context<Chats>) {
         let id = self.next_id;
         self.next_id += 1;
         let chat = Chat::new(id, &self.defaults, window, cx);
@@ -129,7 +139,7 @@ impl Chats {
     }
 
     /// How the chats stand together, for the status bar.
-    pub fn overall(&self) -> Overall {
+    fn overall(&self) -> Overall {
         Overall::of(self.list.iter().map(Chat::status))
     }
 }
@@ -197,7 +207,7 @@ pub struct Chat {
 }
 
 impl Chat {
-    fn new(id: u64, defaults: &Defaults, window: &mut Window, cx: &mut Context<Workspace>) -> Chat {
+    fn new(id: u64, defaults: &Defaults, window: &mut Window, cx: &mut Context<Chats>) -> Chat {
         let effort_slider = Chat::new_effort_slider(defaults, window, cx);
         let slider = Chat::effort_events(id, &effort_slider, window, cx);
         let input = cx.new(|cx| {
@@ -209,9 +219,9 @@ impl Chat {
         let submit = cx.subscribe_in(
             &input,
             window,
-            move |this: &mut Workspace, input, event: &InputEvent, window, cx| match event {
+            move |this: &mut Chats, input, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => {
-                    if let Some(chat) = this.claude.as_mut().and_then(|c| c.find(id)) {
+                    if let Some(chat) = this.find(id) {
                         chat.menu_selected = 0;
                         chat.menu_dismissed = false;
                     }
@@ -368,10 +378,33 @@ impl Chat {
     }
 }
 
+/// What the chats ask of the workspace that shows them.
+pub enum ChatEvent {
+    /// Leave the chat for the editor (Esc with nothing to stop).
+    Hide,
+    /// Tell the user something, as an info toast.
+    Info(&'static str),
+    /// Something failed: an error toast.
+    Error {
+        title: &'static str,
+        message: String,
+    },
+}
+
+impl EventEmitter<ChatEvent> for Chats {}
+
+impl Render for Chats {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.claude_view(window, cx)
+    }
+}
+
+/// The chat as a panel of the workspace: when it fills the center, where the focus goes, and
+/// the keys the workspace sees first.
 impl Workspace {
     /// Alt+2: shows the chat; from the chat it stays there (Esc, or Alt+1 / Ctrl+K, leaves it).
     pub(crate) fn open_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.claude_open {
+        if self.center == Center::Chat {
             self.focus_active_chat(window, cx);
             return cx.notify();
         }
@@ -380,23 +413,64 @@ impl Workspace {
 
     pub(crate) fn toggle_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.autosave(cx); // the chat may edit the files, and leaving the editor is a save
-        if self.claude_open {
-            self.claude_open = false;
+        if self.center == Center::Chat {
+            self.center = Center::Editor;
             self.focus.focus(window, cx);
             return cx.notify();
         }
-        if self.claude.is_none() {
-            let commands = crate::session::claude_commands(&self.root);
-            let defaults = zide_claude::defaults(&self.root);
-            let mut chats = Chats::new(commands, defaults, window, cx);
-            chats.titles = crate::session::claude_titles(&self.root);
-            self.claude = Some(chats);
-            self.watch_agents(cx);
-        }
-        self.log_open = false;
-        self.claude_open = true;
-        self.refresh_agents(cx);
+        let chats = self.chats(window, cx);
+        self.center = Center::Chat;
+        chats.update(cx, |chats, cx| chats.refresh_agents(cx));
         self.focus_active_chat(window, cx);
+        cx.notify();
+    }
+
+    /// The chats, made the first time they are needed.
+    fn chats(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Chats> {
+        if let Some(chats) = &self.claude {
+            return chats.clone();
+        }
+        let (root, bare) = (self.root.clone(), self.claude_bare);
+        let chats = cx.new(|cx| Chats::new(root, bare, window, cx));
+        // the status bar shows how the chats stand, also while the editor is showing
+        cx.observe(&chats, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &chats,
+            window,
+            |this, _, event: &ChatEvent, window, cx| match event {
+                ChatEvent::Hide => {
+                    if this.center == Center::Chat {
+                        this.toggle_claude(window, cx);
+                    }
+                }
+                ChatEvent::Info(note) => this.notify(Notification::info(*note), cx),
+                ChatEvent::Error { title, message } => {
+                    this.notify(Notification::error(message.clone()).title(*title), cx)
+                }
+            },
+        )
+        .detach();
+        self.claude = Some(chats.clone());
+        self.sync_chat_files(cx);
+        self.watch_agents(cx);
+        chats
+    }
+
+    /// Hands the chats the project's files and the recent ones, after either changed.
+    pub(crate) fn sync_chat_files(&self, cx: &mut App) {
+        if let Some(chats) = &self.claude {
+            let (files, recent) = (self.index.clone(), self.recent.clone());
+            chats.update(cx, |chats, _| (chats.files, chats.recent) = (files, recent));
+        }
+    }
+
+    /// Claude: Bare Mode, for the processes started from now on.
+    pub(crate) fn toggle_claude_bare(&mut self, cx: &mut Context<Self>) {
+        self.claude_bare = !self.claude_bare;
+        if let Some(chats) = &self.claude {
+            let bare = self.claude_bare;
+            chats.update(cx, |chats, _| chats.bare = bare);
+        }
         cx.notify();
     }
 
@@ -407,8 +481,10 @@ impl Workspace {
             loop {
                 cx.background_executor().timer(AGENTS_EVERY).await;
                 let shown = this.update(cx, |this, cx| {
-                    if this.claude_open {
-                        this.refresh_agents(cx);
+                    if this.center == Center::Chat
+                        && let Some(chats) = &this.claude
+                    {
+                        chats.update(cx, |chats, cx| chats.refresh_agents(cx));
                     }
                 });
                 if shown.is_err() {
@@ -419,6 +495,79 @@ impl Workspace {
         .detach();
     }
 
+    /// Opens an empty conversation next to the others.
+    pub(crate) fn claude_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.center != Center::Chat {
+            self.toggle_claude(window, cx);
+        }
+        if let Some(chats) = &self.claude {
+            chats.update(cx, |chats, cx| chats.new_chat(window, cx));
+        }
+    }
+
+    /// Opens the list of earlier conversations over the chat (showing the chat first).
+    pub(crate) fn claude_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // the earlier conversations are Claude Code's; they would resume through the ACP agent
+        if crate::settings::protocol() == Protocol::Acp {
+            return self.notify(Notification::info(CLAUDE_HISTORY_ONLY), cx);
+        }
+        if self.center != Center::Chat {
+            self.toggle_claude(window, cx);
+        }
+        if let Some(chats) = &self.claude {
+            chats.update(cx, |chats, cx| chats.claude_history(window, cx));
+        }
+    }
+
+    /// The keys while the chat is showing, before the input box's own bindings see them.
+    pub(crate) fn claude_key(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(chats) = &self.claude {
+            chats.update(cx, |chats, cx| chats.claude_key(keystroke, window, cx));
+        }
+    }
+
+    /// Puts the cursor in the active chat's input box.
+    pub(crate) fn focus_active_chat(&self, window: &mut Window, cx: &mut App) {
+        if let Some(chats) = &self.claude {
+            chats.update(cx, |chats, cx| chats.focus_active_chat(window, cx));
+        }
+    }
+
+    /// The session id and title of the conversation the active chat is on, if it is on one.
+    pub(crate) fn claude_conversation(&self, cx: &App) -> Option<(String, String)> {
+        self.claude.as_ref()?.read(cx).conversation()
+    }
+
+    /// Puts the active chat back on a conversation from an earlier run.
+    pub(crate) fn restore_conversation(
+        &mut self,
+        id: String,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(chats) = &self.claude {
+            chats.update(cx, |chats, cx| chats.restore_conversation(id, title, cx));
+        }
+    }
+
+    /// How the chats stand together, for the status bar.
+    pub(crate) fn claude_overall(&self, cx: &App) -> Overall {
+        self.claude
+            .as_ref()
+            .map_or(Overall::Off, |chats| chats.read(cx).overall())
+    }
+}
+
+/// Why Claude's earlier conversations cannot be resumed with another agent.
+const CLAUDE_HISTORY_ONLY: &str =
+    "Earlier conversations are Claude's: pick a Claude agent in Configure Agent to resume one";
+
+impl Chats {
     /// Asks `claude agents` now; the list changes only when the answer does. The chats that
     /// follow another process re-read their session too.
     fn refresh_agents(&mut self, cx: &mut Context<Self>) {
@@ -428,9 +577,8 @@ impl Workspace {
         }
         let root = self.root.clone();
         let followed: Vec<(u64, String, Option<std::time::SystemTime>)> = self
-            .claude
+            .list
             .iter()
-            .flat_map(|chats| chats.list.iter())
             .filter(|chat| chat.tail && chat.session.is_none())
             .filter_map(|chat| {
                 Some((
@@ -441,11 +589,7 @@ impl Workspace {
             })
             .collect();
         let project = self.root.clone();
-        let known: HashSet<String> = self
-            .claude
-            .iter()
-            .flat_map(|chats| chats.titles.keys().cloned())
-            .collect();
+        let known: HashSet<String> = self.titles.keys().cloned().collect();
         cx.spawn(async move |this, cx| {
             let (agents, stored, found) = cx
                 .background_executor()
@@ -475,25 +619,21 @@ impl Workspace {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                let Some(chats) = &mut this.claude else {
-                    return;
-                };
                 // titles of agents that are gone are forgotten, so the cache stays small
-                let before = chats.titles.clone();
-                chats.titles.extend(found);
-                chats
-                    .titles
+                let before = this.titles.clone();
+                this.titles.extend(found);
+                this.titles
                     .retain(|id, _| agents.iter().any(|agent| &agent.session_id == id));
-                if chats.titles != before {
-                    crate::session::remember_claude_titles(&this.root, &chats.titles);
+                if this.titles != before {
+                    crate::session::remember_claude_titles(&this.root, &this.titles);
                     cx.notify();
                 }
-                if chats.agents != agents {
-                    chats.agents = agents;
+                if this.agents != agents {
+                    this.agents = agents;
                     cx.notify();
                 }
                 for (id, modified, loaded) in stored {
-                    let Some(chat) = chats.find(id) else {
+                    let Some(chat) = this.find(id) else {
                         continue;
                     };
                     // a message of ours started a process meanwhile: that one is the truth
@@ -522,8 +662,8 @@ impl Workspace {
     }
 
     /// The session id and title of the conversation the active chat is on, if it is on one.
-    pub(crate) fn claude_conversation(&self) -> Option<(String, String)> {
-        let chat = self.claude.as_ref()?.active();
+    fn conversation(&self) -> Option<(String, String)> {
+        let chat = self.active();
         // only Claude's conversations can be resumed; an ACP session id would reach `--resume`
         if chat.protocol != Protocol::Claude {
             return None;
@@ -534,21 +674,13 @@ impl Workspace {
 
     /// Puts the active chat back on a conversation from an earlier run. It follows the agent that
     /// may still be alive: its state comes from `claude agents` until a message starts a process.
-    pub(crate) fn restore_conversation(
-        &mut self,
-        id: String,
-        title: String,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(chats) = &mut self.claude else {
-            return;
-        };
+    fn restore_conversation(&mut self, id: String, title: String, cx: &mut Context<Self>) {
         // the saved conversation is Claude's: an ACP chat would start a fresh session instead
-        if chats.active().protocol != Protocol::Claude {
+        if self.active().protocol != Protocol::Claude {
             return;
         }
-        let chat_id = chats.active().id;
-        chats.active_mut().tail = true;
+        let chat_id = self.active().id;
+        self.active_mut().tail = true;
         let session = SessionInfo {
             id,
             title,
@@ -556,7 +688,7 @@ impl Workspace {
         };
         let untitled = session.title.is_empty();
         self.load_session(chat_id, session, cx);
-        if untitled && let Some(chat) = self.claude.as_mut().and_then(|c| c.find(chat_id)) {
+        if untitled && let Some(chat) = self.find(chat_id) {
             chat.title = None; // the first message names it, as in any new chat
         }
     }
@@ -565,23 +697,20 @@ impl Workspace {
     /// that reads the session from disk and keeps reading it. Sending a message there continues
     /// the same session with `--resume`.
     fn claude_open_agent(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chats) = &mut self.claude else {
+        let Some(agent) = self.agents.get(index).cloned() else {
             return;
         };
-        let Some(agent) = chats.agents.get(index).cloned() else {
-            return;
-        };
-        if let Some(at) = chats
+        if let Some(at) = self
             .list
             .iter()
             .position(|chat| chat.transcript.session_id() == Some(agent.session_id.as_str()))
         {
             return self.claude_activate(at, window, cx);
         }
-        chats.add(window, cx);
-        let id = chats.active().id;
-        chats.active_mut().tail = true;
-        let title = chats.name_of(&agent);
+        self.add(window, cx);
+        let id = self.active().id;
+        self.active_mut().tail = true;
+        let title = self.name_of(&agent);
         let session = SessionInfo {
             id: agent.session_id,
             title,
@@ -595,12 +724,7 @@ impl Workspace {
     /// The cross on a background agent: `claude rm`. What `claude` refuses (a worktree with
     /// unpushed commits, say) is shown and the agent stays.
     fn claude_remove_agent(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(agent) = self
-            .claude
-            .as_ref()
-            .and_then(|c| c.agents.get(index))
-            .cloned()
-        else {
+        let Some(agent) = self.agents.get(index).cloned() else {
             return;
         };
         cx.spawn_in(window, async move |this, cx| {
@@ -612,24 +736,22 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| {
                 match removed {
                     Ok(_) => {
-                        let open = this.claude.as_mut().and_then(|chats| {
-                            chats.agents.retain(|a| a.id != agent.id);
-                            chats
-                                .list
-                                .iter()
-                                .find(|chat| {
-                                    chat.transcript.session_id() == Some(agent.session_id.as_str())
-                                })
-                                .map(|chat| chat.id)
-                        });
+                        this.agents.retain(|a| a.id != agent.id);
+                        let open = this
+                            .list
+                            .iter()
+                            .find(|chat| {
+                                chat.transcript.session_id() == Some(agent.session_id.as_str())
+                            })
+                            .map(|chat| chat.id);
                         if let Some(id) = open {
                             this.claude_close(id, window, cx);
                         }
                     }
-                    Err(why) => this.notify(
-                        Notification::error(why).title("Could not remove the agent"),
-                        cx,
-                    ),
+                    Err(why) => cx.emit(ChatEvent::Error {
+                        title: "Could not remove the agent",
+                        message: why.to_string(),
+                    }),
                 }
                 cx.notify();
             })
@@ -639,23 +761,16 @@ impl Workspace {
     }
 
     pub(super) fn focus_active_chat(&self, window: &mut Window, cx: &mut App) {
-        if let Some(chats) = &self.claude {
-            let chat = chats.active();
-            chat.input.update(cx, |state, cx| state.focus(window, cx));
-            chat.scroll.scroll_to_bottom();
-        }
+        let chat = self.active();
+        chat.input.update(cx, |state, cx| state.focus(window, cx));
+        chat.scroll.scroll_to_bottom();
     }
 
     /// Keys while the chat is showing. The input box handles its own typing.
-    pub(crate) fn claude_key(
-        &mut self,
-        keystroke: &Keystroke,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn claude_key(&mut self, keystroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
         let key = keystroke.key.as_str();
         let modifiers = &keystroke.modifiers;
-        if key == "escape" && self.claude.as_ref().is_some_and(|c| c.preview.is_some()) {
+        if key == "escape" && self.preview.is_some() {
             self.claude_preview(None, cx);
             return cx.stop_propagation();
         }
@@ -668,7 +783,7 @@ impl Workspace {
                     return;
                 }
                 "h" => {
-                    if self.claude.as_ref().is_some_and(|c| c.sessions.is_some()) {
+                    if self.sessions.is_some() {
                         self.close_claude_history(window, cx);
                     } else {
                         self.claude_history(window, cx);
@@ -688,7 +803,7 @@ impl Workspace {
             cx.stop_propagation();
             return cx.notify();
         }
-        if let Some(sessions) = self.claude.as_mut().and_then(|c| c.sessions.as_mut()) {
+        if let Some(sessions) = self.sessions.as_mut() {
             match key {
                 "down" => sessions.move_selection(1, cx),
                 "up" => sessions.move_selection(-1, cx),
@@ -699,7 +814,7 @@ impl Workspace {
             return cx.notify();
         }
         // the worker view has no input: Esc goes back to the chat
-        if self.claude.as_ref().is_some_and(|c| c.viewing.is_some()) {
+        if self.viewing.is_some() {
             if key == "escape" {
                 self.claude_leave_worker(window, cx);
                 cx.stop_propagation();
@@ -711,14 +826,10 @@ impl Workspace {
                 "down" => self.menu_move(1, cx),
                 "up" => self.menu_move(-1, cx),
                 "tab" => {
-                    let id = self.claude.as_ref().map(|c| c.active().id);
-                    id.map(|id| self.claude_complete(id, window, cx));
+                    let id = self.active().id;
+                    self.claude_complete(id, window, cx);
                 }
-                "escape" => {
-                    if let Some(chats) = &mut self.claude {
-                        chats.active_mut().menu_dismissed = true;
-                    }
-                }
+                "escape" => self.active_mut().menu_dismissed = true,
                 _ => return,
             }
             cx.stop_propagation();
@@ -728,29 +839,24 @@ impl Workspace {
             return;
         }
         // Esc presses Stop while there is something to stop; otherwise it leaves the panel
-        let busy = self.claude.as_ref().is_some_and(|c| c.active().busy());
-        if busy {
+        if self.active().busy() {
             self.claude_interrupt();
         } else {
-            self.toggle_claude(window, cx);
+            cx.emit(ChatEvent::Hide);
         }
         cx.stop_propagation();
     }
 
     /// Stops the turn in progress of the active chat. A message that waits starts right after.
     pub(super) fn claude_interrupt(&mut self) {
-        if let Some(session) = self
-            .claude
-            .as_mut()
-            .and_then(|c| c.active_mut().session.as_mut())
-        {
+        if let Some(session) = self.active_mut().session.as_mut() {
             let _ = session.interrupt();
         }
     }
 
     fn claude_send(&mut self, id: u64, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let text = text.trim().to_owned();
-        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
+        let Some(chat) = self.find(id) else {
             return;
         };
         // while Claude works the message is queued by the CLI; a pending question comes first
@@ -760,12 +866,12 @@ impl Workspace {
         if chat.session.is_none()
             && let Err(error) = self.start_claude(id, cx)
         {
-            if let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) {
+            if let Some(chat) = self.find(id) {
                 chat.notice = Some(format!("Could not start `claude`: {error}"));
             }
             return cx.notify();
         }
-        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
+        let Some(chat) = self.find(id) else {
             return;
         };
         let pictures = chat.pictures();
@@ -803,8 +909,8 @@ impl Workspace {
 
     /// Starts `claude` for a chat, continuing its conversation if one was running before.
     fn start_claude(&mut self, id: u64, cx: &mut Context<Self>) -> std::io::Result<()> {
-        let bare = self.claude_bare;
-        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
+        let (bare, root) = (self.bare, self.root.clone());
+        let Some(chat) = self.find(id) else {
             return Ok(());
         };
         let (session, events): (Box<dyn AgentSession>, _) = match chat.protocol {
@@ -818,12 +924,12 @@ impl Workspace {
                     minimal: bare,
                     ..Options::default()
                 };
-                let (session, events) = Session::spawn(&self.root, options)?;
+                let (session, events) = Session::spawn(&root, options)?;
                 (Box::new(session), events)
             }
             // a new session each time: resuming one is for a later version (`session/load`)
             Protocol::Acp => {
-                let (session, events) = zide_acp::spawn(&chat.launcher, &self.root)?;
+                let (session, events) = zide_acp::spawn(&chat.launcher, &root)?;
                 (Box::new(session), events)
             }
         };
@@ -858,30 +964,23 @@ impl Workspace {
     fn claude_event(&mut self, id: u64, run: u64, event: Event, cx: &mut Context<Self>) {
         if let Event::Init { commands, .. } = &event
             && !commands.is_empty()
-            && let Some(chats) = &mut self.claude
-            && chats.commands != *commands
+            && self.commands != *commands
         {
-            chats.commands = commands.clone();
+            self.commands = commands.clone();
             crate::session::remember_claude_commands(&self.root, commands);
         }
-        if let Event::Limits(limits) = &event
-            && let Some(chats) = &mut self.claude
-        {
-            chats.limits = Some(*limits);
+        if let Event::Limits(limits) = &event {
+            self.limits = Some(*limits);
         }
-        // a closed chat has no one to tell
-        let Some(chats) = self.claude.as_mut() else {
-            return;
-        };
-        let viewed = chats
+        let viewed = self
             .viewing
             .as_ref()
             .filter(|(chat, _)| *chat == id)
             .map(|(_, worker)| worker.clone());
         let follow_worker =
-            chats.worker_scroll.max_offset().y + chats.worker_scroll.offset().y < px(8.);
-        let worker_scroll = chats.worker_scroll.clone();
-        let Some(chat) = chats.find(id).filter(|chat| chat.run == run) else {
+            self.worker_scroll.max_offset().y + self.worker_scroll.offset().y < px(8.);
+        let worker_scroll = self.worker_scroll.clone();
+        let Some(chat) = self.find(id).filter(|chat| chat.run == run) else {
             return;
         };
         // a worker's events are its own: the chat's conversation never sees them
@@ -900,13 +999,11 @@ impl Workspace {
             chat.session = None;
             chat.workers.clear();
             chat.prune_worker_markdown();
-            if viewed.is_some()
-                && let Some(chats) = self.claude.as_mut()
-            {
-                chats.viewing = None;
+            if viewed.is_some() {
+                self.viewing = None;
             }
         }
-        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
+        let Some(chat) = self.find(id) else {
             return;
         };
 
@@ -924,32 +1021,24 @@ impl Workspace {
     }
 
     /// Opens an empty conversation next to the others.
-    pub(crate) fn claude_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.claude_open {
-            self.toggle_claude(window, cx);
-        }
+    fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.claude_leave_worker(window, cx);
-        if let Some(chats) = &mut self.claude {
-            chats.add(window, cx);
-        }
+        self.add(window, cx);
         self.focus_active_chat(window, cx);
         cx.notify();
     }
 
     /// Shows the next (or previous) chat, wrapping around at the ends.
     fn claude_cycle(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chats) = &self.claude else {
-            return;
-        };
-        let count = chats.list.len() as isize;
-        let index = (chats.active as isize + step).rem_euclid(count) as usize;
+        let count = self.list.len() as isize;
+        let index = (self.active as isize + step).rem_euclid(count) as usize;
         self.claude_activate(index, window, cx);
     }
 
     fn claude_activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.claude_leave_worker(window, cx);
-        if let Some(chats) = self.claude.as_mut().filter(|c| index < c.list.len()) {
-            chats.active = index;
+        if index < self.list.len() {
+            self.active = index;
         }
         self.focus_active_chat(window, cx);
         cx.notify();
@@ -965,26 +1054,22 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.claude_leave_worker(window, cx);
-        let Some(chats) = &mut self.claude else {
+        let Some(index) = self.list.iter().position(|chat| chat.id == chat_id) else {
             return;
         };
-        let Some(index) = chats.list.iter().position(|chat| chat.id == chat_id) else {
-            return;
-        };
-        chats.active = index;
-        chats.viewing = Some((chat_id, tool_use_id));
-        chats.worker_scroll.scroll_to_bottom();
+        self.active = index;
+        self.viewing = Some((chat_id, tool_use_id));
+        self.worker_scroll.scroll_to_bottom();
         cx.notify();
     }
 
     /// Closes the worker view, if it is open, and goes back to the chat. A worker that
     /// finished while it was watched leaves the list now. Says whether a view was open.
     fn claude_leave_worker(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some((chat_id, tool_use_id)) = self.claude.as_mut().and_then(|c| c.viewing.take())
-        else {
+        let Some((chat_id, tool_use_id)) = self.viewing.take() else {
             return false;
         };
-        if let Some(chat) = self.claude.as_mut().and_then(|c| c.find(chat_id)) {
+        if let Some(chat) = self.find(chat_id) {
             chat.workers.left(&tool_use_id);
             chat.prune_worker_markdown();
         }
@@ -995,21 +1080,18 @@ impl Workspace {
 
     /// Closes a chat; its process, if any, stops. The last one is replaced by an empty chat.
     fn claude_close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chats) = &mut self.claude else {
+        let Some(index) = self.list.iter().position(|chat| chat.id == id) else {
             return;
         };
-        let Some(index) = chats.list.iter().position(|chat| chat.id == id) else {
-            return;
-        };
-        chats.list.remove(index);
+        self.list.remove(index);
         // its workers went with it
-        if chats.viewing.as_ref().is_some_and(|(chat, _)| *chat == id) {
-            chats.viewing = None;
+        if self.viewing.as_ref().is_some_and(|(chat, _)| *chat == id) {
+            self.viewing = None;
         }
-        if chats.list.is_empty() {
-            chats.add(window, cx);
-        } else if index < chats.active || chats.active >= chats.list.len() {
-            chats.active = chats.active.saturating_sub(1);
+        if self.list.is_empty() {
+            self.add(window, cx);
+        } else if index < self.active || self.active >= self.list.len() {
+            self.active = self.active.saturating_sub(1);
         }
         self.focus_active_chat(window, cx);
         cx.notify();
@@ -1025,15 +1107,9 @@ impl Workspace {
     ) {
         // a new chat takes the agent in use, and Claude's history needs a Claude chat
         if crate::settings::protocol() != Protocol::Claude {
-            let note = gpui_kit::component::notification::Notification::info(
-                "Earlier conversations are Claude's: pick a Claude agent in Configure Agent to resume one",
-            );
-            return self.notify(note, cx);
+            return cx.emit(ChatEvent::Info(CLAUDE_HISTORY_ONLY));
         }
-        let Some(chats) = &mut self.claude else {
-            return;
-        };
-        if let Some(index) = chats
+        if let Some(index) = self
             .list
             .iter()
             .position(|chat| chat.transcript.session_id() == Some(session.id.as_str()))
@@ -1042,10 +1118,10 @@ impl Workspace {
         }
         // an empty ACP chat would send the resumed conversation's next message to its agent;
         // a new chat is Claude's, as `claude_resume` refuses while an ACP agent is in use
-        if !chats.active().is_empty() || chats.active().protocol != Protocol::Claude {
-            chats.add(window, cx);
+        if !self.active().is_empty() || self.active().protocol != Protocol::Claude {
+            self.add(window, cx);
         }
-        let id = chats.active().id;
+        let id = self.active().id;
         self.load_session(id, session, cx);
         self.focus_active_chat(window, cx);
         cx.notify();
@@ -1054,7 +1130,7 @@ impl Workspace {
     /// Fills chat `id` with a stored conversation, read in the background. The chat knows the
     /// session at once, so what is sent next continues it even while it loads.
     fn load_session(&mut self, id: u64, session: SessionInfo, cx: &mut Context<Self>) {
-        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
+        let Some(chat) = self.find(id) else {
             return;
         };
         chat.title = Some(session.title.clone());
@@ -1071,7 +1147,7 @@ impl Workspace {
                 .spawn(async move { history::load_with_images(&root, &stored) })
                 .await;
             this.update(cx, |this, cx| {
-                let Some(chat) = this.claude.as_mut().and_then(|c| c.find(id)) else {
+                let Some(chat) = this.find(id) else {
                     return;
                 };
                 match loaded {
@@ -1099,7 +1175,7 @@ impl Workspace {
     }
 
     fn claude_decide(&mut self, id: u64, request_id: &str, allow: bool, cx: &mut Context<Self>) {
-        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
+        let Some(chat) = self.find(id) else {
             return;
         };
         let input = chat
@@ -1386,9 +1462,10 @@ impl Workspace {
                     .border_color(rgb(theme::BORDER))
                     .child(div().text_color(rgb(theme::MUTED)).child("Chats"))
                     .child(
-                        Button::new("claude-new").ghost().label("New").on_click(
-                            cx.listener(|this, _, window, cx| this.claude_new(window, cx)),
-                        ),
+                        Button::new("claude-new")
+                            .ghost()
+                            .label("New")
+                            .on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))),
                     ),
             )
             .child(
@@ -1407,9 +1484,6 @@ impl Workspace {
     /// What a worker does, read-only, in place of the chat: its blocks drawn as the chat
     /// draws its own, under a header that says what it is and a way back.
     fn worker_view(&self, chat: &Chat, worker: &workers::Worker, cx: &mut Context<Self>) -> Div {
-        let Some(chats) = &self.claude else {
-            return div();
-        };
         let blocks = worker
             .transcript
             .blocks()
@@ -1473,7 +1547,7 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .track_scroll(&chats.worker_scroll)
+                    .track_scroll(&self.worker_scroll)
                     .child(
                         div()
                             .flex()
@@ -1496,23 +1570,20 @@ impl Workspace {
     }
 
     /// The chat, filling the area where the editor would be.
-    pub(crate) fn claude_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn claude_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         self.ensure_asks(window, cx);
         self.ensure_diffs();
         self.sync_options(window, cx);
         let popup = self.sessions_view(window, cx);
-        let Some(chats) = &self.claude else {
-            return div();
-        };
-        let chat = chats.active();
-        let worker = chats
+        let chat = self.active();
+        let worker = self
             .viewing
             .as_ref()
             .filter(|(id, _)| *id == chat.id)
             .and_then(|(_, tool)| chat.workers.get(tool));
         if let Some(worker) = worker {
             let view = self.worker_view(chat, worker, cx);
-            let panel = self.claude_panel(chats, cx);
+            let panel = self.claude_panel(self, cx);
             return div()
                 .flex()
                 .flex_1()
@@ -1538,22 +1609,22 @@ impl Workspace {
             .collect::<Vec<_>>();
         let menu = self.menu_view(cx);
         let images = self.images_view(cx);
-        let panel = self.claude_panel(chats, cx);
+        let panel = self.claude_panel(self, cx);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        let background_count = chats
+        let background_count = self
             .agents
             .iter()
             .filter(|agent| agent.kind == Kind::Background)
             .count();
-        let shown = chats.status_of(chat);
+        let shown = self.status_of(chat);
         let ended = shown == Status::Inactive && !chat.is_empty();
         // a running process keeps the mode it started with; any other starts with the toggle's
         let bare = if chat.session.is_some() {
             chat.bare
         } else {
-            self.claude_bare
+            self.bare
         };
         let main = div()
             .relative()
@@ -1608,9 +1679,7 @@ impl Workspace {
                                     .ghost()
                                     .label(format!("Show {} earlier", hidden.min(SHOWN_STEP)))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(chats) = &mut this.claude {
-                                            chats.active_mut().shown += SHOWN_STEP;
-                                        }
+                                        this.active_mut().shown += SHOWN_STEP;
                                         cx.notify();
                                     }))
                             }))
@@ -1637,7 +1706,7 @@ impl Workspace {
                     .p_2()
                     .child(self.composer(
                         chat,
-                        chats,
+                        self,
                         menu,
                         images,
                         bare,

@@ -4,6 +4,7 @@
 //! narrows the history to it, and picking it again goes back to every branch.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -20,9 +21,11 @@ use zide_git::{Branches, FileChange, Switch};
 
 mod menu;
 
+use menu::{ContextMenu, MenuAction};
+
 use crate::branches::{Kind, Model, Row};
 use crate::changed_files::{self, Picks};
-use crate::{Workspace, file_icon, statusbar, theme};
+use crate::{Center, Workspace, file_icon, statusbar, theme};
 
 const ROW_HEIGHT: f32 = 24.;
 const LANE_WIDTH: f32 = 14.;
@@ -108,6 +111,10 @@ enum Files {
 }
 
 pub struct LogPanel {
+    /// The repository.
+    root: PathBuf,
+    /// The workspace's: the keys of the lists are read by the workspace, which forwards them.
+    focus: FocusHandle,
     query: Entity<InputState>,
     /// The paths the commits must touch, separated by spaces.
     paths: Entity<InputState>,
@@ -217,14 +224,34 @@ fn scope_after_pick(current: &Scope, target: &Switch) -> Scope {
 }
 
 impl LogPanel {
-    fn new(
-        query: Entity<InputState>,
-        paths: Entity<InputState>,
-        dates: [Entity<DatePickerState>; 2],
-        typing: Vec<Subscription>,
-    ) -> Self {
-        let [after, before] = dates;
+    fn new(root: PathBuf, focus: FocusHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Text or hash"));
+        let paths = cx.new(|cx| InputState::new(window, cx).placeholder("Paths"));
+        let picker = |window: &mut Window, cx: &mut Context<Self>| {
+            cx.new(|cx| DatePickerState::new(window, cx).date_format("%Y-%m-%d"))
+        };
+        let [after, before] = [picker(window, cx), picker(window, cx)];
+        let mut typing: Vec<Subscription> = [&query, &paths]
+            .map(|input| {
+                cx.subscribe(input, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.log_typed(cx);
+                    }
+                })
+            })
+            .into();
+        for (which, picker) in [&after, &before].into_iter().enumerate() {
+            typing.push(
+                cx.subscribe(picker, move |this, _, event: &DatePickerEvent, cx| {
+                    let DatePickerEvent::Change(value) = event;
+                    let day = value.format("%Y-%m-%d").map(|d| d.to_string());
+                    this.log_day(which == 0, day.unwrap_or_default(), cx);
+                }),
+            );
+        }
         Self {
+            root,
+            focus,
             query,
             paths,
             _typing: typing,
@@ -489,10 +516,36 @@ impl LogPanel {
     }
 }
 
+/// What the log asks of the workspace that shows it.
+pub enum LogEvent {
+    /// Leave the tab for the editor (Esc).
+    Hide,
+    /// Run `action` of the context menu `menu`, which is closed now.
+    Menu {
+        action: MenuAction,
+        menu: ContextMenu,
+    },
+    /// Show the diff of `file` in commit `hash`.
+    ShowDiff { hash: String, file: FileChange },
+    /// Open the menu of the branch or tag on row `row` of the tree at `at`: the workspace knows
+    /// the current branch it would be merged into.
+    RefMenu { row: usize, at: Point<Pixels> },
+}
+
+impl EventEmitter<LogEvent> for LogPanel {}
+
+impl Render for LogPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.log_view(cx)
+    }
+}
+
+/// The git log as a tab of the workspace: when it fills the center, and the keys the workspace
+/// reads for it.
 impl Workspace {
     /// Alt+3: shows the tab; from the tab it stays there (Esc, or Alt+1 / Ctrl+K, leaves it).
     pub(crate) fn open_git_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.log_open {
+        if self.center == Center::Log {
             self.focus.focus(window, cx);
             return cx.notify();
         }
@@ -501,9 +554,9 @@ impl Workspace {
 
     /// Leaves the chat or the git log, whichever covers the editor; `false` when none does.
     pub(crate) fn close_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.claude_open {
+        if self.center == Center::Chat {
             self.toggle_claude(window, cx);
-        } else if self.log_open {
+        } else if self.center == Center::Log {
             self.toggle_git_log(window, cx);
         } else {
             return false;
@@ -512,53 +565,109 @@ impl Workspace {
     }
 
     pub(crate) fn toggle_git_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.log_open {
-            self.log_open = false;
+        if self.center == Center::Log {
+            self.center = Center::Editor;
             self.focus.focus(window, cx);
             return cx.notify();
         }
-        if self.log.is_none() {
-            let query = cx.new(|cx| InputState::new(window, cx).placeholder("Text or hash"));
-            let paths = cx.new(|cx| InputState::new(window, cx).placeholder("Paths"));
-            let picker = |window: &mut Window, cx: &mut Context<Self>| {
-                cx.new(|cx| DatePickerState::new(window, cx).date_format("%Y-%m-%d"))
-            };
-            let dates = [picker(window, cx), picker(window, cx)];
-            let typing = [&query, &paths]
-                .map(|input| {
-                    cx.subscribe(input, |this, _, event: &InputEvent, cx| {
-                        if matches!(event, InputEvent::Change) {
-                            this.log_typed(cx);
-                        }
-                    })
-                })
-                .into();
-            let mut typing: Vec<Subscription> = typing;
-            for (which, picker) in dates.iter().enumerate() {
-                typing.push(
-                    cx.subscribe(picker, move |this, _, event: &DatePickerEvent, cx| {
-                        let DatePickerEvent::Change(value) = event;
-                        let day = value.format("%Y-%m-%d").map(|d| d.to_string());
-                        this.log_day(which == 0, day.unwrap_or_default(), cx);
-                    }),
-                );
-            }
-            self.log = Some(LogPanel::new(query, paths, dates, typing));
-        }
-        self.claude_open = false; // the tab takes the place of the chat, as the chat does the editor
-        self.log_open = true;
+        let log = self.log_panel(window, cx);
+        self.center = Center::Log; // the tab takes the place of the chat, as the chat does the editor
         self.focus.focus(window, cx); // the keys are read by the workspace
-        self.load_log_refs(cx);
-        self.load_log(cx);
+        log.update(cx, |log, cx| log.reload(cx));
         cx.notify();
+    }
+
+    /// The log, made the first time it is opened.
+    fn log_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<LogPanel> {
+        if let Some(log) = &self.log {
+            return log.clone();
+        }
+        let (root, focus) = (self.root.clone(), self.focus.clone());
+        let log = cx.new(|cx| LogPanel::new(root, focus, window, cx));
+        cx.subscribe_in(
+            &log,
+            window,
+            |this, _, event: &LogEvent, window, cx| match event {
+                LogEvent::Hide => {
+                    if this.center == Center::Log {
+                        this.toggle_git_log(window, cx);
+                    }
+                }
+                LogEvent::Menu { action, menu } => {
+                    this.run_menu_action(*action, menu.clone(), window, cx)
+                }
+                LogEvent::RefMenu { row, at } => {
+                    let into = this.git.branch_name();
+                    let (row, at) = (*row, *at);
+                    if let Some(log) = &this.log {
+                        log.update(cx, |log, cx| log.open_ref_menu(row, at, into, cx));
+                    }
+                }
+                LogEvent::ShowDiff { hash, file } => {
+                    this.show_commit_diff(hash, file.clone(), window, cx)
+                }
+            },
+        )
+        .detach();
+        self.log = Some(log.clone());
+        log
     }
 
     /// Reads the history again after git changed it, when the tab is showing.
     pub(crate) fn reload_log(&mut self, cx: &mut Context<Self>) {
-        if self.log_open {
-            self.load_log_refs(cx);
-            self.load_log(cx);
+        if self.center == Center::Log
+            && let Some(log) = &self.log
+        {
+            log.update(cx, |log, cx| log.reload(cx));
         }
+    }
+
+    /// Ctrl+F while the tab is showing: the search box.
+    pub(crate) fn focus_log_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(log) = &self.log {
+            log.update(cx, |log, cx| log.focus_box(false, window, cx));
+        }
+    }
+
+    /// Tab while the tab is showing.
+    pub(crate) fn log_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(log) = &self.log {
+            log.update(cx, |log, cx| log.log_tab(window, cx));
+        }
+    }
+
+    /// Keys while the tab is showing.
+    pub(crate) fn log_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(log) = &self.log {
+            log.update(cx, |log, cx| log.log_key(event, window, cx));
+        }
+    }
+}
+
+impl LogPanel {
+    /// The name of the project's folder.
+    fn root_name(&self) -> String {
+        self.root
+            .file_name()
+            .map_or_else(|| ".".into(), |name| name.to_string_lossy().into_owned())
+    }
+
+    /// Puts the cursor in the search box (`/`, Ctrl+F), or in the paths box (`p`).
+    fn focus_box(&self, paths: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let input = if paths { &self.paths } else { &self.query }.clone();
+        input.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
+    }
+
+    /// The history and the refs read again.
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        self.load_log_refs(cx);
+        self.load_log(cx);
     }
 
     /// Reads the branches for the tree and the authors for the user filter again, off the UI
@@ -578,17 +687,15 @@ impl Workspace {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if let Some(panel) = &mut this.log {
-                    if let Some(found) = found {
-                        panel.set_refs(found);
-                    }
-                    panel.remote = remote;
-                    panel.remote_tags = remote_tags;
-                    if let Ok(authors) = authors {
-                        panel.authors = authors;
-                    }
-                    cx.notify();
+                if let Some(found) = found {
+                    this.set_refs(found);
                 }
+                this.remote = remote;
+                this.remote_tags = remote_tags;
+                if let Ok(authors) = authors {
+                    this.authors = authors;
+                }
+                cx.notify();
             })
             .ok();
         })
@@ -597,15 +704,12 @@ impl Workspace {
 
     /// Reads the commits for the scope, the search and the number asked for, off the UI thread.
     fn load_log(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.log else {
-            return;
-        };
-        panel.generation += 1;
-        panel.loading = true;
-        let generation = panel.generation;
-        let query = panel.log_query(cx);
+        self.generation += 1;
+        self.loading = true;
+        let generation = self.generation;
+        let query = self.log_query(cx);
         let filtered = query.is_filtered();
-        let limit = panel.limit;
+        let limit = self.limit;
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let found = cx
@@ -613,11 +717,9 @@ impl Workspace {
                 .spawn(async move { log::read(&root, &query, limit) })
                 .await;
             this.update(cx, |this, cx| {
-                if let Some(panel) = &mut this.log {
-                    panel.set_entries(generation, found, filtered);
-                    this.load_log_files(cx);
-                    cx.notify();
-                }
+                this.set_entries(generation, found, filtered);
+                this.load_log_files(cx);
+                cx.notify();
             })
             .ok();
         })
@@ -627,29 +729,23 @@ impl Workspace {
 
     /// The list reached its end: asks for another page.
     fn log_more(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.log else {
-            return;
-        };
-        let more = matches!(panel.entries, Entries::Ready { more: true, .. });
-        if !more || panel.loading {
+        let more = matches!(self.entries, Entries::Ready { more: true, .. });
+        if !more || self.loading {
             return;
         }
-        panel.limit += PAGE;
+        self.limit += PAGE;
         self.load_log(cx);
     }
 
     /// The text changed: the search runs when typing pauses.
     fn log_typed(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.log else {
-            return;
-        };
-        panel.typed += 1;
-        panel.limit = PAGE;
-        let typed = panel.typed;
+        self.typed += 1;
+        self.limit = PAGE;
+        let typed = self.typed;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TYPING_PAUSE).await;
             this.update(cx, |this, cx| {
-                if this.log.as_ref().is_some_and(|panel| panel.typed == typed) {
+                if this.typed == typed {
                     this.load_log(cx);
                 }
             })
@@ -660,7 +756,7 @@ impl Workspace {
 
     /// Reads, off the UI thread, the files and the branches of the selected commit.
     fn load_log_files(&mut self, cx: &mut Context<Self>) {
-        let Some(hash) = self.log.as_mut().and_then(LogPanel::start_files_load) else {
+        let Some(hash) = self.start_files_load() else {
             return;
         };
         let root = self.root.clone();
@@ -676,13 +772,11 @@ impl Workspace {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if let Some(panel) = &mut this.log {
-                    panel.set_files(&wanted, files);
-                    if panel.selected_entry().map(|e| e.commit.hash.as_str()) == Some(&wanted) {
-                        panel.in_branches = branches.ok();
-                    }
-                    cx.notify();
+                this.set_files(&wanted, files);
+                if this.selected_entry().map(|e| e.commit.hash.as_str()) == Some(&wanted) {
+                    this.in_branches = branches.ok();
                 }
+                cx.notify();
             })
             .ok();
         })
@@ -690,11 +784,8 @@ impl Workspace {
     }
 
     fn select_log_commit(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.log else {
-            return;
-        };
-        panel.pane = Pane::Commits;
-        if panel.select(index) {
+        self.pane = Pane::Commits;
+        if self.select(index) {
             self.load_log_files(cx);
         }
         cx.notify();
@@ -702,18 +793,15 @@ impl Workspace {
 
     /// Narrows the history to what the tree row `row` is, or opens/closes it when it is a folder.
     fn activate_log_ref(&mut self, row: usize, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.log else {
-            return;
-        };
-        panel.pane = Pane::Refs;
-        panel.head_cursor = false;
-        let Some(model) = &mut panel.refs else {
+        self.pane = Pane::Refs;
+        self.head_cursor = false;
+        let Some(model) = &mut self.refs else {
             return;
         };
         model.select(row);
         if let Some(target) = model.activate() {
-            panel.scope = panel.scope_for(&target);
-            panel.limit = PAGE;
+            self.scope = self.scope_for(&target);
+            self.limit = PAGE;
             self.load_log(cx);
         }
         cx.notify();
@@ -721,58 +809,48 @@ impl Workspace {
 
     /// The HEAD line: the history of the checked-out branch, or every branch when it already is.
     fn pick_log_head(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = &mut self.log else {
-            return;
-        };
-        panel.pane = Pane::Refs;
-        panel.head_cursor = true;
-        panel.scope = if panel.scope == Scope::Head {
+        self.pane = Pane::Refs;
+        self.head_cursor = true;
+        self.scope = if self.scope == Scope::Head {
             Scope::All
         } else {
             Scope::Head
         };
-        panel.limit = PAGE;
+        self.limit = PAGE;
         self.load_log(cx);
     }
 
-    fn show_log_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(panel) = &self.log else {
+    fn show_log_diff(&mut self, cx: &mut Context<Self>) {
+        let (Some(entry), Some(file)) = (self.selected_entry(), self.selected_file()) else {
             return;
         };
-        let (Some(entry), Some(change)) = (panel.selected_entry(), panel.selected_file()) else {
-            return;
-        };
-        let (hash, change) = (entry.commit.hash.clone(), change.clone());
-        self.show_commit_diff(&hash, change, window, cx);
+        let (hash, file) = (entry.commit.hash.clone(), file.clone());
+        cx.emit(LogEvent::ShowDiff { hash, file });
     }
 
     fn log_typing(&self, window: &Window, cx: &App) -> bool {
-        self.log.as_ref().is_some_and(|panel| {
-            [&panel.query, &panel.paths]
-                .iter()
-                .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
-        })
+        [&self.query, &self.paths]
+            .iter()
+            .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     /// Opens or closes the list of a filter.
     fn toggle_log_menu(&mut self, filter: Filter, cx: &mut Context<Self>) {
-        if let Some(panel) = &mut self.log {
-            panel.toggle_menu(filter);
-        }
+        self.toggle_menu(filter);
+
         cx.notify();
     }
 
     /// The date filter changed: `after` tells which of the two days, and an empty one is cleared.
     fn log_day(&mut self, after: bool, day: String, cx: &mut Context<Self>) {
-        if let Some(panel) = &mut self.log {
-            panel.preset = 0; // the days picked take the place of a preset
-            if after {
-                panel.after_day = day;
-            } else {
-                panel.before_day = day;
-            }
-            panel.limit = PAGE;
+        self.preset = 0; // the days picked take the place of a preset
+        if after {
+            self.after_day = day;
+        } else {
+            self.before_day = day;
         }
+        self.limit = PAGE;
+
         self.load_log(cx);
     }
 
@@ -784,28 +862,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(panel) = &mut self.log else {
-            return;
-        };
-        panel.limit = PAGE;
+        self.limit = PAGE;
         match filter {
-            Filter::User => panel.pick_menu(filter, row),
+            Filter::User => self.pick_menu(filter, row),
             Filter::Range => return,
             Filter::Date => match date_pick(row) {
                 DatePick::Select => {
                     // the pickers are for the days; nothing is asked of git until one is picked
-                    panel.menu = Some((Filter::Range, 0));
+                    self.menu = Some((Filter::Range, 0));
                     return cx.notify();
                 }
                 pick => {
-                    panel.menu = None;
-                    panel.preset = match pick {
+                    self.menu = None;
+                    self.preset = match pick {
                         DatePick::Preset(at) => at,
                         _ => 0,
                     };
-                    panel.after_day.clear();
-                    panel.before_day.clear();
-                    for picker in [panel.after.clone(), panel.before.clone()] {
+                    self.after_day.clear();
+                    self.before_day.clear();
+                    for picker in [self.after.clone(), self.before.clone()] {
                         picker.update(cx, |picker, cx| {
                             picker.set_date(Date::Single(None), window, cx)
                         });
@@ -817,11 +892,11 @@ impl Workspace {
     }
 
     /// Tab: the keyboard goes to the next list, or out of the search box.
-    pub(crate) fn log_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn log_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.log_typing(window, cx) {
             self.focus.focus(window, cx);
-        } else if let Some(panel) = &mut self.log {
-            panel.pane = match panel.pane {
+        } else {
+            self.pane = match self.pane {
                 Pane::Refs => Pane::Commits,
                 Pane::Commits => Pane::Files,
                 Pane::Files => Pane::Refs,
@@ -831,12 +906,7 @@ impl Workspace {
     }
 
     /// Keys while the tab is showing: what is typed in the search box is the box's.
-    pub(crate) fn log_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn log_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         use zide_vim::Key;
         let key = event.keystroke.key.as_str();
         if self.log_typing(window, cx) {
@@ -852,109 +922,93 @@ impl Workspace {
             return;
         }
         let vim = crate::vim_key(event);
-        let Some(panel) = &mut self.log else {
-            return;
-        };
-        if panel.context_menu.is_some() {
+        if self.context_menu.is_some() {
             // the context menu of a commit takes every key
             let down = key == "down" || vim == Some(Key::Char('j'));
             let up = key == "up" || vim == Some(Key::Char('k'));
             cx.stop_propagation();
-            return match panel.menu_key(key, down, up) {
-                menu::MenuKey::Run(action) => self.menu_action(action, window, cx),
+            return match self.menu_key(key, down, up) {
+                menu::MenuKey::Run(action) => self.menu_action(action, cx),
                 _ => cx.notify(),
             };
         }
-        if matches!(panel.menu, Some((Filter::Range, _))) {
+        if matches!(self.menu, Some((Filter::Range, _))) {
             // the pickers read their own keys; Esc closes the popup, and not the tab
             if key == "escape" {
-                panel.menu = None;
+                self.menu = None;
                 cx.stop_propagation();
                 cx.notify();
             }
             return;
         }
         cx.stop_propagation();
-        let pane = panel.pane;
+        let pane = self.pane;
         let down = key == "down" || vim == Some(Key::Char('j'));
         let up = key == "up" || vim == Some(Key::Char('k'));
-        if let Some((filter, row)) = panel.menu {
+        if let Some((filter, row)) = self.menu {
             // an open filter list takes the keys
-            let last = panel.menu_items(filter).len().saturating_sub(1);
+            let last = self.menu_items(filter).len().saturating_sub(1);
             match key {
-                "escape" => panel.menu = None,
+                "escape" => self.menu = None,
                 "enter" => return self.pick_log_filter(filter, row, window, cx),
-                _ if down => panel.menu = Some((filter, (row + 1).min(last))),
-                _ if up => panel.menu = Some((filter, row.saturating_sub(1))),
+                _ if down => self.menu = Some((filter, (row + 1).min(last))),
+                _ if up => self.menu = Some((filter, row.saturating_sub(1))),
                 _ => {}
             }
             return cx.notify();
         }
         match key {
-            "escape" => {
-                self.log_open = false;
-                self.focus.focus(window, cx);
-                return cx.notify();
-            }
-            "/" | "p" => {
-                let input = if key == "/" {
-                    &panel.query
-                } else {
-                    &panel.paths
-                };
-                let input = input.clone();
-                input.update(cx, |state, cx| state.focus(window, cx));
-                return cx.notify();
-            }
+            "escape" => return cx.emit(LogEvent::Hide),
+            "/" | "p" => return self.focus_box(key == "p", window, cx),
             "u" => return self.toggle_log_menu(Filter::User, cx),
             "d" => return self.toggle_log_menu(Filter::Date, cx),
             _ if down || up => {
                 let delta = if down { 1 } else { -1 };
                 match pane {
                     Pane::Refs => {
-                        panel.move_ref(delta);
+                        self.move_ref(delta);
                     }
                     Pane::Commits => {
-                        let at = panel.selected.saturating_add_signed(delta);
+                        let at = self.selected.saturating_add_signed(delta);
                         self.select_log_commit(at, cx);
                         return self.scroll_log();
                     }
                     Pane::Files => {
-                        let to = panel.picks.cursor.saturating_add_signed(delta);
-                        let last = panel.files().len().saturating_sub(1);
-                        panel.picks.move_to(to.min(last), modifiers.shift);
+                        let to = self.picks.cursor.saturating_add_signed(delta);
+                        let last = self.files().len().saturating_sub(1);
+                        self.picks.move_to(to.min(last), modifiers.shift);
                     }
                 }
             }
             "pagedown" | "pageup" if pane == Pane::Commits => {
                 let delta = if key == "pagedown" { 15 } else { -15 };
-                let at = panel.selected.saturating_add_signed(delta);
+                let at = self.selected.saturating_add_signed(delta);
                 self.select_log_commit(at, cx);
                 return self.scroll_log();
             }
-            "space" if pane == Pane::Files => panel.picks.toggle(),
+            "space" if pane == Pane::Files => self.picks.toggle(),
             "enter" => match pane {
-                Pane::Refs if panel.head_cursor => return self.pick_log_head(cx),
+                Pane::Refs if self.head_cursor => return self.pick_log_head(cx),
                 Pane::Refs => {
-                    let row = panel.refs.as_ref().map_or(0, Model::selected);
+                    let row = self.refs.as_ref().map_or(0, Model::selected);
                     return self.activate_log_ref(row, cx);
                 }
-                Pane::Commits => panel.pane = Pane::Files,
-                Pane::Files => return self.show_log_diff(window, cx),
+                Pane::Commits => self.pane = Pane::Files,
+                Pane::Files => return self.show_log_diff(cx),
             },
             "left" | "right" => {
                 let open = key == "right";
                 // Right opens a closed folder, and only when there is nothing to open does it
                 // leave the tree for the commits.
-                let closed = panel.closed_ref_row();
-                match (pane, &mut panel.refs) {
-                    (Pane::Refs, Some(model)) if !panel.head_cursor && (!open || closed) => {
+                let closed = self.closed_ref_row();
+                match (pane, &mut self.refs) {
+                    (Pane::Refs, Some(model)) if !self.head_cursor && (!open || closed) => {
                         model.fold(open)
                     }
-                    (Pane::Refs, _) if open => panel.pane = Pane::Commits,
-                    (Pane::Commits, _) if open => panel.pane = Pane::Files,
-                    (Pane::Commits, _) => panel.pane = Pane::Refs,
-                    (Pane::Files, _) if !open => panel.pane = Pane::Commits,
+                    (Pane::Refs, _) if open => self.pane = Pane::Commits,
+                    (Pane::Commits, _) if open => self.pane = Pane::Files,
+                    (Pane::Commits, _) => self.pane = Pane::Refs,
+                    (Pane::Files, _) if !open => self.pane = Pane::Commits,
                     _ => {}
                 }
             }
@@ -966,31 +1020,23 @@ impl Workspace {
 
     /// Brings the selected rows of the three lists into view.
     fn scroll_log(&self) {
-        let Some(panel) = &self.log else {
-            return;
-        };
-        panel
-            .commit_scroll
-            .scroll_to_item(panel.selected, ScrollStrategy::Nearest);
-        if let Some(model) = &panel.refs {
-            panel
-                .ref_scroll
+        self.commit_scroll
+            .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+        if let Some(model) = &self.refs {
+            self.ref_scroll
                 .scroll_to_item(model.selected(), ScrollStrategy::Nearest);
         }
         let root = self.root_name();
-        let at = changed_files::rows(panel.files(), &root).iter().position(
-            |row| matches!(row, changed_files::FileRow::File { index, .. } if *index == panel.picks.cursor),
+        let at = changed_files::rows(self.files(), &root).iter().position(
+            |row| matches!(row, changed_files::FileRow::File { index, .. } if *index == self.picks.cursor),
         );
         if let Some(at) = at {
-            panel
-                .file_scroll
-                .scroll_to_item(at, ScrollStrategy::Nearest);
+            self.file_scroll.scroll_to_item(at, ScrollStrategy::Nearest);
         }
     }
 
-    pub(crate) fn log_view(&self, cx: &mut Context<Self>) -> Div {
-        let panel = self.log.as_ref().expect("the tab is open");
-        let workspace = cx.entity();
+    fn log_view(&self, cx: &mut Context<Self>) -> Div {
+        let entity = cx.entity();
         let root = self.root_name();
 
         let header = div()
@@ -1002,12 +1048,12 @@ impl Workspace {
             .flex_shrink_0()
             .border_b_1()
             .border_color(rgb(theme::BORDER))
-            .child(div().w(px(300.)).child(Input::new(&panel.query)))
-            .child(filter_menu(panel, Filter::User, &workspace))
-            .child(filter_menu(panel, Filter::Date, &workspace))
-            .child(div().w(px(200.)).child(Input::new(&panel.paths)))
-            .children(panel.scope_label().map(|label| {
-                let clear = workspace.clone();
+            .child(div().w(px(300.)).child(Input::new(&self.query)))
+            .child(filter_menu(self, Filter::User, &entity))
+            .child(filter_menu(self, Filter::Date, &entity))
+            .child(div().w(px(200.)).child(Input::new(&self.paths)))
+            .children(self.scope_label().map(|label| {
+                let clear = entity.clone();
                 div()
                     .id("log-scope")
                     .flex()
@@ -1026,18 +1072,16 @@ impl Workspace {
                             .child("×")
                             .on_click(move |_, _, cx| {
                                 clear.update(cx, |this, cx| {
-                                    if let Some(panel) = &mut this.log {
-                                        panel.scope = Scope::All;
-                                        panel.limit = PAGE;
-                                    }
+                                    this.scope = Scope::All;
+                                    this.limit = PAGE;
+
                                     this.load_log(cx);
                                 })
                             }),
                     )
             }))
             .children(
-                panel
-                    .loading
+                self.loading
                     .then(|| Spinner::new().small().color(rgb(theme::MUTED).into())),
             );
 
@@ -1049,10 +1093,9 @@ impl Workspace {
             .w_full()
             .text_color(rgb(theme::TEXT))
             .children(
-                panel
-                    .context_menu
+                self.context_menu
                     .as_ref()
-                    .map(|open| menu::view(open, &workspace)),
+                    .map(|open| menu::view(open, &entity)),
             )
             .child(header)
             .child(
@@ -1060,8 +1103,8 @@ impl Workspace {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(refs_pane(panel, &workspace))
-                    .child(commits_pane(panel, &workspace))
+                    .child(refs_pane(self, &entity))
+                    .child(commits_pane(self, &entity))
                     .child(
                         div()
                             .flex()
@@ -1074,16 +1117,16 @@ impl Workspace {
                                 div()
                                     .flex_1()
                                     .min_h_0()
-                                    .child(files_pane(panel, &root, &workspace)),
+                                    .child(files_pane(self, &root, &entity)),
                             )
-                            .child(details(panel)),
+                            .child(details(self)),
                     ),
             )
     }
 }
 
 /// A button that opens the list of `filter`; it says what the history is narrowed to.
-fn filter_menu(panel: &LogPanel, filter: Filter, workspace: &Entity<Workspace>) -> Div {
+fn filter_menu(panel: &LogPanel, filter: Filter, entity: &Entity<LogPanel>) -> Div {
     let (label, active) = match filter {
         Filter::User => match panel.authors.iter().find(|a| a.email == panel.user) {
             Some(author) => (format!("User: {}", author.name), true),
@@ -1109,7 +1152,7 @@ fn filter_menu(panel: &LogPanel, filter: Filter, workspace: &Entity<Workspace>) 
     } else {
         None
     };
-    let toggle = workspace.clone();
+    let toggle = entity.clone();
     div()
         .relative()
         .flex_shrink_0()
@@ -1178,7 +1221,7 @@ fn filter_menu(panel: &LogPanel, filter: Filter, workspace: &Entity<Workspace>) 
                 .into_iter()
                 .enumerate()
                 .map(|(row, item)| {
-                    let pick = workspace.clone();
+                    let pick = entity.clone();
                     div()
                         .id(SharedString::from(format!("log-{filter:?}-{row}")))
                         .px_2()
@@ -1238,10 +1281,10 @@ fn focus_bg(focused: bool) -> u32 {
     }
 }
 
-fn refs_pane(panel: &LogPanel, workspace: &Entity<Workspace>) -> Div {
+fn refs_pane(panel: &LogPanel, entity: &Entity<LogPanel>) -> Div {
     let focused = panel.pane == Pane::Refs;
     let head = {
-        let workspace = workspace.clone();
+        let entity = entity.clone();
         let active = panel.scope == Scope::Head;
         div()
             .id("log-head")
@@ -1257,7 +1300,7 @@ fn refs_pane(panel: &LogPanel, workspace: &Entity<Workspace>) -> Div {
             .when(active && !(panel.head_cursor && focused), |d| {
                 d.bg(rgb(focus_bg(false)))
             })
-            .on_click(move |_, _, cx| workspace.update(cx, |this, cx| this.pick_log_head(cx)))
+            .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.pick_log_head(cx)))
             .child("HEAD (Current Branch)")
     };
     let body = match &panel.refs {
@@ -1266,7 +1309,7 @@ fn refs_pane(panel: &LogPanel, workspace: &Entity<Workspace>) -> Div {
             let rows: Arc<Vec<Row>> = model.rows();
             let (cursor, scope_key) = (model.selected(), panel.scope_key());
             let cursor_in_tree = focused && !panel.head_cursor;
-            let workspace = workspace.clone();
+            let entity = entity.clone();
             let scroll = panel.ref_scroll.clone();
             div()
                 .relative()
@@ -1277,7 +1320,7 @@ fn refs_pane(panel: &LogPanel, workspace: &Entity<Workspace>) -> Div {
                         range
                             .map(|index| {
                                 let row = &rows[index];
-                                let workspace = workspace.clone();
+                                let entity = entity.clone();
                                 let line = div()
                                     .id(("log-ref", index))
                                     .w_full()
@@ -1290,17 +1333,17 @@ fn refs_pane(panel: &LogPanel, workspace: &Entity<Workspace>) -> Div {
                                     .whitespace_nowrap()
                                     .cursor_pointer()
                                     .on_click({
-                                        let workspace = workspace.clone();
+                                        let entity = entity.clone();
                                         move |_, _, cx| {
-                                            workspace.update(cx, |this, cx| {
+                                            entity.update(cx, |this, cx| {
                                                 this.activate_log_ref(index, cx)
                                             })
                                         }
                                     })
                                     .on_mouse_down(MouseButton::Right, move |event, _, cx| {
                                         let at = event.position;
-                                        workspace.update(cx, |this, cx| {
-                                            this.open_ref_menu(index, at, cx)
+                                        entity.update(cx, |_, cx| {
+                                            cx.emit(LogEvent::RefMenu { row: index, at })
                                         })
                                     });
                                 let picked = scope_key.as_deref() == Some(row.key.as_str());
@@ -1440,7 +1483,7 @@ fn ref_chip(label: &RefLabel) -> Div {
         .child(label.name.clone())
 }
 
-fn commits_pane(panel: &LogPanel, workspace: &Entity<Workspace>) -> Div {
+fn commits_pane(panel: &LogPanel, entity: &Entity<LogPanel>) -> Div {
     let body = match &panel.entries {
         Entries::Loading => note("Reading the history", true).into_any_element(),
         Entries::Failed(why) => note(why.clone(), false)
@@ -1459,22 +1502,22 @@ fn commits_pane(panel: &LogPanel, workspace: &Entity<Workspace>) -> Div {
                 .min(MAX_LANES);
             let width = LANE_WIDTH * lanes as f32 + 6.;
             let (selected, focused) = (panel.selected, panel.pane == Pane::Commits);
-            let workspace = workspace.clone();
+            let entity = entity.clone();
             div()
                 .relative()
                 .size_full()
                 .child(
                     uniform_list("log-commits", list.len(), move |range, window, cx| {
                         if more && range.end + 20 >= list.len() {
-                            let workspace = workspace.clone();
+                            let entity = entity.clone();
                             window.defer(cx, move |_, cx| {
-                                workspace.update(cx, |this, cx| this.log_more(cx))
+                                entity.update(cx, |this, cx| this.log_more(cx))
                             });
                         }
                         range
                             .map(|index| {
                                 let entry = &list[index];
-                                let workspace = workspace.clone();
+                                let entity = entity.clone();
                                 let (date, clock) = zide_git::date_and_time(
                                     entry.commit.time,
                                     entry.commit.tz_minutes,
@@ -1490,16 +1533,16 @@ fn commits_pane(panel: &LogPanel, workspace: &Entity<Workspace>) -> Div {
                                     .cursor_pointer()
                                     .when(index == selected, |d| d.bg(rgb(focus_bg(focused))))
                                     .on_click({
-                                        let workspace = workspace.clone();
+                                        let entity = entity.clone();
                                         move |_, _, cx| {
-                                            workspace.update(cx, |this, cx| {
+                                            entity.update(cx, |this, cx| {
                                                 this.select_log_commit(index, cx)
                                             })
                                         }
                                     })
                                     .on_mouse_down(MouseButton::Right, move |event, _, cx| {
                                         let at = event.position;
-                                        workspace.update(cx, |this, cx| {
+                                        entity.update(cx, |this, cx| {
                                             this.open_context_menu(index, at, cx)
                                         })
                                     })
@@ -1545,7 +1588,7 @@ fn commits_pane(panel: &LogPanel, workspace: &Entity<Workspace>) -> Div {
     div().flex_1().min_w_0().h_full().child(body)
 }
 
-fn files_pane(panel: &LogPanel, root: &str, workspace: &Entity<Workspace>) -> AnyElement {
+fn files_pane(panel: &LogPanel, root: &str, entity: &Entity<LogPanel>) -> AnyElement {
     match &panel.files {
         Files::Loading => note(
             if panel.selected_entry().is_some() {
@@ -1559,7 +1602,7 @@ fn files_pane(panel: &LogPanel, root: &str, workspace: &Entity<Workspace>) -> An
         Files::Failed(why) => note(why.clone(), false).into_any_element(),
         Files::Ready(list) if list.is_empty() => note("No files changed", false).into_any_element(),
         Files::Ready(list) => {
-            let workspace = workspace.clone();
+            let entity = entity.clone();
             changed_files::list(
                 "log-files",
                 Arc::new(changed_files::rows(list, root)),
@@ -1567,22 +1610,21 @@ fn files_pane(panel: &LogPanel, root: &str, workspace: &Entity<Workspace>) -> An
                 panel.pane == Pane::Files,
                 &panel.file_scroll,
                 {
-                    let workspace = workspace.clone();
-                    move |index, clicks, modifiers, window, cx| {
-                        workspace.update(cx, |this, cx| {
+                    let entity = entity.clone();
+                    move |index, clicks, modifiers, _, cx| {
+                        entity.update(cx, |this, cx| {
                             let ctrl = modifiers.control || modifiers.platform;
-                            if let Some(panel) = &mut this.log {
-                                panel.click_file(index, ctrl, modifiers.shift);
-                            }
+                            this.click_file(index, ctrl, modifiers.shift);
+
                             if clicks == 2 && !ctrl && !modifiers.shift {
-                                this.show_log_diff(window, cx);
+                                this.show_log_diff(cx);
                             }
                             cx.notify();
                         })
                     }
                 },
                 Some(Rc::new(move |index, at, _, cx| {
-                    workspace.update(cx, |this, cx| this.open_files_menu(index, at, cx))
+                    entity.update(cx, |this, cx| this.open_files_menu(index, at, cx))
                 })),
             )
         }

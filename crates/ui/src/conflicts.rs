@@ -18,7 +18,8 @@ use gpui_kit::*;
 use zide_git::{Conflict, Conflicts, Edit, Operation, Side};
 
 use crate::commit::{Check, check_box};
-use crate::{Workspace, file_icon, theme};
+use crate::overlay::Overlay;
+use crate::{Center, Workspace, file_icon, theme};
 
 const ROW_HEIGHT: f32 = 24.;
 
@@ -178,8 +179,8 @@ impl Workspace {
     }
 
     pub(crate) fn close_conflicts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.conflicts = None;
-        if self.claude_open {
+        self.overlay.close_conflicts();
+        if self.center == Center::Chat {
             self.focus_active_chat(window, cx);
         } else {
             self.focus.focus(window, cx);
@@ -190,7 +191,7 @@ impl Workspace {
     /// Keeps `side`'s version of the selected file and marks it resolved. Once the last file is,
     /// the dialog closes.
     fn accept(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(popup) = &mut self.conflicts else {
+        let Some(popup) = self.overlay.conflicts_mut() else {
             return;
         };
         let Some(conflict) = popup.selected_conflict().cloned() else {
@@ -229,7 +230,7 @@ impl Workspace {
         if let Err(why) = resolved {
             self.notify(Notification::error(why).title("Could not resolve it"), cx);
         }
-        match (remaining, &mut self.conflicts) {
+        match (remaining, self.overlay.conflicts_mut()) {
             (Some(remaining), Some(popup)) => popup.replace(remaining),
             (None, Some(popup)) => {
                 let operation = popup.data.operation;
@@ -271,11 +272,7 @@ impl Workspace {
                 .await;
             this.update_in(cx, |this, window, cx| {
                 this.end_busy(BUSY, cx);
-                this.commit_finished(result.is_ok(), cx);
-                this.refresh_git(cx); // the gutter compares with the new HEAD
-                this.branch = status;
-                this.rescan(cx);
-                this.reload_log(cx);
+                this.after_git(result.is_ok(), status, true, cx);
                 let what = capitalized(operation);
                 match (left, result) {
                     (Some(found), _) => {
@@ -302,18 +299,22 @@ impl Workspace {
         .detach();
     }
 
-    /// Shows `found` in the dialog, in place of any other dialog.
+    /// Shows `found` in the dialog, in place of any other dialog. Under an open merge editor the
+    /// list is brought up to date and the editor stays.
     pub(crate) fn show_conflicts(
         &mut self,
         found: Conflicts,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.overlay.merging() {
+            if let Some(popup) = self.overlay.conflicts_mut() {
+                popup.replace(found);
+            }
+            return cx.notify();
+        }
         self.popup = None;
-        self.branches = None;
-        self.push = None;
-        self.git_op = None;
-        self.conflicts = Some(ConflictsPopup::new(found));
+        self.overlay = Overlay::Conflicts(ConflictsPopup::new(found), None);
         self.focus.focus(window, cx); // the keys are read by the workspace
         cx.notify();
     }
@@ -327,7 +328,7 @@ impl Workspace {
     ) {
         use zide_vim::Key;
         cx.stop_propagation();
-        let Some(popup) = &mut self.conflicts else {
+        let Some(popup) = self.overlay.conflicts_mut() else {
             return;
         };
         match (event.keystroke.key.as_str(), crate::vim_key(event)) {
@@ -337,7 +338,7 @@ impl Workspace {
             _ => return,
         }
         let root = self.root_name();
-        if let Some(popup) = &self.conflicts {
+        if let Some(popup) = self.overlay.conflicts() {
             let at = popup
                 .rows(&root)
                 .iter()
@@ -350,7 +351,7 @@ impl Workspace {
     }
 
     pub(crate) fn conflicts_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let popup = self.conflicts.as_ref().expect("the dialog is open");
+        let popup = self.overlay.conflicts().expect("the dialog is open");
         let workspace = cx.entity();
         let rows = Arc::new(popup.rows(&self.root_name()));
         let (selected, grouped, busy) = (popup.selected, popup.grouped, popup.busy);
@@ -449,13 +450,13 @@ impl Workspace {
                                     .on_click(move |event, window, cx| {
                                         let double = event.click_count() == 2;
                                         workspace.update(cx, |this, cx| {
-                                            if let Some(popup) = &mut this.conflicts {
+                                            if let Some(popup) = this.overlay.conflicts_mut() {
                                                 popup.select(index);
                                                 cx.notify();
                                             }
                                             // a double click settles the file by hand
                                             let can_merge =
-                                                this.conflicts.as_ref().is_some_and(|popup| {
+                                                this.overlay.conflicts().is_some_and(|popup| {
                                                     popup.can_merge() && !popup.busy
                                                 });
                                             if double && can_merge {
@@ -609,7 +610,7 @@ impl Workspace {
                                     .child("Group files by directory")
                                     .on_click(move |_, _, cx| {
                                         group_toggle.update(cx, |this, cx| {
-                                            if let Some(popup) = &mut this.conflicts {
+                                            if let Some(popup) = this.overlay.conflicts_mut() {
                                                 popup.grouped = !popup.grouped;
                                                 cx.notify();
                                             }
