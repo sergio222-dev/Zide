@@ -184,15 +184,17 @@ sandbox wrapper, run **Configure Agent** in Find Action, or edit `~/.config/zide
       "args": ["claude"],
       "config_dir": "~/.sandbox-agent/.claude"
     }
-  }
+  },
+  "agent": "Sandboxed"
 }
 ```
 
 Zide runs `command args…` followed by Claude's own arguments (it speaks Claude Code's
 stream-json, not ACP), so the command must end up running `claude`. `config_dir` is where that
 Claude keeps its sessions, when it is not `~/.claude` (a sandbox with its own home): the chat
-history is read from there. Only the first entry is used. New chats use the new command; open
-ones keep theirs. **Test** in the dialog runs `--version` through the command and shows what
+history is read from there. `agent` names the one in use (without it, the first entry;
+`null` is `claude` from `PATH`). The dialog lists the agents: pick one to edit it, **Use** it,
+**Delete** it, or add a **New Agent**. New chats use the agent in use; open ones keep theirs. **Test** in the dialog runs `--version` through the command and shows what
 failed. Uninstalling with `--purge` leaves `~/.config/zide` in place.
 
 In the Git log (`Alt+3` opens it): the refs tree on the left (HEAD, Local, Remote, Tags) narrows the history to
