@@ -8971,6 +8971,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zide-acp"
+version = "0.1.14"
+dependencies = [
+ "base64 0.22.1",
+ "serde_json",
+ "zide-claude",
+]
+
+[[package]]
 name = "zide-claude"
 version = "0.1.14"
 dependencies = [
@@ -9081,6 +9090,7 @@ dependencies = [
  "serde_json",
  "shlex",
  "similar 3.2.1",
+ "zide-acp",
  "zide-claude",
  "zide-core",
  "zide-git",
