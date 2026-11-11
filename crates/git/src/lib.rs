@@ -1262,7 +1262,7 @@ mod tests {
 
     #[test]
     fn outgoing_refuses_a_detached_head() {
-        let (base, clone) = origin_and_clone("detached");
+        let (base, clone) = origin_and_clone("outgoing-detached");
         git_in(&clone, &["switch", "-q", "--detach"]);
         assert!(outgoing(&clone).unwrap_err().contains("detached"));
         fs::remove_dir_all(base).unwrap();
