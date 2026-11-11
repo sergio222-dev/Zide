@@ -13,10 +13,11 @@ Branch: refactor/improvements (rebased on origin/main). Delivery: single-pr. Tes
 
 ## Tasks
 
-- T1 S1-S5 extract `Chats` into an Entity. Route: inline (one behavior unit, no writer trigger). Status: done in "refactor(ui): move the Claude chat into its own Chats entity"; manual app check pending.
+- T1 S1-S5 extract `Chats` into an Entity. Route: inline (one behavior unit, no writer trigger). Status: done in "refactor(ui): move the Claude chat into its own Chats entity"; manual app check passed.
 
 ## Log
 
 - L1 (2026-11-11) "arranca con eso" (after: "El paso siguiente del plan es sacar `Chats` del `Workspace` y convertirlo en su propia `Entity`").
 - L2 (2026-11-11) Explorer map: chat's non-chat deps are root, center, focus, claude_bare, index, recent, autosave(), notify(). Inbound: open_claude, toggle_claude, claude_new, claude_history, claude_key, claude_view, claude_conversation, restore_conversation, focus_active_chat, Chats::overall.
 - L3 (2026-11-11) Implemented inline: `Entity<Chats>` + `impl Render`, glue `impl Workspace` in chat.rs, `ChatEvent {Hide, Info, Error}` via subscribe_in, observe for the status bar, `files`/`recent` synced in replace_index/show_file/creation, bare synced on toggle. Risk items 4 (entity update ordering) and 6 (no UI tests) -> independent verifier: no blockers, S1-S5 pass; advisories applied (visibility, docs, leftovers). build, clippy --all-targets (0 warnings), workspace tests pass. Next: user checks S5 in the app.
+- L4 (2026-11-11) User checked it in the app: "parece funcionar bien". Feature closed.
