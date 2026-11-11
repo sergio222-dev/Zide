@@ -20,11 +20,12 @@ S5. "me gustaria que esa config tenga una UI para configurar" — a "Configure A
 S6. After saving, the install check runs again and new chats use the new command; running chats keep their process.
 
 ## Tasks
-- [ ] T1 (S1-S4) zide-claude: launcher (command + prefix args + config_dir), used by session/cli/agents/history/defaults; tests. Route: inline.
-- [ ] T2 (S1,S2) zide-ui: settings file load/save (preserving other keys), applied at startup; tests. Route: inline.
-- [ ] T3 (S5,S6) zide-ui: "Configure Agent" dialog, Test, re-check on save. Route: inline.
+- [x] T1 (S1-S4) zide-claude: launcher (command + prefix args + config_dir), used by session/cli/agents/history/defaults; tests. Route: inline. 3835160
+- [x] T2 (S1,S2) zide-ui: settings file load/save (preserving other keys), applied at startup; tests. Route: inline. da121a9
+- [x] T3 (S5,S6) zide-ui: "Configure Agent" dialog, Test, re-check on save; README. Route: inline. 79e0a01 (dialog rendering not exercised: no GUI run)
 
 ## Log
 L1 (2026-11-11) "nueva feature, se quiere agregar la posibilidad de ejecutar claude/el agente con un comando especifico, esto se debe a que se va a usar un .sh con bubblewrap para aislar el agente, entonces el IDE debe soportar configurar como se llama al agente de claude, actualmente es solo el comando claude desde el PATH, se espera una configuracion como: "agent_servers": { "Agente aislado": { "command": "/home/vos/bin/agente-sandbox.sh", "args": ["mi-agente", "--acp"] } } o una interfaz visual, en un futuro se podra configurar varios agentes pero por ahora encaremos con esto."
 L2 Explained: Zide is stream-json, not ACP; args are a prefix (`["claude"]`); fake HOME hides history -> `config_dir`. ACP backend (Claude via claude-agent-acp, Copilot `--acp --stdio`) deferred to a later feature behind an `Agent` port.
 L3 "si, me gustaria que esa config tenga una UI para configurar" — read as: configurable command first (ACP later), with a UI.
+L4 (2026-11-11) T1-T3 done. RED observed per task (compile failures on missing launcher/settings/form fns), GREEN: cargo test --workspace all pass, clippy clean. No new crates in Cargo.lock (shlex already transitive). Dialog not run in a live window.
