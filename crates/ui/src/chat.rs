@@ -12,6 +12,7 @@ mod options;
 mod report;
 mod sessions;
 mod tools;
+mod workers;
 
 use std::collections::{HashMap, HashSet};
 
@@ -53,6 +54,10 @@ pub struct Chats {
     /// What each live agent's conversation is called, by session id: the title the CLI gave it
     /// or the first thing said in it, which says more than the agent's own name.
     titles: HashMap<String, String>,
+    /// The worker whose view replaces the chat area, as (its chat's id, its tool use id).
+    viewing: Option<(u64, String)>,
+    /// Where the worker view is scrolled.
+    worker_scroll: ScrollHandle,
 }
 
 impl Chats {
@@ -95,6 +100,8 @@ impl Chats {
             agents: Vec::new(),
             preview: None,
             titles: HashMap::new(),
+            viewing: None,
+            worker_scroll: ScrollHandle::new(),
         };
         chats.add(window, cx);
         chats
@@ -182,6 +189,10 @@ pub struct Chat {
     tail: bool,
     /// When the file of the conversation this chat follows was last read.
     loaded_at: Option<std::time::SystemTime>,
+    /// The subagents this chat's Claude launched, each with its own conversation.
+    workers: workers::Workers,
+    /// The rendered Markdown of the workers' text blocks, by worker and block index.
+    worker_md: HashMap<(String, usize), Entity<TextViewState>>,
     _submit: Subscription,
 }
 
@@ -246,6 +257,8 @@ impl Chat {
             title: None,
             tail: false,
             loaded_at: None,
+            workers: workers::Workers::default(),
+            worker_md: HashMap::new(),
             _submit: submit,
         }
     }
@@ -311,6 +324,31 @@ impl Chat {
                 self.markdown.insert(index, state);
             }
         }
+    }
+
+    /// Keeps the Markdown of the last block of worker `id` in step with its text.
+    fn sync_worker_markdown(&mut self, id: &str, cx: &mut App) {
+        let Some(worker) = self.workers.get(id) else {
+            return;
+        };
+        let last = worker.transcript.blocks().len().saturating_sub(1);
+        let Some(Block::Text(text)) = worker.transcript.blocks().get(last) else {
+            return;
+        };
+        match self.worker_md.get(&(id.to_owned(), last)) {
+            Some(state) => state.update(cx, |state, cx| state.set_text(text, cx)),
+            None => {
+                let state = cx.new(|cx| TextViewState::markdown(text, cx));
+                self.worker_md.insert((id.to_owned(), last), state);
+            }
+        }
+    }
+
+    /// Forgets the Markdown of the workers that are gone.
+    fn prune_worker_markdown(&mut self) {
+        let workers = &self.workers;
+        self.worker_md
+            .retain(|(id, _), _| workers.get(id).is_some());
     }
 
     /// Keeps the Markdown of the block that is growing in step with its text.
@@ -660,6 +698,14 @@ impl Workspace {
             cx.stop_propagation();
             return cx.notify();
         }
+        // the worker view has no input: Esc goes back to the chat
+        if self.claude.as_ref().is_some_and(|c| c.viewing.is_some()) {
+            if key == "escape" {
+                self.claude_leave_worker(window, cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
         if self.menu_matches(cx).is_some() {
             match key {
                 "down" => self.menu_move(1, cx),
@@ -824,18 +870,45 @@ impl Workspace {
             chats.limits = Some(*limits);
         }
         // a closed chat has no one to tell
-        let Some(chat) = self
-            .claude
-            .as_mut()
-            .and_then(|c| c.find(id))
-            .filter(|chat| chat.run == run)
-        else {
+        let Some(chats) = self.claude.as_mut() else {
             return;
         };
+        let viewed = chats
+            .viewing
+            .as_ref()
+            .filter(|(chat, _)| *chat == id)
+            .map(|(_, worker)| worker.clone());
+        let follow_worker =
+            chats.worker_scroll.max_offset().y + chats.worker_scroll.offset().y < px(8.);
+        let worker_scroll = chats.worker_scroll.clone();
+        let Some(chat) = chats.find(id).filter(|chat| chat.run == run) else {
+            return;
+        };
+        // a worker's events are its own: the chat's conversation never sees them
+        if event.is_worker() {
+            if let Some(grew) = chat.workers.apply(event, viewed.as_deref()) {
+                chat.sync_worker_markdown(&grew, cx);
+                if follow_worker && viewed.as_deref() == Some(grew.as_str()) {
+                    worker_scroll.scroll_to_bottom();
+                }
+            }
+            chat.prune_worker_markdown();
+            return cx.notify();
+        }
         let follow = chat.at_bottom();
         if matches!(event, Event::Exit) {
             chat.session = None;
+            chat.workers.clear();
+            chat.prune_worker_markdown();
+            if viewed.is_some()
+                && let Some(chats) = self.claude.as_mut()
+            {
+                chats.viewing = None;
+            }
         }
+        let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
+            return;
+        };
 
         let was_working = chat.transcript.status() == Status::Working;
         chat.transcript.apply(event);
@@ -855,6 +928,7 @@ impl Workspace {
         if !self.claude_open {
             self.toggle_claude(window, cx);
         }
+        self.claude_leave_worker(window, cx);
         if let Some(chats) = &mut self.claude {
             chats.add(window, cx);
         }
@@ -873,11 +947,50 @@ impl Workspace {
     }
 
     fn claude_activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.claude_leave_worker(window, cx);
         if let Some(chats) = self.claude.as_mut().filter(|c| index < c.list.len()) {
             chats.active = index;
         }
         self.focus_active_chat(window, cx);
         cx.notify();
+    }
+
+    /// Shows what worker `tool_use_id` of chat `chat_id` does, in place of the chat. Its chat
+    /// becomes the active one, so leaving the view goes back to it.
+    fn claude_open_worker(
+        &mut self,
+        chat_id: u64,
+        tool_use_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.claude_leave_worker(window, cx);
+        let Some(chats) = &mut self.claude else {
+            return;
+        };
+        let Some(index) = chats.list.iter().position(|chat| chat.id == chat_id) else {
+            return;
+        };
+        chats.active = index;
+        chats.viewing = Some((chat_id, tool_use_id));
+        chats.worker_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// Closes the worker view, if it is open, and goes back to the chat. A worker that
+    /// finished while it was watched leaves the list now. Says whether a view was open.
+    fn claude_leave_worker(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some((chat_id, tool_use_id)) = self.claude.as_mut().and_then(|c| c.viewing.take())
+        else {
+            return false;
+        };
+        if let Some(chat) = self.claude.as_mut().and_then(|c| c.find(chat_id)) {
+            chat.workers.left(&tool_use_id);
+            chat.prune_worker_markdown();
+        }
+        self.focus_active_chat(window, cx);
+        cx.notify();
+        true
     }
 
     /// Closes a chat; its process, if any, stops. The last one is replaced by an empty chat.
@@ -889,6 +1002,10 @@ impl Workspace {
             return;
         };
         chats.list.remove(index);
+        // its workers went with it
+        if chats.viewing.as_ref().is_some_and(|(chat, _)| *chat == id) {
+            chats.viewing = None;
+        }
         if chats.list.is_empty() {
             chats.add(window, cx);
         } else if index < chats.active || chats.active >= chats.list.len() {
@@ -1169,6 +1286,87 @@ impl Workspace {
                 )
                 .children(backgrounds)
         });
+        let worker_rows = chats
+            .list
+            .iter()
+            .flat_map(|chat| {
+                chat.workers
+                    .list()
+                    .iter()
+                    .map(move |worker| (chat.id, worker))
+            })
+            .map(|(chat_id, worker)| {
+                let viewed = chats
+                    .viewing
+                    .as_ref()
+                    .is_some_and(|(chat, tool)| *chat == chat_id && *tool == worker.tool_use_id);
+                let color = if worker.finished {
+                    theme::DIM
+                } else {
+                    theme::WORKING
+                };
+                let detail = match &worker.activity {
+                    Some(activity) => format!("{} · {activity}", worker.kind),
+                    None => worker.kind.clone(),
+                };
+                let tool_use_id = worker.tool_use_id.clone();
+                div()
+                    .id(SharedString::from(format!(
+                        "worker-row-{}",
+                        worker.tool_use_id
+                    )))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .cursor_pointer()
+                    .bg(rgb(if viewed {
+                        theme::TREE_SELECTED
+                    } else {
+                        theme::BACKGROUND
+                    }))
+                    .hover(|row| row.bg(rgb(theme::TREE_SELECTED)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.claude_open_worker(chat_id, tool_use_id.clone(), window, cx)
+                    }))
+                    .child(div().flex_none().size_2().rounded_full().bg(rgb(color)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_color(rgb(theme::STRONG))
+                                    .child(worker.description.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(rgb(theme::MUTED))
+                                    .child(detail),
+                            ),
+                    )
+            })
+            .collect::<Vec<_>>();
+        let worker_section = (!worker_rows.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .border_t_1()
+                        .border_b_1()
+                        .border_color(rgb(theme::BORDER))
+                        .text_color(rgb(theme::MUTED))
+                        .child(format!("Workers ({})", worker_rows.len())),
+                )
+                .children(worker_rows)
+        });
         div()
             .flex()
             .flex_col()
@@ -1201,7 +1399,99 @@ impl Workspace {
                     .overflow_y_scroll()
                     .children(rows)
                     .children(others)
-                    .children(background_section),
+                    .children(background_section)
+                    .children(worker_section),
+            )
+    }
+
+    /// What a worker does, read-only, in place of the chat: its blocks drawn as the chat
+    /// draws its own, under a header that says what it is and a way back.
+    fn worker_view(&self, chat: &Chat, worker: &workers::Worker, cx: &mut Context<Self>) -> Div {
+        let Some(chats) = &self.claude else {
+            return div();
+        };
+        let blocks = worker
+            .transcript
+            .blocks()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| match block {
+                Block::Text(text) => Some(text_view(
+                    chat.worker_md.get(&(worker.tool_use_id.clone(), index)),
+                    text,
+                )),
+                Block::Thinking(text) => Some(thinking_view(text)),
+                Block::Tool(call) => Some(self.tool_card(chat, call, cx).into_any_element()),
+                // a worker asks nothing of the user: the CLI decides for it
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let (color, state) = if worker.finished {
+            (theme::DIM, "Finished")
+        } else {
+            (theme::WORKING, "Working")
+        };
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_4()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(theme::BORDER))
+                    .child(Button::new("worker-back").ghost().label("← Back").on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.claude_leave_worker(window, cx);
+                        }),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(rgb(theme::STRONG))
+                            .child(worker.description.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(theme::MUTED))
+                            .child(worker.kind.clone()),
+                    )
+                    .child(div().text_sm().text_color(rgb(color)).child(state)),
+            )
+            .child(
+                div()
+                    .id("worker-history")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&chats.worker_scroll)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .p_4()
+                            .max_w(px(900.))
+                            .mx_auto()
+                            .children(blocks)
+                            .children(worker.activity.iter().filter(|_| !worker.finished).map(
+                                |activity| {
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(theme::WORKING))
+                                        .child(activity.clone())
+                                },
+                            )),
+                    ),
             )
     }
 
@@ -1215,6 +1505,27 @@ impl Workspace {
             return div();
         };
         let chat = chats.active();
+        let worker = chats
+            .viewing
+            .as_ref()
+            .filter(|(id, _)| *id == chat.id)
+            .and_then(|(_, tool)| chat.workers.get(tool));
+        if let Some(worker) = worker {
+            let view = self.worker_view(chat, worker, cx);
+            let panel = self.claude_panel(chats, cx);
+            return div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .text_color(rgb(theme::TEXT))
+                .child(panel)
+                .child(
+                    view.relative()
+                        .children(popup)
+                        .children(self.preview_view(cx)),
+                );
+        }
         let total = chat.transcript.blocks().len();
         let hidden = hidden_blocks(total, chat.shown);
         let blocks = chat
@@ -1373,22 +1684,8 @@ impl Workspace {
             Block::Text(text) if chat.report_md.contains_key(&(index, 0)) => {
                 self.report_view(chat, index, text, cx)
             }
-            Block::Text(text) => match chat.markdown.get(&index) {
-                Some(state) => div()
-                    .child(
-                        TextView::new(state)
-                            .inline_code_style(crate::markdown::inline_code())
-                            .selectable(true),
-                    )
-                    .into_any_element(),
-                None => div().child(text.clone()).into_any_element(),
-            },
-            Block::Thinking(text) => div()
-                .text_sm()
-                .italic()
-                .text_color(rgb(theme::DIM))
-                .child(text.clone())
-                .into_any_element(),
+            Block::Text(text) => text_view(chat.markdown.get(&index), text),
+            Block::Thinking(text) => thinking_view(text),
             Block::Tool(call) => self.tool_card(chat, call, cx).into_any_element(),
             Block::Permission(permission) => self.permission_card(chat.id, index, permission, cx),
             Block::Question(ask) => self.ask_card(chat, ask, cx),
@@ -1463,6 +1760,29 @@ impl Workspace {
         }
         .into_any_element()
     }
+}
+
+/// An assistant text block: its Markdown once made, the plain text until then.
+fn text_view(markdown: Option<&Entity<TextViewState>>, text: &str) -> AnyElement {
+    match markdown {
+        Some(state) => div()
+            .child(
+                TextView::new(state)
+                    .inline_code_style(crate::markdown::inline_code())
+                    .selectable(true),
+            )
+            .into_any_element(),
+        None => div().child(text.to_owned()).into_any_element(),
+    }
+}
+
+fn thinking_view(text: &str) -> AnyElement {
+    div()
+        .text_sm()
+        .italic()
+        .text_color(rgb(theme::DIM))
+        .child(text.to_owned())
+        .into_any_element()
 }
 
 /// The argument of a tool that says most about what it does, on one line.

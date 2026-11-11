@@ -101,11 +101,20 @@ impl Workspace {
         let Some(chats) = &mut self.claude else {
             return;
         };
+        let viewed = chats
+            .viewing
+            .as_ref()
+            .filter(|(id, _)| *id == chats.list[chats.active].id)
+            .map(|(_, tool)| tool.clone());
         let chat = chats.active_mut();
+        // a worker's edits are numbered too; tool call ids never repeat, so they share the map
+        let worker = viewed.and_then(|tool| chat.workers.get(&tool));
+        let worker_blocks = worker.map_or(&[][..], |w| w.transcript.blocks());
         let missing: Vec<(String, Vec<usize>)> = chat
             .transcript
             .blocks()
             .iter()
+            .chain(worker_blocks)
             .filter_map(|block| match block {
                 Block::Tool(call)
                     if matches!(call.name.as_str(), "Edit" | "MultiEdit")

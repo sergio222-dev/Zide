@@ -235,6 +235,8 @@ impl Chat {
         self.run += 1;
         self.session = None;
         self.transcript.apply(Event::Exit);
+        self.workers.clear();
+        self.prune_worker_markdown();
     }
 }
 

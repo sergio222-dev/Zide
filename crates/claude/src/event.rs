@@ -107,8 +107,46 @@ pub enum Event {
         input: Value,
         questions: Vec<Question>,
     },
+    /// A worker (a subagent the assistant launched with its `Agent` tool) started.
+    /// `tool_use_id` is that `Agent` call, which names the worker in the events that follow.
+    WorkerStarted {
+        tool_use_id: String,
+        description: String,
+        /// The subagent type, e.g. `general-purpose`.
+        kind: String,
+    },
+    /// What the worker `tool_use_id` did: a `TextDelta` (a whole text block, as workers do
+    /// not stream), `ThinkingDelta`, `ToolUse` or `ToolResult` of its own conversation.
+    /// Kept apart so it never enters the conversation the user is having.
+    Worker {
+        tool_use_id: String,
+        event: Box<Event>,
+    },
+    /// What the worker is doing right now, in a few words.
+    WorkerActivity {
+        tool_use_id: String,
+        activity: String,
+    },
+    /// The worker is over: `completed`, or `failed`, `killed`, `stopped`.
+    WorkerEnded {
+        tool_use_id: String,
+        status: String,
+    },
     /// The process is gone; nothing more will arrive.
     Exit,
+}
+
+impl Event {
+    /// Whether the event belongs to a worker rather than to the conversation itself.
+    pub fn is_worker(&self) -> bool {
+        matches!(
+            self,
+            Event::WorkerStarted { .. }
+                | Event::Worker { .. }
+                | Event::WorkerActivity { .. }
+                | Event::WorkerEnded { .. }
+        )
+    }
 }
 
 fn parse_questions(input: &Value) -> Vec<Question> {
@@ -166,12 +204,39 @@ pub fn parse_events(line: &str) -> Vec<Event> {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return Vec::new();
     };
-    // A subagent's own messages are not part of the conversation the user is having.
-    if value["parent_tool_use_id"].is_string() {
-        return Vec::new();
+    // A subagent's own messages are not part of the conversation the user is having: they
+    // only come out wrapped, for the worker they belong to.
+    if let Some(parent) = value["parent_tool_use_id"].as_str() {
+        return worker_events(&value, parent);
     }
     let text = |v: &Value| v.as_str().unwrap_or_default().to_owned();
     match value["type"].as_str().unwrap_or_default() {
+        "system" if value["subtype"] == "task_started" => value["tool_use_id"]
+            .as_str()
+            .map(|id| Event::WorkerStarted {
+                tool_use_id: id.to_owned(),
+                description: text(&value["description"]),
+                kind: text(&value["subagent_type"]),
+            })
+            .into_iter()
+            .collect(),
+        "system" if value["subtype"] == "task_progress" => value["tool_use_id"]
+            .as_str()
+            .zip(value["description"].as_str())
+            .map(|(id, activity)| Event::WorkerActivity {
+                tool_use_id: id.to_owned(),
+                activity: activity.to_owned(),
+            })
+            .into_iter()
+            .collect(),
+        "system" if value["subtype"] == "task_notification" => value["tool_use_id"]
+            .as_str()
+            .map(|id| Event::WorkerEnded {
+                tool_use_id: id.to_owned(),
+                status: text(&value["status"]),
+            })
+            .into_iter()
+            .collect(),
         "system" if value["subtype"] == "init" => value["session_id"]
             .as_str()
             .map(|id| Event::Init {
@@ -285,6 +350,51 @@ pub fn parse_events(line: &str) -> Vec<Event> {
         }
         _ => Vec::new(),
     }
+}
+
+/// The events of a line of the worker `parent`'s own conversation. Workers send whole
+/// messages, so a text block is one `TextDelta`; stream deltas, if any came, would repeat
+/// those messages and are left out.
+fn worker_events(value: &Value, parent: &str) -> Vec<Event> {
+    let blocks = value["message"]["content"].as_array().into_iter().flatten();
+    let events: Vec<Event> = match value["type"].as_str().unwrap_or_default() {
+        "assistant" => blocks
+            .filter_map(|block| match block["type"].as_str()? {
+                "text" => block["text"]
+                    .as_str()
+                    .filter(|t| !t.is_empty())
+                    .map(|t| Event::TextDelta(t.to_owned())),
+                "thinking" => block["thinking"]
+                    .as_str()
+                    .filter(|t| !t.is_empty())
+                    .map(|t| Event::ThinkingDelta(t.to_owned())),
+                "tool_use" => Some(Event::ToolUse {
+                    id: block["id"].as_str()?.to_owned(),
+                    name: block["name"].as_str()?.to_owned(),
+                    input: block["input"].clone(),
+                }),
+                _ => None,
+            })
+            .collect(),
+        "user" => blocks
+            .filter(|block| block["type"] == "tool_result")
+            .filter_map(|block| {
+                Some(Event::ToolResult {
+                    tool_use_id: block["tool_use_id"].as_str()?.to_owned(),
+                    output: tool_output(&block["content"]),
+                    is_error: block["is_error"].as_bool().unwrap_or(false),
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    events
+        .into_iter()
+        .map(|event| Event::Worker {
+            tool_use_id: parent.to_owned(),
+            event: Box::new(event),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -440,11 +550,65 @@ mod tests {
     }
 
     #[test]
-    fn a_subagents_messages_are_left_out() {
-        let line = r#"{"type":"assistant","parent_tool_use_id":"t9","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#;
-        assert_eq!(parse_events(line), vec![]);
+    fn a_subagents_messages_come_out_wrapped_for_its_worker() {
+        let line = r#"{"type":"assistant","parent_tool_use_id":"t9","message":{"content":[{"type":"thinking","thinking":"hm"},{"type":"text","text":"hi"},{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#;
+        let wrap = |event| Event::Worker {
+            tool_use_id: "t9".into(),
+            event: Box::new(event),
+        };
+        assert_eq!(
+            parse_events(line),
+            [
+                wrap(Event::ThinkingDelta("hm".into())),
+                wrap(Event::TextDelta("hi".into())),
+                wrap(Event::ToolUse {
+                    id: "t1".into(),
+                    name: "Bash".into(),
+                    input: json!({}),
+                }),
+            ]
+        );
+        let result = r#"{"type":"user","parent_tool_use_id":"t9","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#;
+        assert_eq!(
+            parse_events(result),
+            [wrap(Event::ToolResult {
+                tool_use_id: "t1".into(),
+                output: "ok".into(),
+                is_error: false,
+            })]
+        );
+        // whole messages come anyway: a delta would say the same thing twice
         let delta = r#"{"type":"stream_event","parent_tool_use_id":"t9","event":{"delta":{"type":"text_delta","text":"x"}}}"#;
         assert_eq!(parse_events(delta), vec![]);
+    }
+
+    #[test]
+    fn a_worker_starts_works_and_ends() {
+        let started = r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"t9","description":"count files","subagent_type":"general-purpose"}"#;
+        assert_eq!(
+            one(started),
+            Event::WorkerStarted {
+                tool_use_id: "t9".into(),
+                description: "count files".into(),
+                kind: "general-purpose".into(),
+            }
+        );
+        let progress = r#"{"type":"system","subtype":"task_progress","tool_use_id":"t9","description":"Reading x"}"#;
+        assert_eq!(
+            one(progress),
+            Event::WorkerActivity {
+                tool_use_id: "t9".into(),
+                activity: "Reading x".into(),
+            }
+        );
+        let ended = r#"{"type":"system","subtype":"task_notification","tool_use_id":"t9","status":"failed"}"#;
+        assert_eq!(
+            one(ended),
+            Event::WorkerEnded {
+                tool_use_id: "t9".into(),
+                status: "failed".into(),
+            }
+        );
     }
 
     #[test]
