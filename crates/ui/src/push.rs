@@ -91,7 +91,14 @@ impl PushPopup {
         self.outgoing()?.commits.get(self.commit)
     }
 
+    /// The branch and its remote are known; with no commits to send, a push still sets the
+    /// upstream (and sends the tags, when asked).
     pub fn can_push(&self) -> bool {
+        self.outgoing().is_some()
+    }
+
+    /// There are commits to send, whose files the other list shows.
+    fn has_commits(&self) -> bool {
         self.outgoing()
             .is_some_and(|outgoing| !outgoing.commits.is_empty())
     }
@@ -264,12 +271,15 @@ impl Workspace {
             return;
         };
         let tags = popup.tags;
-        let done = format!(
-            "Pushed {} to {}/{}",
-            plural(outgoing.commits.len(), "commit"),
-            outgoing.remote,
-            outgoing.branch
-        );
+        let done = match outgoing.commits.len() {
+            0 => format!("Pushed to {}/{}", outgoing.remote, outgoing.branch),
+            count => format!(
+                "Pushed {} to {}/{}",
+                plural(count, "commit"),
+                outgoing.remote,
+                outgoing.branch
+            ),
+        };
         self.close_push(window, cx);
         self.git_task(
             "Could not push",
@@ -591,8 +601,8 @@ fn file_list(popup: &PushPopup, root: &str, workspace: &Entity<Workspace>) -> An
     match &popup.files {
         Files::Loading => {
             return note(
-                if popup.can_push() { "Loading" } else { "" },
-                popup.can_push(),
+                if popup.has_commits() { "Loading" } else { "" },
+                popup.has_commits(),
             )
             .into_any_element();
         }
@@ -705,10 +715,12 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn only_a_branch_with_commits_can_be_pushed() {
-        assert!(!PushPopup::default().can_push());
-        assert!(!popup_with(&[]).can_push());
+    fn a_branch_whose_remote_is_known_can_be_pushed_even_with_nothing_new() {
+        assert!(!PushPopup::default().can_push(), "still loading");
+        assert!(popup_with(&[]).can_push());
+        assert!(!popup_with(&[]).has_commits());
         assert!(popup_with(&[("a1", "one")]).can_push());
+        assert!(popup_with(&[("a1", "one")]).has_commits());
         let mut failed = PushPopup::default();
         failed.set_outgoing(Err("HEAD is detached".into()));
         assert!(!failed.can_push());
