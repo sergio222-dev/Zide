@@ -626,6 +626,13 @@ impl Workspace {
         }
     }
 
+    /// Ctrl+F while the tab is showing: the search box.
+    pub(crate) fn focus_log_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(log) = &self.log {
+            log.update(cx, |log, cx| log.focus_box(false, window, cx));
+        }
+    }
+
     /// Tab while the tab is showing.
     pub(crate) fn log_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(log) = &self.log {
@@ -652,6 +659,13 @@ impl LogPanel {
         self.root
             .file_name()
             .map_or_else(|| ".".into(), |name| name.to_string_lossy().into_owned())
+    }
+
+    /// Puts the cursor in the search box (`/`, Ctrl+F), or in the paths box (`p`).
+    fn focus_box(&self, paths: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let input = if paths { &self.paths } else { &self.query }.clone();
+        input.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
     }
 
     /// The history and the refs read again.
@@ -949,12 +963,7 @@ impl LogPanel {
         }
         match key {
             "escape" => return cx.emit(LogEvent::Hide),
-            "/" | "p" => {
-                let input = if key == "/" { &self.query } else { &self.paths };
-                let input = input.clone();
-                input.update(cx, |state, cx| state.focus(window, cx));
-                return cx.notify();
-            }
+            "/" | "p" => return self.focus_box(key == "p", window, cx),
             "u" => return self.toggle_log_menu(Filter::User, cx),
             "d" => return self.toggle_log_menu(Filter::Date, cx),
             _ if down || up => {

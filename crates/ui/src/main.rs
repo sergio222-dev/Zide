@@ -1244,8 +1244,10 @@ impl Workspace {
     fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         // the panel is the editor's: under the chat or the log its box is not drawn, and the
         // focus would go to nothing on screen, leaving every key unheard until a click
-        if self.center != Center::Editor {
-            return;
+        match self.center {
+            Center::Editor => {}
+            Center::Log => return self.focus_log_search(window, cx),
+            Center::Chat => return,
         }
         let Some(viewer) = &self.viewer else {
             return;
