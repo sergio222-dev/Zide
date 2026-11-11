@@ -718,6 +718,44 @@ pub fn push_tags(root: &Path, remote: &str) -> Result<(), String> {
     run(root, &["push", "--tags", remote], true).map(drop)
 }
 
+/// Pushes the tag `name` to `remote`.
+pub fn push_tag(root: &Path, remote: &str, name: &str) -> Result<(), String> {
+    run(root, &["push", remote, &format!("refs/tags/{name}")], true).map(drop)
+}
+
+/// Brings the branches and tags of every remote up to date, dropping the remote branches that
+/// are gone.
+pub fn fetch(root: &Path) -> Result<(), String> {
+    run(
+        root,
+        &["fetch", "--all", "--prune", "--tags", "--quiet"],
+        true,
+    )
+    .map(drop)
+}
+
+/// The tags `remote` has, sorted. Asks the remote: git keeps no record of it.
+pub fn remote_tags(root: &Path, remote: &str) -> Result<Vec<String>, String> {
+    let listed = run(root, &["ls-remote", "--tags", "--refs", remote], true)?;
+    let mut tags: Vec<String> = listed
+        .lines()
+        .filter_map(|line| line.split_once("\trefs/tags/"))
+        .map(|(_, name)| name.to_string())
+        .collect();
+    tags.sort();
+    Ok(tags)
+}
+
+/// Deletes the local branch `name`; git refuses when its commits are not merged anywhere.
+pub fn delete_branch(root: &Path, name: &str) -> Result<(), String> {
+    run(root, &["branch", "--delete", name], false).map(drop)
+}
+
+/// Deletes the local tag `name`; the remotes keep theirs.
+pub fn delete_tag(root: &Path, name: &str) -> Result<(), String> {
+    run(root, &["tag", "--delete", name], false).map(drop)
+}
+
 /// What to check out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Switch {
@@ -1265,6 +1303,67 @@ mod tests {
         let (base, clone) = origin_and_clone("outgoing-detached");
         git_in(&clone, &["switch", "-q", "--detach"]);
         assert!(outgoing(&clone).unwrap_err().contains("detached"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_fetch_brings_new_and_drops_deleted_remote_branches() {
+        let (base, clone) = origin_and_clone("fetch");
+        let origin = base.join("origin");
+        git_in(&origin, &["branch", "gone"]);
+        git_in(&clone, &["fetch", "-q", "origin"]);
+        git_in(&origin, &["branch", "-D", "gone"]);
+        git_in(&origin, &["branch", "feat/new"]);
+        git_in(&origin, &["tag", "v1"]);
+
+        assert_eq!(fetch(&clone), Ok(()));
+        let found = branches(&clone).unwrap();
+        assert!(found.remote.contains(&"origin/feat/new".to_string()));
+        assert!(!found.remote.contains(&"origin/gone".to_string()), "pruned");
+        assert!(found.tags.contains(&"v1".to_string()), "tags come too");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_tag_is_on_the_remote_once_it_is_pushed_and_deleting_it_is_local() {
+        let (base, clone) = origin_and_clone("tags");
+        git_in(&clone, &["tag", "v1"]);
+        git_in(&clone, &["tag", "v2"]);
+        assert_eq!(remote_tags(&clone, "origin"), Ok(Vec::new()));
+
+        assert_eq!(push_tag(&clone, "origin", "v1"), Ok(()));
+        assert_eq!(remote_tags(&clone, "origin"), Ok(vec!["v1".to_string()]));
+
+        assert_eq!(delete_tag(&clone, "v1"), Ok(()));
+        assert_eq!(branches(&clone).unwrap().tags, ["v2"]);
+        assert_eq!(remote_tags(&clone, "origin"), Ok(vec!["v1".to_string()]));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_branch_refuses_one_that_is_not_merged() {
+        let (base, clone) = origin_and_clone("delete-branch");
+        git_in(&clone, &["branch", "merged"]);
+        git_in(&clone, &["switch", "-q", "-c", "unmerged"]);
+        git_in(
+            &clone,
+            &["commit", "-q", "--allow-empty", "-m", "only here"],
+        );
+        git_in(&clone, &["switch", "-q", "main"]);
+
+        assert_eq!(delete_branch(&clone, "merged"), Ok(()));
+        assert!(
+            delete_branch(&clone, "unmerged")
+                .unwrap_err()
+                .contains("not fully merged")
+        );
+        let names: Vec<_> = branches(&clone)
+            .unwrap()
+            .local
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert_eq!(names, ["main", "unmerged"]);
         fs::remove_dir_all(base).unwrap();
     }
 
