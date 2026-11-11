@@ -60,6 +60,13 @@ fn ago(elapsed: Duration) -> String {
 impl Workspace {
     /// Opens the list of earlier conversations over the chat (showing the chat first).
     pub(crate) fn claude_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // the earlier conversations are Claude Code's; they would resume through the ACP agent
+        if crate::settings::protocol() == crate::settings::Protocol::Acp {
+            let note = gpui_kit::component::notification::Notification::info(
+                "Earlier conversations are Claude's: pick a Claude agent in Configure Agent to resume one",
+            );
+            return self.notify(note, cx);
+        }
         if !self.claude_open {
             self.toggle_claude(window, cx);
         }

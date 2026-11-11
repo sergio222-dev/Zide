@@ -15,6 +15,7 @@ mod tools;
 
 use std::collections::{HashMap, HashSet};
 
+use crate::settings::Protocol;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::notification::Notification;
@@ -143,6 +144,10 @@ pub struct Chat {
     _slider: Subscription,
     /// `None` until the first message, and again once the process has exited.
     session: Option<Box<dyn AgentSession>>,
+    /// The agent the chat was opened with, kept for its whole life: changing the agent in
+    /// the settings is for new chats, and a transcript belongs to one protocol.
+    launcher: zide_claude::Launcher,
+    protocol: Protocol,
     input: Entity<TextareaState>,
     /// The rendered Markdown of each assistant text block, by block index.
     markdown: HashMap<usize, Entity<TextViewState>>,
@@ -222,6 +227,8 @@ impl Chat {
             bare: false,
             _slider: slider,
             session: None,
+            launcher: zide_claude::launcher(),
+            protocol: crate::settings::protocol(),
             input,
             markdown: HashMap::new(),
             report_md: HashMap::new(),
@@ -377,6 +384,10 @@ impl Workspace {
     /// Asks `claude agents` now; the list changes only when the answer does. The chats that
     /// follow another process re-read their session too.
     fn refresh_agents(&mut self, cx: &mut Context<Self>) {
+        // background agents are Claude Code's: an ACP agent's command does not know `agents`
+        if crate::settings::protocol() == Protocol::Acp {
+            return;
+        }
         let root = self.root.clone();
         let followed: Vec<(u64, String, Option<std::time::SystemTime>)> = self
             .claude
@@ -742,16 +753,27 @@ impl Workspace {
         let Some(chat) = self.claude.as_mut().and_then(|c| c.find(id)) else {
             return Ok(());
         };
-        let resume = chat.transcript.session_id().map(str::to_owned);
-        let options = Options {
-            resume: resume.as_deref(),
-            model: chat.model.as_deref(),
-            effort: chat.effort.as_deref(),
-            minimal: bare,
-            ..Options::default()
+        let (session, events): (Box<dyn AgentSession>, _) = match chat.protocol {
+            Protocol::Claude => {
+                let resume = chat.transcript.session_id().map(str::to_owned);
+                let options = Options {
+                    launcher: Some(&chat.launcher),
+                    resume: resume.as_deref(),
+                    model: chat.model.as_deref(),
+                    effort: chat.effort.as_deref(),
+                    minimal: bare,
+                    ..Options::default()
+                };
+                let (session, events) = Session::spawn(&self.root, options)?;
+                (Box::new(session), events)
+            }
+            // a new session each time: resuming one is for a later version (`session/load`)
+            Protocol::Acp => {
+                let (session, events) = zide_acp::spawn(&chat.launcher, &self.root)?;
+                (Box::new(session), events)
+            }
         };
-        let (session, events) = Session::spawn(&self.root, options)?;
-        chat.session = Some(Box::new(session));
+        chat.session = Some(session);
         chat.bare = bare;
         chat.run += 1;
         let run = chat.run;

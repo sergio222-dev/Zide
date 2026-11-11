@@ -10,7 +10,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::Value;
 
-use crate::settings::{self, AgentServer};
+use crate::settings::{self, AgentServer, Protocol};
 use crate::{Workspace, theme};
 
 /// The name of an entry saved without one.
@@ -32,6 +32,7 @@ pub fn agent_from_form(
     command: &str,
     args: &str,
     config_dir: &str,
+    protocol: Protocol,
 ) -> Result<AgentServer, String> {
     let command = command.trim();
     if command.is_empty() {
@@ -44,6 +45,7 @@ pub fn agent_from_form(
         command: command.to_string(),
         args: parse_args(args)?,
         config_dir: (!config_dir.is_empty()).then(|| config_dir.to_string()),
+        protocol,
     })
 }
 
@@ -65,6 +67,8 @@ pub struct AgentForm {
     command: Entity<InputState>,
     args: Entity<InputState>,
     config_dir: Entity<InputState>,
+    /// The protocol picked for the selected agent.
+    protocol: Protocol,
     testing: bool,
     /// The outcome of the last action, and whether it went well.
     message: Option<(bool, String)>,
@@ -84,6 +88,7 @@ impl AgentForm {
             workspace,
             file: Value::Null,
             selected: Selected::Path,
+            protocol: Protocol::Claude,
             name: field(DEFAULT_NAME),
             command: field("/path/to/agent-sandbox.sh"),
             args: field("claude"),
@@ -127,6 +132,7 @@ impl AgentForm {
         for (input, value) in values {
             input.update(cx, |state, cx| state.set_value(value, window, cx));
         }
+        self.protocol = agent.protocol;
         self.selected = selected;
         self.message = None;
         cx.notify();
@@ -139,6 +145,7 @@ impl AgentForm {
             &value(&self.command),
             &value(&self.args),
             &value(&self.config_dir),
+            self.protocol,
         )
     }
 
@@ -250,12 +257,13 @@ impl AgentForm {
         );
     }
 
-    /// Runs `--version` through what the form says (unsaved), or through `PATH`'s claude.
+    /// Checks what the form says (unsaved), or `PATH`'s claude: `--version` for Claude, the
+    /// `initialize` handshake for an ACP agent.
     fn test(&mut self, cx: &mut Context<Self>) {
-        let launcher = match &self.selected {
-            Selected::Path => zide_claude::Launcher::default(),
+        let (launcher, protocol) = match &self.selected {
+            Selected::Path => (zide_claude::Launcher::default(), Protocol::Claude),
             _ => match self.form(cx) {
-                Ok(agent) => agent.launcher(),
+                Ok(agent) => (agent.launcher(), agent.protocol),
                 Err(why) => {
                     self.message = Some((false, why));
                     return cx.notify();
@@ -268,11 +276,26 @@ impl AgentForm {
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
-                .spawn(async move { zide_claude::probe(&launcher) })
+                .spawn(async move {
+                    match protocol {
+                        Protocol::Claude => Ok(zide_claude::probe(&launcher)),
+                        Protocol::Acp => Err(zide_acp::probe(&launcher)),
+                    }
+                })
                 .await;
             this.update(cx, |this, cx| {
                 this.testing = false;
                 let text = |v: zide_claude::Version| format!("{}.{}.{}", v.major, v.minor, v.patch);
+                let outcome = match outcome {
+                    Ok(claude) => claude,
+                    Err(acp) => {
+                        this.message = Some(match acp {
+                            Ok(agent) => (true, format!("{agent} answered")),
+                            Err(why) => (false, why),
+                        });
+                        return cx.notify();
+                    }
+                };
                 this.message = Some(match outcome {
                     Ok(version) if version.is_supported() => {
                         (true, format!("Claude {} answered", text(version)))
@@ -292,6 +315,39 @@ impl AgentForm {
             .ok();
         })
         .detach();
+    }
+
+    /// Claude Code's stream-json, or the Agent Client Protocol other agents speak.
+    fn protocol_row(&self, cx: &mut Context<Self>) -> Div {
+        let choice = |id: &'static str, label: &'static str, protocol: Protocol| {
+            let button = Button::new(id).label(label).on_click(cx.listener(
+                move |this: &mut Self, _, _, cx| {
+                    this.protocol = protocol;
+                    this.message = None;
+                    cx.notify();
+                },
+            ));
+            if self.protocol == protocol {
+                button.primary()
+            } else {
+                button.ghost()
+            }
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().text_color(rgb(theme::TEXT)).child("Protocol"))
+            .child(choice("protocol-claude", "Claude Code", Protocol::Claude))
+            .child(choice("protocol-acp", "ACP", Protocol::Acp))
+            .child(
+                div()
+                    .text_color(rgb(theme::DIM))
+                    .child(match self.protocol {
+                        Protocol::Claude => "the command runs claude",
+                        Protocol::Acp => "e.g. copilot --acp --stdio",
+                    }),
+            )
     }
 
     /// Whether `selected` is the one new chats start with.
@@ -387,15 +443,20 @@ impl Render for AgentForm {
             .flex()
             .flex_col()
             .gap_3()
-            .child(div().text_color(rgb(theme::MUTED)).child(if editing {
-                "Zide runs `command args…` followed by Claude's own arguments, so the command \
-                 must end up running claude."
-            } else {
+            .child(div().text_color(rgb(theme::MUTED)).child(if !editing {
                 "Claude found on PATH (or its usual install places), with its own config in \
                  ~/.claude."
+            } else if self.protocol == Protocol::Acp {
+                "Zide runs `command args…` and speaks the Agent Client Protocol on its stdin \
+                 and stdout. Claude's gauges, model and effort, history and background agents \
+                 are not offered for it."
+            } else {
+                "Zide runs `command args…` followed by Claude's own arguments, so the command \
+                 must end up running claude."
             }))
             .when(editing, |details| {
                 details
+                    .child(self.protocol_row(cx))
                     .child(row("Name", "", &self.name))
                     .child(row(
                         "Command",
@@ -514,20 +575,30 @@ mod tests {
     #[::core::prelude::v1::test]
     fn the_form_becomes_an_entry() {
         assert_eq!(
-            agent_from_form("Sandboxed", " ~/bin/a.sh ", "claude", " ~/.s/.claude "),
+            agent_from_form(
+                "Sandboxed",
+                " ~/bin/a.sh ",
+                "claude",
+                " ~/.s/.claude ",
+                Protocol::Claude
+            ),
             Ok(AgentServer {
                 name: "Sandboxed".into(),
                 command: "~/bin/a.sh".into(),
                 args: vec!["claude".into()],
                 config_dir: Some("~/.s/.claude".into()),
+                ..AgentServer::default()
             })
         );
         // no name: a generic one; no config dir: none
-        let unnamed = agent_from_form(" ", "/bin/a.sh", "", "").unwrap();
+        let unnamed = agent_from_form(" ", "/bin/a.sh", "", "", Protocol::Claude).unwrap();
         assert_eq!(unnamed.name, DEFAULT_NAME);
         assert_eq!(unnamed.config_dir, None);
         // an agent needs a command; quotes must close
-        assert!(agent_from_form("x", "  ", "claude", "").is_err());
-        assert!(agent_from_form("x", "/bin/a.sh", "\"oops", "").is_err());
+        assert!(agent_from_form("x", "  ", "claude", "", Protocol::Claude).is_err());
+        assert!(agent_from_form("x", "/bin/a.sh", "\"oops", "", Protocol::Claude).is_err());
+        // the protocol picked is kept
+        let copilot = agent_from_form("Copilot", "copilot", "--acp --stdio", "", Protocol::Acp);
+        assert_eq!(copilot.unwrap().protocol, Protocol::Acp);
     }
 }

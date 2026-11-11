@@ -183,19 +183,29 @@ sandbox wrapper, run **Configure Agent** in Find Action, or edit `~/.config/zide
       "command": "~/bin/agent-sandbox.sh",
       "args": ["claude"],
       "config_dir": "~/.sandbox-agent/.claude"
+    },
+    "Copilot": {
+      "command": "copilot",
+      "args": ["--acp", "--stdio"],
+      "protocol": "acp"
     }
   },
   "agent": "Sandboxed"
 }
 ```
 
-Zide runs `command args…` followed by Claude's own arguments (it speaks Claude Code's
-stream-json, not ACP), so the command must end up running `claude`. `config_dir` is where that
+By default Zide runs `command args…` followed by Claude's own arguments (it speaks Claude Code's
+stream-json), so the command must end up running `claude`. With `"protocol": "acp"` it speaks the
+[Agent Client Protocol](https://agentclientprotocol.com) instead, which agents such as Copilot
+(`copilot --acp --stdio`) implement: the chat streams its answers, tool calls and permission
+requests, and `Esc` cancels the turn. Claude's rate-limit and context gauges, model and effort,
+earlier conversations and background agents are not offered for an ACP agent, and a chat whose
+agent exits starts a new session on the next message. `config_dir` is where that
 Claude keeps its sessions, when it is not `~/.claude` (a sandbox with its own home): the chat
 history is read from there. `agent` names the one in use (without it, the first entry;
 `null` is `claude` from `PATH`). The dialog lists the agents: pick one to edit it, **Use** it,
-**Delete** it, or add a **New Agent**. New chats use the agent in use; open ones keep theirs. **Test** in the dialog runs `--version` through the command and shows what
-failed. Uninstalling with `--purge` leaves `~/.config/zide` in place.
+**Delete** it, or add a **New Agent**. New chats use the agent in use; open ones keep theirs. **Test** in the dialog runs `--version` through the command (the `initialize`
+handshake for an ACP agent) and shows what failed. Uninstalling with `--purge` leaves `~/.config/zide` in place.
 
 In the Git log (`Alt+3` opens it): the refs tree on the left (HEAD, Local, Remote, Tags) narrows the history to
 the ref you pick, and picking it again goes back to every branch. `/` focuses the search box (message,
