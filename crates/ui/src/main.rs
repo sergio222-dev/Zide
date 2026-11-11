@@ -1584,13 +1584,22 @@ impl Workspace {
     /// Asks the configured `claude` for its version (it starts a process: not on the UI
     /// thread); Claude's features show only when it answers with a supported one.
     fn check_claude(cx: &mut Context<Self>) {
+        let protocol = settings::protocol();
         cx.spawn(async move |this, cx| {
-            let version = cx
-                .background_executor()
-                .spawn(async { zide_claude::installed() })
-                .await;
+            let ready =
+                cx.background_executor()
+                    .spawn(async move {
+                        match protocol {
+                            settings::Protocol::Claude => zide_claude::installed()
+                                .is_some_and(zide_claude::Version::is_supported),
+                            settings::Protocol::Acp => {
+                                zide_acp::probe(&zide_claude::launcher()).is_ok()
+                            }
+                        }
+                    })
+                    .await;
             this.update(cx, |this, cx| {
-                this.claude_installed = version.is_some_and(zide_claude::Version::is_supported);
+                this.claude_installed = ready;
                 cx.notify();
             })
             .ok();

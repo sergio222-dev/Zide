@@ -96,18 +96,21 @@ impl Workspace {
                             .items_center()
                             .gap_1()
                             // to the left of the model, in the colour of the usage bar
-                            .children(gauges::warning(chats.limits.as_ref(), now).map(
-                                |(color, text)| {
-                                    div()
-                                        .px_2()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(color))
-                                        .child(text)
-                                },
-                            ))
-                            .child(self.model_menu(chat, &chats.defaults, cx))
-                            .child(self.effort_menu(chat, &chats.defaults, cx))
-                            .child(self.context_menu(chat, chats, now)),
+                            // limits, models, effort and context are Claude Code's own
+                            .when(chat.protocol == crate::settings::Protocol::Claude, |row| {
+                                row.children(gauges::warning(chats.limits.as_ref(), now).map(
+                                    |(color, text)| {
+                                        div()
+                                            .px_2()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(color))
+                                            .child(text)
+                                    },
+                                ))
+                                .child(self.model_menu(chat, &chats.defaults, cx))
+                                .child(self.effort_menu(chat, &chats.defaults, cx))
+                                .child(self.context_menu(chat, chats, now))
+                            }),
                     ),
             )
     }

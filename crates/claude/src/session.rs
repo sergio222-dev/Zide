@@ -42,6 +42,8 @@ fn user_message(text: &str, images: &[Image]) -> Value {
 
 #[derive(Default)]
 pub struct Options<'a> {
+    /// How to start `claude`; `None` is the launcher set with [`crate::set_launcher`].
+    pub launcher: Option<&'a crate::Launcher>,
     /// Session id from an earlier `Event::Init`, to continue that conversation.
     pub resume: Option<&'a str>,
     /// `claude --permission-mode`; `None` keeps whatever the user's settings say.
@@ -67,7 +69,10 @@ pub struct Session {
 impl Session {
     /// Starts `claude` in `cwd` (its config is looked up from there).
     pub fn spawn(cwd: &Path, options: Options) -> io::Result<(Session, Receiver<Event>)> {
-        let mut command = crate::cli::command();
+        let mut command = match options.launcher {
+            Some(launcher) => crate::command_for(launcher),
+            None => crate::cli::command(),
+        };
         command
             .args(["-p", "--verbose", "--include-partial-messages"])
             .args(["--input-format", "stream-json"])

@@ -9,6 +9,22 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 use zide_claude::Launcher;
 
+/// How Zide talks to an agent: Claude Code's stream-json (the default) or the Agent Client
+/// Protocol (`"protocol": "acp"`), which other agents such as Copilot speak.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Protocol {
+    #[default]
+    Claude,
+    Acp,
+}
+
+static PROTOCOL: std::sync::RwLock<Protocol> = std::sync::RwLock::new(Protocol::Claude);
+
+/// The protocol of the agent new chats start, as the settings last applied say.
+pub fn protocol() -> Protocol {
+    *PROTOCOL.read().unwrap_or_else(|e| e.into_inner())
+}
+
 /// One entry of `agent_servers`. `args` go before Claude's own arguments: Zide speaks Claude's
 /// stream-json, so the command must end up running `claude` with what Zide appends.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -18,6 +34,7 @@ pub struct AgentServer {
     pub args: Vec<String>,
     /// Where that Claude keeps its config and sessions (inside a sandbox, its own home).
     pub config_dir: Option<String>,
+    pub protocol: Protocol,
 }
 
 impl AgentServer {
@@ -68,6 +85,10 @@ fn entry(name: &str, entry: &Value) -> AgentServer {
             })
             .unwrap_or_default(),
         config_dir: text("config_dir"),
+        protocol: match text("protocol").as_deref() {
+            Some("acp") => Protocol::Acp,
+            _ => Protocol::Claude,
+        },
     }
 }
 
@@ -120,6 +141,9 @@ pub fn with_agent(mut file: Value, previous: Option<&str>, agent: &AgentServer) 
     let mut entry = json!({ "command": agent.command, "args": agent.args });
     if let Some(dir) = &agent.config_dir {
         entry["config_dir"] = json!(dir);
+    }
+    if agent.protocol == Protocol::Acp {
+        entry["protocol"] = json!("acp");
     }
     servers.insert(agent.name.clone(), entry);
     if previous.is_some() && file.get("agent").and_then(Value::as_str) == previous {
@@ -179,12 +203,15 @@ pub fn update(path: &Path, change: impl FnOnce(Value) -> Value) -> io::Result<Va
 
 /// Makes Claude start as `file` says.
 pub fn use_file(file: &Value) {
+    let agent = active(file);
     zide_claude::set_launcher(
-        active(file)
+        agent
             .as_ref()
             .map(AgentServer::launcher)
             .unwrap_or_default(),
     );
+    *PROTOCOL.write().unwrap_or_else(|e| e.into_inner()) =
+        agent.map(|agent| agent.protocol).unwrap_or_default();
 }
 
 /// Reads the settings and makes Claude start as they say; a problem is logged, and Claude then
@@ -207,6 +234,7 @@ mod tests {
             command: "/bin/agent.sh".into(),
             args: vec!["claude".into()],
             config_dir: Some("/sandbox/.claude".into()),
+            protocol: Protocol::Claude,
         }
     }
 
@@ -235,6 +263,7 @@ mod tests {
                 command: "/home/vos/bin/agente-sandbox.sh".into(),
                 args: vec!["mi-agente".into(), "--acp".into()],
                 config_dir: None,
+                protocol: Protocol::Claude,
             })
         );
         assert_eq!(active(&json!({})), None);
@@ -302,6 +331,38 @@ mod tests {
         // deleting another one keeps the active one
         assert_eq!(active_name(&without_agent(file, "A")), named("B"));
         assert_eq!(active(&without_agent(left, "A")), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_protocol_is_claude_unless_the_entry_says_acp() {
+        let file = json!({
+            "agent_servers": {
+                "Copilot": { "command": "copilot", "args": ["--acp", "--stdio"], "protocol": "acp" },
+                "Plain": { "command": "claude" },
+                "Odd": { "command": "x", "protocol": "smoke-signals" }
+            }
+        });
+        let protocol = |name: &str| {
+            agents(&file)
+                .into_iter()
+                .find(|agent| agent.name == name)
+                .unwrap()
+                .protocol
+        };
+        assert_eq!(protocol("Copilot"), Protocol::Acp);
+        assert_eq!(protocol("Plain"), Protocol::Claude);
+        assert_eq!(protocol("Odd"), Protocol::Claude);
+        // written back only when it is not the default
+        let mut copilot = sandbox();
+        copilot.protocol = Protocol::Acp;
+        assert_eq!(
+            with_agent(json!({}), None, &copilot)["agent_servers"]["Sandboxed"]["protocol"],
+            "acp"
+        );
+        assert_eq!(
+            with_agent(json!({}), None, &sandbox())["agent_servers"]["Sandboxed"].get("protocol"),
+            None
+        );
     }
 
     #[::core::prelude::v1::test]
