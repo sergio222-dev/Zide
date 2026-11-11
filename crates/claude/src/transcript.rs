@@ -332,7 +332,10 @@ impl Transcript {
                     .rev()
                     .take_while(|block| !matches!(block, Block::User(_)))
                     .any(|block| matches!(block, Block::Text(_)));
-                if terminal_reason.as_deref() == Some("aborted_streaming") {
+                if matches!(
+                    terminal_reason.as_deref(),
+                    Some("aborted_streaming" | crate::CANCELLED)
+                ) {
                     self.blocks.push(Block::Interrupted);
                 } else if !is_error && !streamed && !text.is_empty() {
                     self.blocks.push(Block::Text(text));
@@ -644,6 +647,19 @@ mod tests {
             panic!("expected a permission");
         };
         assert_eq!(p.resolution, Some(Resolution::Cancelled));
+        assert_eq!(t.blocks().last(), Some(&Block::Interrupted));
+    }
+
+    #[test]
+    fn a_turn_cancelled_by_an_acp_agent_reads_as_interrupted() {
+        let mut t = Transcript::new();
+        t.user_message("go");
+        t.apply(Event::Result {
+            text: String::new(),
+            is_error: false,
+            cost_usd: 0.0,
+            terminal_reason: Some(crate::CANCELLED.into()),
+        });
         assert_eq!(t.blocks().last(), Some(&Block::Interrupted));
     }
 
