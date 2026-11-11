@@ -195,6 +195,41 @@ impl Session {
     }
 }
 
+impl crate::AgentSession for Session {
+    fn send_with_images(&mut self, text: &str, images: &[Image]) -> io::Result<()> {
+        Session::send_with_images(self, text, images)
+    }
+
+    fn interrupt(&mut self) -> io::Result<()> {
+        Session::interrupt(self)
+    }
+
+    fn allow(&mut self, request_id: &str, input: &Value) -> io::Result<()> {
+        Session::allow(self, request_id, input)
+    }
+
+    fn answer(
+        &mut self,
+        request_id: &str,
+        input: &Value,
+        answers: &[(&str, &str)],
+    ) -> io::Result<()> {
+        Session::answer(self, request_id, input, answers)
+    }
+
+    fn deny(&mut self, request_id: &str, reason: &str) -> io::Result<()> {
+        Session::deny(self, request_id, reason)
+    }
+
+    fn set_model(&mut self, model: &str) -> io::Result<()> {
+        Session::set_model(self, model)
+    }
+
+    fn set_effort(&mut self, effort: &str) -> io::Result<()> {
+        Session::set_effort(self, effort)
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.child.kill();

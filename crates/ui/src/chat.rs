@@ -24,8 +24,8 @@ use gpui_kit::*;
 use zide_claude::agents::{self, Agent, Kind};
 use zide_claude::history::{self, SessionInfo};
 use zide_claude::{
-    Block, Defaults, Event, Limits, Options, Overall, Permission, Resolution, Session, Status,
-    Transcript, Value,
+    AgentSession, Block, Defaults, Event, Limits, Options, Overall, Permission, Resolution,
+    Session, Status, Transcript, Value,
 };
 
 use crate::markdown::{TextView, TextViewState};
@@ -142,7 +142,7 @@ pub struct Chat {
     options_stale: bool,
     _slider: Subscription,
     /// `None` until the first message, and again once the process has exited.
-    session: Option<Session>,
+    session: Option<Box<dyn AgentSession>>,
     input: Entity<TextareaState>,
     /// The rendered Markdown of each assistant text block, by block index.
     markdown: HashMap<usize, Entity<TextViewState>>,
@@ -751,7 +751,7 @@ impl Workspace {
             ..Options::default()
         };
         let (session, events) = Session::spawn(&self.root, options)?;
-        chat.session = Some(session);
+        chat.session = Some(Box::new(session));
         chat.bare = bare;
         chat.run += 1;
         let run = chat.run;
