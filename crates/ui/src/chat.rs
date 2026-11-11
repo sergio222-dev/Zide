@@ -486,6 +486,10 @@ impl Workspace {
     /// The session id and title of the conversation the active chat is on, if it is on one.
     pub(crate) fn claude_conversation(&self) -> Option<(String, String)> {
         let chat = self.claude.as_ref()?.active();
+        // only Claude's conversations can be resumed; an ACP session id would reach `--resume`
+        if chat.protocol != Protocol::Claude {
+            return None;
+        }
         let id = chat.transcript.session_id()?.to_owned();
         Some((id, chat.title.clone().unwrap_or_default()))
     }
@@ -501,6 +505,10 @@ impl Workspace {
         let Some(chats) = &mut self.claude else {
             return;
         };
+        // the saved conversation is Claude's: an ACP chat would start a fresh session instead
+        if chats.active().protocol != Protocol::Claude {
+            return;
+        }
         let chat_id = chats.active().id;
         chats.active_mut().tail = true;
         let session = SessionInfo {
@@ -898,6 +906,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // a new chat takes the agent in use, and Claude's history needs a Claude chat
+        if crate::settings::protocol() != Protocol::Claude {
+            let note = gpui_kit::component::notification::Notification::info(
+                "Earlier conversations are Claude's: pick a Claude agent in Configure Agent to resume one",
+            );
+            return self.notify(note, cx);
+        }
         let Some(chats) = &mut self.claude else {
             return;
         };
@@ -908,7 +923,9 @@ impl Workspace {
         {
             return self.claude_activate(index, window, cx);
         }
-        if !chats.active().is_empty() {
+        // an empty ACP chat would send the resumed conversation's next message to its agent;
+        // a new chat is Claude's, as `claude_resume` refuses while an ACP agent is in use
+        if !chats.active().is_empty() || chats.active().protocol != Protocol::Claude {
             chats.add(window, cx);
         }
         let id = chats.active().id;

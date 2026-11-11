@@ -119,8 +119,9 @@ impl<W: Write> Client<W> {
                 self.queue.push_back((text, images));
                 self.pump();
             }
+            // the messages that wait stay queued: they start after the cancelled turn, as
+            // they do with Claude, and the chat counts on a `Consumed` for each
             Command::Interrupt => {
-                self.queue.clear();
                 if let Session::Ready(id) = &self.session
                     && self.prompting
                 {
@@ -551,14 +552,30 @@ mod tests {
         assert_eq!(sent[1]["id"], 9);
         assert_eq!(sent[1]["result"], cancelled_outcome());
         respond(&mut client, 3, json!({"stopReason": "cancelled"}));
+        // the message that waited starts right after, as with Claude: the chat counted it, and
+        // dropping it would leave the chat working forever
         assert!(matches!(
             &events(&receiver)[..],
-            [Event::Result { terminal_reason: Some(r), .. }] if r == CANCELLED
+            [Event::Result { terminal_reason: Some(r), .. }, Event::Consumed] if r == CANCELLED
         ));
-        assert!(
-            written(&mut client).is_empty(),
-            "the queued message was dropped"
-        );
+        let sent = written(&mut client);
+        assert_eq!(sent[0]["method"], "session/prompt");
+        assert_eq!(sent[0]["params"]["prompt"][0]["text"], "queued");
+    }
+
+    #[test]
+    fn interrupting_during_the_handshake_keeps_the_waiting_message() {
+        let (mut client, receiver) = client();
+        client.handle(Input::Command(Command::Send("early".into(), Vec::new())));
+        client.handle(Input::Command(Command::Interrupt));
+        respond(&mut client, 1, json!({"protocolVersion": 1}));
+        respond(&mut client, 2, json!({"sessionId": "s-1"}));
+        let events = events(&receiver);
+        assert!(matches!(events.last(), Some(Event::Consumed)), "{events:?}");
+        let sent = written(&mut client);
+        let prompt = sent.last().unwrap();
+        assert_eq!(prompt["method"], "session/prompt");
+        assert_eq!(prompt["params"]["prompt"][0]["text"], "early");
     }
 
     #[test]
