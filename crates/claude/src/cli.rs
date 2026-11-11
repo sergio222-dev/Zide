@@ -92,7 +92,7 @@ pub fn launcher() -> Launcher {
 }
 
 /// The command that starts `claude` as `launcher` says; the caller adds Claude's arguments.
-pub(crate) fn command_for(launcher: &Launcher) -> Command {
+pub fn command_for(launcher: &Launcher) -> Command {
     match &launcher.command {
         Some(program) => {
             let mut command = Command::new(program);
