@@ -1956,6 +1956,41 @@ pub fn resolve_with(root: &Path, path: &str, content: &str) -> Result<(), String
     run(root, &["--literal-pathspecs", "add", "--", path], false).map(drop)
 }
 
+/// Goes on with `operation` once its conflicts are resolved: `git <operation> --continue`, with
+/// the message the commit already has (no editor opens). A rebase that stops on the conflicts of
+/// a later commit is an error, and [`conflicts`] then lists them.
+pub fn proceed(root: &Path, operation: Operation) -> Result<(), String> {
+    let command = match operation {
+        Operation::Merge => "merge",
+        Operation::Rebase => "rebase",
+        Operation::CherryPick => "cherry-pick",
+        Operation::Revert => "revert",
+    };
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([command, "--continue"])
+        .env("GIT_EDITOR", "true")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("git could not run: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    // git explains a stop on stdout ("CONFLICT (content): ...") as often as on stderr
+    let said = [&output.stderr, &output.stdout]
+        .iter()
+        .map(|text| String::from_utf8_lossy(text).trim().to_string())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(if said.is_empty() {
+        format!("git {command} --continue failed")
+    } else {
+        said
+    })
+}
+
 /// The operation that is under way (merge, rebase, cherry-pick or revert), with the name of the
 /// side that is yours and of the one that comes in. `None` when nothing is under way.
 fn current_operation(root: &Path) -> Option<(Operation, String, String)> {
@@ -2265,6 +2300,89 @@ mod commit_tests {
             "by hand\n"
         );
         assert!(conflicts(&dir).is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Runs git in `dir`, with an editor that would fail if git opened one.
+    fn git_in(dir: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_EDITOR", "false")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    fn subjects(dir: &Path) -> Vec<String> {
+        run(dir, &["log", "--format=%s"], false)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn a_rebase_goes_on_once_its_conflicts_are_resolved_and_stops_at_the_next() {
+        let dir = repo("continue-rebase");
+        git_in(&dir, &["checkout", "-q", "-b", "main"]);
+        fs::write(dir.join("file.txt"), "base\n").unwrap();
+        git_in(&dir, &["add", "."]);
+        assert!(git_in(&dir, &["commit", "-q", "-m", "base"]));
+        git_in(&dir, &["checkout", "-q", "-b", "feature-branch"]);
+        for text in ["one", "two"] {
+            fs::write(dir.join("file.txt"), format!("{text}\n")).unwrap();
+            assert!(git_in(&dir, &["commit", "-q", "-am", text]));
+        }
+        git_in(&dir, &["checkout", "-q", "main"]);
+        fs::write(dir.join("file.txt"), "main\n").unwrap();
+        assert!(git_in(&dir, &["commit", "-q", "-am", "main"]));
+        git_in(&dir, &["checkout", "-q", "feature-branch"]);
+        assert!(
+            !git_in(&dir, &["rebase", "main"]),
+            "the rebase must conflict"
+        );
+
+        // the first commit is settled: the rebase stops on the second, which clashes too
+        let found = conflicts(&dir).unwrap();
+        assert_eq!(found.operation, Operation::Rebase);
+        // settled by hand, so "two" no longer applies cleanly
+        resolve_with(&dir, "file.txt", "one and main\n").unwrap();
+        assert!(proceed(&dir, Operation::Rebase).is_err());
+        let found = conflicts(&dir).expect("the second commit is in conflict");
+        resolve(&dir, &found.files[0], Side::Theirs).unwrap();
+
+        assert_eq!(proceed(&dir, Operation::Rebase), Ok(()));
+        assert!(conflicts(&dir).is_none());
+        assert_eq!(current_operation(&dir), None, "the rebase is over");
+        assert_eq!(subjects(&dir), ["two", "one", "main", "base"]);
+        assert_eq!(fs::read_to_string(dir.join("file.txt")).unwrap(), "two\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_cherry_pick_goes_on_with_the_message_of_the_picked_commit() {
+        let dir = repo("continue-pick");
+        git_in(&dir, &["checkout", "-q", "-b", "main"]);
+        fs::write(dir.join("file.txt"), "base\n").unwrap();
+        git_in(&dir, &["add", "."]);
+        assert!(git_in(&dir, &["commit", "-q", "-m", "base"]));
+        git_in(&dir, &["checkout", "-q", "-b", "feature-branch"]);
+        fs::write(dir.join("file.txt"), "picked\n").unwrap();
+        assert!(git_in(&dir, &["commit", "-q", "-am", "the picked one"]));
+        git_in(&dir, &["checkout", "-q", "main"]);
+        fs::write(dir.join("file.txt"), "main\n").unwrap();
+        assert!(git_in(&dir, &["commit", "-q", "-am", "main"]));
+        assert!(!git_in(&dir, &["cherry-pick", "feature-branch"]));
+
+        let found = conflicts(&dir).unwrap();
+        assert_eq!(found.operation, Operation::CherryPick);
+        resolve(&dir, &found.files[0], Side::Theirs).unwrap();
+        assert_eq!(proceed(&dir, Operation::CherryPick), Ok(()));
+        assert_eq!(current_operation(&dir), None);
+        assert_eq!(subjects(&dir)[0], "the picked one");
         fs::remove_dir_all(dir).unwrap();
     }
 

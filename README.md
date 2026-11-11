@@ -48,9 +48,11 @@ Only Linux x86_64 is published for now.
   (`Alt+O`) lists what git accepts, shown as chips once picked; what cannot go with a picked option is dimmed. Options that take
   text (`-m`, `--onto`) show a box for it; rebase can also pick another branch to rebase.
 - **Conflict resolver** (Find Action → *Resolve Conflicts*, offered only while git reports conflicts): when a merge, rebase,
-  cherry-pick or revert stops on conflicts, a dialog lists each file with what both sides did to it. *Accept Yours* keeps
+  cherry-pick or revert stops on conflicts, a dialog (it opens by itself when the operation was started from Zide) lists each file with what both sides did to it. *Accept Yours* keeps
   the current branch's version of the selected file, *Accept Theirs* the incoming one (a side that deleted the file deletes it);
-  the file is then marked resolved. *Merge…* (or a double click on the file) opens the merge editor: yours on the left, theirs on the right and the result
+  the file is then marked resolved. Once the last file is resolved, a rebase, cherry-pick or revert continues by itself
+  (`git <operation> --continue`, keeping each commit's message); when a later commit clashes too the dialog opens again
+  with its files. A merge is finished by committing it in the commit panel. *Merge…* (or a double click on the file) opens the merge editor: yours on the left, theirs on the right and the result
   (it starts as the common ancestor) in the middle. The arrow of a change (`»` / `«`) puts it in the result — both sides go one
   under the other — and the cross (`✕`) leaves it out; additions are green, removals gray, replacements blue and changes both
   sides made red. The toolbar applies every non-conflicting change (`F7` / `Shift+F7` move between changes); *Apply* is enabled
