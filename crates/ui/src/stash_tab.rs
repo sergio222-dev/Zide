@@ -58,7 +58,7 @@ impl Render for StashDialog {
             .child(
                 option("stash-untracked", "Include untracked files", self.untracked).on_click(
                     cx.listener(|this, _, _, cx| {
-                        this.untracked = !this.untracked;
+                        this.untracked.toggle();
                         cx.notify();
                     }),
                 ),
@@ -70,7 +70,7 @@ impl Render for StashDialog {
                     self.keep_index,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.keep_index = !this.keep_index;
+                    this.keep_index.toggle();
                     cx.notify();
                 })),
             )

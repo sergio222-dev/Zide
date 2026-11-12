@@ -857,7 +857,7 @@ impl Workspace {
                             .on_click(move |_, _, cx| {
                                 amend_toggle.update(cx, |this, cx| {
                                     if let Some(panel) = &mut this.commit {
-                                        panel.amend = !panel.amend;
+                                        panel.amend.toggle();
                                         cx.notify();
                                     }
                                 })

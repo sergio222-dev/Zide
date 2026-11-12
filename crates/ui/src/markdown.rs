@@ -178,7 +178,7 @@ fn parse_width(value: &str) -> Option<Width> {
             .ok()
             .map(|p| Width::Fraction(p / 100.0));
     }
-    let pixels = value.strip_suffix("px").unwrap_or(value);
+    let pixels = value.trim_suffix("px");
     pixels.trim().parse::<f32>().ok().map(Width::Px)
 }
 

@@ -488,7 +488,7 @@ impl Workspace {
                                     .on_click(move |_, _, cx| {
                                         tags_toggle.update(cx, |this, cx| {
                                             if let Some(popup) = this.overlay.push_mut() {
-                                                popup.tags = !popup.tags;
+                                                popup.tags.toggle();
                                                 cx.notify();
                                             }
                                         })

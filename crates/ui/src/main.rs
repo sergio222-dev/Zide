@@ -2034,7 +2034,7 @@ impl Workspace {
 
     /// Ctrl+Shift+M: shows or hides the rendered Markdown beside the editor.
     fn toggle_md_preview(&mut self, cx: &mut Context<Self>) {
-        self.md_preview = !self.md_preview;
+        self.md_preview.toggle();
         cx.notify();
     }
 
@@ -2664,7 +2664,7 @@ impl Workspace {
 
     /// Shows or hides the minimap of every file; the project remembers it.
     fn toggle_minimap(&mut self, cx: &mut Context<Self>) {
-        self.minimap = !self.minimap;
+        self.minimap.toggle();
         session::remember_minimap(&self.root, self.minimap);
         if let Some(viewer) = &mut self.viewer {
             viewer.set_minimap(self.minimap);
@@ -2674,7 +2674,7 @@ impl Workspace {
 
     /// Lists or hides what git ignores, in the tree and the searches; the project remembers it.
     fn toggle_show_ignored(&mut self, cx: &mut Context<Self>) {
-        self.show_ignored = !self.show_ignored;
+        self.show_ignored.toggle();
         session::remember_show_ignored(&self.root, self.show_ignored);
         self.rescan(cx);
         cx.notify();

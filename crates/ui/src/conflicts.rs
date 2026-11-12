@@ -611,7 +611,7 @@ impl Workspace {
                                     .on_click(move |_, _, cx| {
                                         group_toggle.update(cx, |this, cx| {
                                             if let Some(popup) = this.overlay.conflicts_mut() {
-                                                popup.grouped = !popup.grouped;
+                                                popup.grouped.toggle();
                                                 cx.notify();
                                             }
                                         })
