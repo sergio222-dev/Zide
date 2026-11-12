@@ -176,7 +176,7 @@ the projects opened before (Enter opens one in this window) and **Open** picks a
 | `Alt+C` / `Alt+W` / `Alt+R` | Toggle case / whole word / regex in the find panel |
 
 In the Claude chat (`Alt+2` opens it): `Alt+Up` / `Alt+Down` switch between open chats,
-`Alt+I` (or `Tab` when no text box has focus) focuses the message input, `Alt+H` opens (or closes) the list of earlier conversations, `Esc` interrupts a running turn (or closes the chat when idle),
+`Alt+I` (or `Tab` when no text box has focus) focuses the message input, `Alt+H` opens (or closes) the list of earlier conversations, `Esc` interrupts a running turn after a Yes/No confirmation (or closes the chat when idle; **Claude: Confirm Before Stopping** in Find Action turns the confirmation off, saved as `"confirm_stop": false` in `~/.config/zide/settings.json`),
 `Ctrl+V` pastes an image (click one, in the message or above the input, to see it large; `Esc` closes it), and `/` and `@` open the command and file menus. Earlier conversations
 are also listed by **Claude: Resume Session** in Find Action (`Ctrl+Shift+A`).
 While Claude runs subagents, a **Workers** section at the bottom of the chat list shows each one

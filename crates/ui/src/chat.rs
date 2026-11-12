@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::settings::Protocol;
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::notification::Notification;
@@ -474,6 +475,15 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Claude: Confirm Before Stopping, saved in the settings.
+    pub(crate) fn toggle_confirm_stop(&mut self, cx: &mut Context<Self>) {
+        if let Err(why) = crate::settings::toggle_confirm_stop() {
+            let note = Notification::error(why).title("Could not save the setting");
+            self.notify(note, cx);
+        }
+        cx.notify();
+    }
+
     /// Keeps the list of agents current while the panel is showing: `claude` is asked in the
     /// background, every few seconds.
     fn watch_agents(&mut self, cx: &mut Context<Self>) {
@@ -850,13 +860,43 @@ impl Chats {
         if key != "escape" {
             return;
         }
-        // Esc presses Stop while there is something to stop; otherwise it leaves the panel
+        // Esc presses Stop while there is something to stop (asking first, unless that is
+        // turned off); otherwise it leaves the panel
         if self.active().busy() {
-            self.claude_interrupt();
+            if crate::settings::confirm_stop() {
+                self.confirm_interrupt(window, cx);
+            } else {
+                self.claude_interrupt();
+            }
         } else {
             cx.emit(ChatEvent::Hide);
         }
         cx.stop_propagation();
+    }
+
+    /// Esc while Claude works: a slip of the key would throw the turn away, so it is asked first.
+    fn confirm_interrupt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chats = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (stop, keep) = (chats.clone(), chats.clone());
+            alert
+                .title("Stop Claude")
+                .description("Stop the turn Claude is working on?")
+                .ok_text("Yes")
+                .cancel_text("No")
+                .show_cancel(true)
+                .on_ok(move |_, window, cx| {
+                    stop.update(cx, |chats, cx| {
+                        chats.claude_interrupt();
+                        chats.focus_active_chat(window, cx);
+                    });
+                    true
+                })
+                .on_cancel(move |_, window, cx| {
+                    keep.update(cx, |chats, cx| chats.focus_active_chat(window, cx));
+                    true
+                })
+        });
     }
 
     /// Stops the turn in progress of the active chat. A message that waits starts right after.

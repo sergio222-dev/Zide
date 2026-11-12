@@ -381,6 +381,15 @@ fn action_registry() -> Vec<ActionDef> {
             run: |ws, _, cx| ws.toggle_claude_bare(cx),
         },
         ActionDef {
+            name: "Claude: Confirm Before Stopping",
+            synonyms: &["claude", "escape", "stop", "cancel", "interrupt"],
+            action: None,
+            closes_popup: false,
+            only_when_conflicted: false,
+            state: Some(|_| settings::confirm_stop()),
+            run: |ws, _, cx| ws.toggle_confirm_stop(cx),
+        },
+        ActionDef {
             name: "Claude: New Chat",
             synonyms: &["claude", "new", "clear", "session"],
             action: None,

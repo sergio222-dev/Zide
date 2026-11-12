@@ -1,10 +1,11 @@
-//! Zide's own settings, in `~/.config/zide/settings.json`. For now they only say how to start
-//! the agent: `agent_servers` maps a name to the command that runs Claude (a sandbox wrapper,
-//! say), and `agent` names the one in use. Keys Zide does not know are kept when the file is
-//! saved.
+//! Zide's own settings, in `~/.config/zide/settings.json`. They say how to start the agent:
+//! `agent_servers` maps a name to the command that runs Claude (a sandbox wrapper, say), and
+//! `agent` names the one in use; and `confirm_stop: false` lets Esc stop Claude without asking.
+//! Keys Zide does not know are kept when the file is saved.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Map, Value, json};
 use zide_claude::Launcher;
@@ -23,6 +24,38 @@ static PROTOCOL: std::sync::RwLock<Protocol> = std::sync::RwLock::new(Protocol::
 /// The protocol of the agent new chats start, as the settings last applied say.
 pub fn protocol() -> Protocol {
     *PROTOCOL.read().unwrap_or_else(|e| e.into_inner())
+}
+
+static CONFIRM_STOP: AtomicBool = AtomicBool::new(true);
+
+/// Whether Esc asks before it stops the turn Claude is working on, as the settings last applied
+/// (or the last toggle) say.
+pub fn confirm_stop() -> bool {
+    CONFIRM_STOP.load(Ordering::Relaxed)
+}
+
+/// Asking is the default: only `"confirm_stop": false` turns it off.
+fn confirm_stop_in(file: &Value) -> bool {
+    file.get("confirm_stop").and_then(Value::as_bool) != Some(false)
+}
+
+/// `file` with the confirmation turned on or off; the other settings stay.
+pub fn with_confirm_stop(mut file: Value, on: bool) -> Value {
+    if !file.is_object() {
+        file = json!({});
+    }
+    file["confirm_stop"] = json!(on);
+    file
+}
+
+/// Claude: Confirm Before Stopping. Takes effect at once and is saved; a file that cannot be
+/// saved is reported, and the choice then lasts until Zide closes.
+pub fn toggle_confirm_stop() -> Result<bool, String> {
+    let on = !confirm_stop();
+    CONFIRM_STOP.store(on, Ordering::Relaxed);
+    let path = path().ok_or("No config folder to save the setting in")?;
+    update(&path, |file| with_confirm_stop(file, on)).map_err(|e| e.to_string())?;
+    Ok(on)
 }
 
 /// One entry of `agent_servers`. `args` go before Claude's own arguments: Zide speaks Claude's
@@ -201,7 +234,7 @@ pub fn update(path: &Path, change: impl FnOnce(Value) -> Value) -> io::Result<Va
     Ok(file)
 }
 
-/// Makes Claude start as `file` says.
+/// Makes Claude start, and Esc stop it, as `file` says.
 pub fn use_file(file: &Value) {
     let agent = active(file);
     zide_claude::set_launcher(
@@ -212,6 +245,7 @@ pub fn use_file(file: &Value) {
     );
     *PROTOCOL.write().unwrap_or_else(|e| e.into_inner()) =
         agent.map(|agent| agent.protocol).unwrap_or_default();
+    CONFIRM_STOP.store(confirm_stop_in(file), Ordering::Relaxed);
 }
 
 /// Reads the settings and makes Claude start as they say; a problem is logged, and Claude then
@@ -393,5 +427,21 @@ mod tests {
         update(&fresh, |file| with_agent(file, None, &sandbox())).unwrap();
         assert_eq!(active(&read(&fresh).unwrap()), Some(sandbox()));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn stopping_claude_is_confirmed_unless_the_file_says_otherwise() {
+        assert!(confirm_stop_in(&json!({})));
+        assert!(confirm_stop_in(&json!({ "confirm_stop": "no" })));
+        assert!(!confirm_stop_in(&json!({ "confirm_stop": false })));
+    }
+
+    #[::core::prelude::v1::test]
+    fn turning_the_confirmation_off_keeps_the_other_settings() {
+        let file = with_agent(json!({}), None, &sandbox());
+        let off = with_confirm_stop(file, false);
+        assert!(!confirm_stop_in(&off));
+        assert_eq!(active(&off), Some(sandbox()));
+        assert!(confirm_stop_in(&with_confirm_stop(off, true)));
     }
 }
