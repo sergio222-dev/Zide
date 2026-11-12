@@ -2406,7 +2406,16 @@ impl Workspace {
         let (Some(viewer), Some(key)) = (&mut self.viewer, vim_key(event)) else {
             return;
         };
+        // the system clipboard is the register: pastes read it, yanks write it
+        if viewer.may_paste(key)
+            && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+        {
+            viewer.offer_clipboard(&text);
+        }
         let effect = viewer.handle_key(key);
+        if let Some(text) = viewer.take_yank() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
         if key == zide_vim::Key::Esc && self.find.is_some() {
             self.close_find(window, cx);
         }

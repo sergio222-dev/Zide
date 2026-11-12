@@ -60,6 +60,10 @@ pub struct Vim {
     last_change: Vec<Key>,
     pub(crate) replaying: bool,
     pub(crate) register: Register,
+    /// Text yanked and not yet taken for the system clipboard.
+    yanked: Option<String>,
+    /// The system clipboard as Zide last saw it, to tell text copied elsewhere from its own.
+    clipboard: String,
 }
 
 impl Default for Vim {
@@ -78,6 +82,8 @@ impl Default for Vim {
             last_change: Vec::new(),
             replaying: false,
             register: Register::default(),
+            yanked: None,
+            clipboard: String::new(),
         }
     }
 }
@@ -163,6 +169,33 @@ impl Vim {
         self.set_cursor(buffer, range.end - 1);
     }
 
+    /// Text yanked since the last call, for the system clipboard.
+    pub fn take_yank(&mut self) -> Option<String> {
+        let text = self.yanked.take()?;
+        self.clipboard.clone_from(&text);
+        Some(text)
+    }
+
+    /// Offers the system clipboard before a paste. Text copied elsewhere since Zide last saw
+    /// the clipboard becomes the register, linewise when it ends with a line break; otherwise
+    /// the register keeps what Zide put there, such as deleted text.
+    pub fn offer_clipboard(&mut self, text: &str) {
+        if text.is_empty() || text == self.clipboard {
+            return;
+        }
+        self.clipboard = text.to_string();
+        let text = text.replace("\r\n", "\n");
+        self.register = Register {
+            linewise: text.ends_with('\n'),
+            text,
+        };
+    }
+
+    /// Keeps the register's text as yanked, for [`Vim::take_yank`].
+    pub(crate) fn note_yank(&mut self) {
+        self.yanked = Some(self.register.text.clone());
+    }
+
     fn idle(&self) -> bool {
         self.count == 0 && self.operator.is_none() && !self.g_prefix && self.object.is_none()
     }
@@ -211,6 +244,11 @@ impl Vim {
                 let end = self.cursor + usize::from(pair);
                 buffer.delete(self.cursor - 1..end);
                 self.cursor -= 1;
+            }
+            // pastes the register, which the UI fills from the system clipboard
+            Key::Ctrl('v') => {
+                let text = self.register.text.clone();
+                self.type_text(buffer, &text);
             }
             Key::Backspace | Key::Ctrl(_) => {}
         }
