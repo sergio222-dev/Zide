@@ -10,7 +10,7 @@ name = "zide"
 path = "src/main.rs"
 
 [dependencies]
-gpui-kit = "=0.9.0"
+gpui-kit = "=0.9.1"
 similar = "3.2.1"
 zide-acp = { path = "../acp" }
 zide-claude = { path = "../claude" }
