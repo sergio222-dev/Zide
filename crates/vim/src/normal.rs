@@ -305,7 +305,10 @@ impl Vim {
             linewise: false,
         };
         match op {
-            Operator::Yank => self.cursor = start,
+            Operator::Yank => {
+                self.note_yank();
+                self.cursor = start;
+            }
             Operator::Delete | Operator::Change => {
                 buffer.delete(start..end);
                 self.cursor = start;
@@ -344,7 +347,7 @@ impl Vim {
             linewise: true,
         };
         match op {
-            Operator::Yank => {}
+            Operator::Yank => self.note_yank(),
             Operator::Change => {
                 buffer.delete(start..line_end(buffer, b));
                 self.cursor = start;

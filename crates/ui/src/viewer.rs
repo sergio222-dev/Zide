@@ -1105,6 +1105,26 @@ impl Viewer {
         )
     }
 
+    /// True when `key` may paste, so the system clipboard should be offered first: `p`/`P`
+    /// outside Insert, Ctrl+V in Insert.
+    pub fn may_paste(&self, key: Key) -> bool {
+        self.editable
+            && match self.vim.mode() {
+                Mode::Insert => key == Key::Ctrl('v'),
+                _ => matches!(key, Key::Char('p' | 'P')),
+            }
+    }
+
+    /// See [`zide_vim::Vim::offer_clipboard`].
+    pub fn offer_clipboard(&mut self, text: &str) {
+        self.vim.offer_clipboard(text);
+    }
+
+    /// See [`zide_vim::Vim::take_yank`].
+    pub fn take_yank(&mut self) -> Option<String> {
+        self.vim.take_yank()
+    }
+
     pub fn handle_key(&mut self, key: Key) -> Effect {
         let gliding_to = self.anim.take().map(|anim| anim.to); // a key press takes over from a glide
         if self.z_pending {
@@ -3620,6 +3640,21 @@ mod tests {
         assert_eq!(viewer.find_status().unwrap().current, Some(1));
         viewer.replace_current("c");
         assert_eq!(viewer.buffer.text(), "bb c a");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn only_paste_keys_of_an_editable_file_want_the_clipboard() {
+        let (dir, file) = temp_file("may-paste", "abc");
+        let mut viewer = Viewer::open(&dir, &file);
+        assert!(viewer.may_paste(Key::Char('p')));
+        assert!(viewer.may_paste(Key::Char('P')));
+        assert!(!viewer.may_paste(Key::Ctrl('v')));
+        viewer.handle_key(Key::Char('i'));
+        assert!(viewer.may_paste(Key::Ctrl('v')));
+        assert!(!viewer.may_paste(Key::Char('p'))); // typed text
+        let missing = Viewer::open(&dir, "missing");
+        assert!(!missing.may_paste(Key::Char('p')));
         fs::remove_dir_all(dir).unwrap();
     }
 

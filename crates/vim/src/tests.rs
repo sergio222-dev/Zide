@@ -17,6 +17,7 @@ fn run_at(text: &str, at: usize, keys: &str) -> (String, usize) {
             ("<C-r>", Key::Ctrl('r')),
             ("<C-a>", Key::Ctrl('a')),
             ("<C-x>", Key::Ctrl('x')),
+            ("<C-v>", Key::Ctrl('v')),
         ]
         .iter()
         .find(|(name, _)| rest.starts_with(name))
@@ -408,4 +409,70 @@ fn a_quote_after_a_word_character_is_not_a_pair() {
 #[test]
 fn an_escaped_quote_does_not_close_the_string() {
     assert_eq!(run("", "i\"a\\\"[").0, "\"a\\\"[\"");
+}
+
+/// Types `keys` into `text` after offering `clipboard`, as the UI does before a paste.
+fn paste_from(text: &str, clipboard: &str, keys: &str) -> String {
+    let mut buffer = Buffer::new(text);
+    let mut vim = Vim::default();
+    vim.offer_clipboard(clipboard);
+    for c in keys.chars() {
+        let key = if c == '\u{16}' {
+            Key::Ctrl('v')
+        } else {
+            Key::Char(c)
+        };
+        vim.handle(&mut buffer, key);
+    }
+    buffer.text()
+}
+
+#[test]
+fn p_pastes_text_copied_elsewhere() {
+    assert_eq!(paste_from("ab", "xy", "p"), "axyb");
+    assert_eq!(paste_from("ab", "xy", "P"), "xyab");
+    assert_eq!(paste_from("one\ntwo\n", "new\n", "p"), "one\nnew\ntwo\n"); // a line
+    assert_eq!(paste_from("ab", "x\r\ny\r\n", "p"), "ab\nx\ny"); // Windows breaks
+    assert_eq!(paste_from("ab", "", "p"), "ab");
+}
+
+#[test]
+fn ctrl_v_in_insert_pastes_the_clipboard_as_typed_text() {
+    assert_eq!(paste_from("ab", "(x\ny", "a\u{16}"), "a(x\nyb"); // no closer comes along
+    assert_eq!(run("ab", "yla<C-v>").0, "aab");
+}
+
+#[test]
+fn yanks_are_taken_for_the_clipboard_and_deletes_are_not() {
+    let mut buffer = Buffer::new("foo bar\nbaz\n");
+    let mut vim = Vim::default();
+    for c in "yw".chars() {
+        vim.handle(&mut buffer, Key::Char(c));
+    }
+    assert_eq!(vim.take_yank().as_deref(), Some("foo "));
+    assert_eq!(vim.take_yank(), None);
+    for c in "yyvly".chars() {
+        vim.handle(&mut buffer, Key::Char(c));
+    }
+    assert_eq!(vim.take_yank().as_deref(), Some("fo")); // the last yank wins
+    for c in "dd".chars() {
+        vim.handle(&mut buffer, Key::Char(c));
+    }
+    assert_eq!(vim.take_yank(), None);
+}
+
+#[test]
+fn the_clipboard_zide_yanked_to_does_not_replace_a_later_delete() {
+    let mut buffer = Buffer::new("foo bar");
+    let mut vim = Vim::default();
+    for c in "yw".chars() {
+        vim.handle(&mut buffer, Key::Char(c));
+    }
+    let clipboard = vim.take_yank().unwrap();
+    for c in "dw".chars() {
+        vim.handle(&mut buffer, Key::Char(c));
+    }
+    vim.offer_clipboard(&clipboard); // unchanged since the yank
+    vim.handle(&mut buffer, Key::Char('P'));
+    assert_eq!(buffer.text(), "foo bar");
 }
