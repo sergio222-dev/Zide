@@ -1173,7 +1173,7 @@ impl Viewer {
         if !self.editable
             && !matches!(
                 key,
-                Key::Char('h' | 'j' | 'k' | 'l' | 'w' | 'b' | 'e' | 'G' | 'g' | '0' | '$' | '^')
+                Key::Char(c) if "hjklwWbeEGg0$^".contains(c)
             )
         {
             return Effect::None; // an error message is not a document

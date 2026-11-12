@@ -139,7 +139,7 @@ impl Vim {
             self.g_prefix = true;
             return;
         }
-        if "hjklwbe0^$G".contains(c) {
+        if "hjklwWbeE0^$G".contains(c) {
             return self.run_motion(buffer, c);
         }
         if self.operator.is_some() || self.is_visual() {
@@ -249,11 +249,11 @@ impl Vim {
         self.count = 0;
         let cursor = self.cursor;
         let operator = pending.map(|(op, _)| op);
-        // `cw` behaves like `ce`
-        let key_for_motion = if operator == Some(Operator::Change) && key == 'w' {
-            'e'
-        } else {
-            key
+        // `cw` behaves like `ce`, `cW` like `cE`
+        let key_for_motion = match key {
+            'w' if operator == Some(Operator::Change) => 'e',
+            'W' if operator == Some(Operator::Change) => 'E',
+            _ => key,
         };
         let Some(found) = motion(
             buffer,

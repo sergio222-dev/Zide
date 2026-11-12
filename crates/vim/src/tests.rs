@@ -81,6 +81,19 @@ fn word_motions() {
 }
 
 #[test]
+fn big_word_motions_skip_punctuation() {
+    assert_eq!(run("foo.bar baz", "W").1, 8);
+    assert_eq!(run("foo.bar baz.qux qq", "2W").1, 16);
+    assert_eq!(run("foo.bar baz", "E").1, 6);
+    assert_eq!(run("foo.bar baz.qux", "EE").1, 14);
+    assert_eq!(run("a.b\nc", "W").1, 4);
+    assert_eq!(run("foo.bar baz", "dW").0, "baz");
+    assert_eq!(run("foo.bar baz", "cWx").0, "x baz");
+    assert_eq!(run("foo.bar baz", "dE").0, " baz");
+    assert_eq!(run("foo.bar baz", "vEd").0, " baz");
+}
+
+#[test]
 fn insert_types_and_escape_steps_back() {
     assert_eq!(run("", "ihello<Esc>"), ("hello".into(), 4));
     assert_eq!(run("ab", "Axy<Esc>"), ("abxy".into(), 3));
