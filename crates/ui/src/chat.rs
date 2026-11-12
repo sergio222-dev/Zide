@@ -821,6 +821,18 @@ impl Chats {
             }
             return;
         }
+        // Tab outside any text box puts the cursor in the chat, like Alt+I
+        if key == "tab"
+            && !modifiers.modified()
+            && !window
+                .context_stack()
+                .iter()
+                .any(|context| context.contains("Input"))
+        {
+            self.focus_active_chat(window, cx);
+            cx.stop_propagation();
+            return cx.notify();
+        }
         if self.menu_matches(cx).is_some() {
             match key {
                 "down" => self.menu_move(1, cx),
