@@ -136,10 +136,10 @@ pub(crate) fn motion(
                 inclusive: false,
             }
         }
-        'w' => charwise(word_forward(buffer, from, n, operator)),
+        'w' | 'W' => charwise(word_forward(buffer, from, n, operator, key == 'W')),
         'b' => charwise(word_backward(buffer, from, n)),
-        'e' => Motion {
-            target: word_end(buffer, from, n),
+        'e' | 'E' => Motion {
+            target: word_end(buffer, from, n, key == 'E'),
             linewise: false,
             inclusive: true,
         },
@@ -147,15 +147,25 @@ pub(crate) fn motion(
     })
 }
 
-fn class_at(buffer: &Buffer, offset: usize) -> Option<Class> {
-    buffer.char_at(offset).map(class)
+/// The class of the character at `offset`; a WORD (`big`) is any run of non-blanks.
+fn class_at(buffer: &Buffer, offset: usize, big: bool) -> Option<Class> {
+    buffer.char_at(offset).map(|c| match class(c) {
+        Class::Punct if big => Class::Word,
+        other => other,
+    })
 }
 
-pub(crate) fn word_forward(buffer: &Buffer, from: usize, count: usize, operator: bool) -> usize {
+pub(crate) fn word_forward(
+    buffer: &Buffer,
+    from: usize,
+    count: usize,
+    operator: bool,
+    big: bool,
+) -> usize {
     let mut p = from;
     for _ in 0..count {
-        if let Some(run) = class_at(buffer, p).filter(|c| *c != Class::Space) {
-            while class_at(buffer, p) == Some(run) {
+        if let Some(run) = class_at(buffer, p, big).filter(|c| *c != Class::Space) {
+            while class_at(buffer, p, big) == Some(run) {
                 p += 1;
             }
         }
@@ -189,23 +199,23 @@ pub(crate) fn word_backward(buffer: &Buffer, from: usize, count: usize) -> usize
         {
             p -= 1;
         }
-        let run = class_at(buffer, p);
-        while p > 0 && class_at(buffer, p - 1) == run && run != Some(Class::Space) {
+        let run = class_at(buffer, p, false);
+        while p > 0 && class_at(buffer, p - 1, false) == run && run != Some(Class::Space) {
             p -= 1;
         }
     }
     p
 }
 
-pub(crate) fn word_end(buffer: &Buffer, from: usize, count: usize) -> usize {
+pub(crate) fn word_end(buffer: &Buffer, from: usize, count: usize, big: bool) -> usize {
     let mut p = from;
     for _ in 0..count {
         p += 1;
         while buffer.char_at(p).is_some_and(char::is_whitespace) {
             p += 1;
         }
-        let run = class_at(buffer, p);
-        while run.is_some() && class_at(buffer, p + 1) == run {
+        let run = class_at(buffer, p, big);
+        while run.is_some() && class_at(buffer, p + 1, big) == run {
             p += 1;
         }
     }
