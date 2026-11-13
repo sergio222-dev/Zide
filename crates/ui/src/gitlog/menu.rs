@@ -2,7 +2,8 @@
 //! reset the branch to it, revert it, start a branch or a tag on it. On the files of a commit: show
 //! their diff, revert or cherry-pick their changes into the working tree, or get them as they
 //! were in that commit. On a branch or a tag of the tree: check it out, merge it into the current
-//! branch, push it or delete it once the remote has it; only push it while the remote does not.
+//! branch, update a local branch from its upstream, push it or delete it once the remote has it;
+//! only push it while the remote does not.
 
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::notification::Notification;
@@ -34,6 +35,7 @@ pub enum MenuAction {
     GetFromRevision,
     Checkout,
     Merge,
+    Update,
     Push,
     Delete,
 }
@@ -80,8 +82,8 @@ fn ref_name(target: &Switch) -> &str {
 }
 
 /// The entries of the menu of a branch or tag. One the remote does not have yet can only be
-/// pushed; one it has can be checked out, merged into `into`, pushed and deleted. A remote branch
-/// is checked out or merged; the current branch is only pushed.
+/// pushed; one it has can be checked out, merged into `into`, updated (a local branch), pushed and
+/// deleted. A remote branch is checked out or merged; the current branch is updated or pushed.
 pub fn ref_entries(
     target: &Switch,
     current: bool,
@@ -93,16 +95,15 @@ pub fn ref_entries(
     let push = (MenuAction::Push, format!("Push to {remote}"));
     let checkout = (MenuAction::Checkout, "Checkout".to_string());
     let merge = (MenuAction::Merge, format!("Merge '{name}' into '{into}'"));
+    let update = (MenuAction::Update, "Update".to_string());
+    let delete = (MenuAction::Delete, "Delete".to_string());
     match target {
         Switch::Remote(_) => vec![checkout, merge],
-        _ if current => vec![push],
         _ if !on_remote => vec![push],
-        _ => vec![
-            checkout,
-            merge,
-            push,
-            (MenuAction::Delete, "Delete".to_string()),
-        ],
+        Switch::Local(_) if current => vec![update, push],
+        _ if current => vec![push],
+        Switch::Local(_) => vec![checkout, merge, update, push, delete],
+        _ => vec![checkout, merge, push, delete],
     }
 }
 
@@ -303,6 +304,7 @@ impl Workspace {
         let name = ref_name(&target).to_string();
         match (action, target) {
             (MenuAction::Checkout, target) => self.switch_branch(target, cx),
+            (MenuAction::Update, Switch::Local(_)) => self.update_branch(name, cx),
             (MenuAction::Merge, _) => self.git_task(
                 "Could not merge",
                 Some(format!("Merged '{name}' into '{into}'")),
@@ -453,7 +455,11 @@ impl Workspace {
                     cx,
                 );
             }
-            MenuAction::Checkout | MenuAction::Merge | MenuAction::Push | MenuAction::Delete => {}
+            MenuAction::Checkout
+            | MenuAction::Merge
+            | MenuAction::Update
+            | MenuAction::Push
+            | MenuAction::Delete => {}
             MenuAction::NewTag => self.ask_name(
                 NameKind::Tag,
                 "New Tag",
@@ -692,6 +698,7 @@ mod tests {
             [
                 MenuAction::Checkout,
                 MenuAction::Merge,
+                MenuAction::Update,
                 MenuAction::Push,
                 MenuAction::Delete
             ]
@@ -699,11 +706,11 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn the_current_branch_is_only_pushed_and_a_remote_one_checked_out_or_merged() {
+    fn the_current_branch_is_updated_or_pushed_and_a_remote_one_checked_out_or_merged() {
         let current = Switch::Local("main".into());
         assert_eq!(
             labels(ref_entries(&current, true, true, "origin", "main")),
-            ["Push to origin"]
+            ["Update", "Push to origin"]
         );
         let remote = Switch::Remote("origin/feat/x".into());
         assert_eq!(
