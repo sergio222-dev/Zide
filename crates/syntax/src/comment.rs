@@ -79,12 +79,12 @@ pub fn toggle_comment(syntax: CommentSyntax, lines: &[String], markup: bool) -> 
                 let own = line.chars().take_while(|c| c.is_whitespace()).count();
                 let (head, rest) = split_indent(line, own);
                 let rest = rest.trim_end().strip_prefix(open).unwrap_or(rest);
-                let rest = rest.strip_prefix(' ').unwrap_or(rest);
-                let rest = rest.strip_suffix(close).unwrap_or(rest);
+                let rest = rest.trim_prefix(' ');
+                let rest = rest.trim_suffix(close);
                 let rest = if close.is_empty() {
                     rest
                 } else {
-                    rest.strip_suffix(' ').unwrap_or(rest)
+                    rest.trim_suffix(' ')
                 };
                 format!("{head}{rest}")
             } else {

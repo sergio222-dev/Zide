@@ -553,7 +553,7 @@ pub fn update_branch(root: &Path, name: &str, checked_out: bool) -> Result<(), S
     if checked_out {
         run(root, &["pull", "--ff-only"], true).map(drop)
     } else {
-        let source = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+        let source = merge.trim_prefix("refs/heads/");
         run(root, &["fetch", &remote, &format!("{source}:{name}")], true).map(drop)
     }
 }

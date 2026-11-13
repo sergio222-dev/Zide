@@ -202,7 +202,7 @@ fn parse_refs(decoration: &str) -> Vec<RefLabel> {
         };
         let label = if let Some(tag) = part.strip_prefix("tag: ") {
             RefLabel {
-                name: tag.strip_prefix("refs/tags/").unwrap_or(tag).to_string(),
+                name: tag.trim_prefix("refs/tags/").to_string(),
                 kind: RefKind::Tag,
                 current,
             }

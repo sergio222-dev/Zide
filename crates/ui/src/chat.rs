@@ -467,7 +467,7 @@ impl Workspace {
 
     /// Claude: Bare Mode, for the processes started from now on.
     pub(crate) fn toggle_claude_bare(&mut self, cx: &mut Context<Self>) {
-        self.claude_bare = !self.claude_bare;
+        self.claude_bare.toggle();
         if let Some(chats) = &self.claude {
             let bare = self.claude_bare;
             chats.update(cx, |chats, _| chats.bare = bare);
