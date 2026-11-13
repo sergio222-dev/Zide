@@ -3026,18 +3026,21 @@ impl Workspace {
                     cx,
                 );
             }
-            A::Update(name) => {
-                let checked_out = self.git.is_checked_out(&name);
-                let done = format!("Updated '{name}'");
-                self.git_task(
-                    "Could not update the branch",
-                    Some(done),
-                    move |root| zide_git::update_branch(&root, &name, checked_out),
-                    cx,
-                );
-            }
+            A::Update(name) => self.update_branch(name, cx),
             A::Push(name) => self.confirm_push(name, window, cx),
         }
+    }
+
+    /// Brings the local branch `name` up to date with its upstream, forward only.
+    fn update_branch(&mut self, name: String, cx: &mut Context<Self>) {
+        let checked_out = self.git.is_checked_out(&name);
+        let done = format!("Updated '{name}'");
+        self.git_task(
+            "Could not update the branch",
+            Some(done),
+            move |root| zide_git::update_branch(&root, &name, checked_out),
+            cx,
+        );
     }
 
     /// Asks for a branch or tag name in a dialog, and runs `then` with it when it is a good one.
