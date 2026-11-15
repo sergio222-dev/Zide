@@ -14,6 +14,13 @@ pub struct QuestionOption {
     pub description: String,
 }
 
+/// A model the CLI offers: what `--model` and `set_model` take, and what to call it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Model {
+    pub value: String,
+    pub name: String,
+}
+
 /// How full the model's context is, as of its latest message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Usage {
@@ -57,6 +64,9 @@ pub enum Event {
         /// The model the session runs, as its full name.
         model: Option<String>,
     },
+    /// The models the CLI offers, as it answered `initialize`. Its own "default" entry is left
+    /// out: a client names the default itself.
+    Models(Vec<Model>),
     /// A chunk of the assistant's text as it is produced.
     TextDelta(String),
     /// A chunk of the assistant's reasoning as it is produced.
@@ -317,6 +327,25 @@ pub fn parse_events(line: &str) -> Vec<Event> {
                     input,
                 }
             }]
+        }
+        "control_response" if value["response"]["request_id"] == "initialize" => {
+            let models = value["response"]["response"]["models"].as_array();
+            let Some(models) = models else {
+                return Vec::new();
+            };
+            vec![Event::Models(
+                models
+                    .iter()
+                    .filter(|model| model["value"] != "default")
+                    .filter_map(|model| {
+                        let value = model["value"].as_str()?;
+                        Some(Model {
+                            value: value.to_owned(),
+                            name: model["displayName"].as_str().unwrap_or(value).to_owned(),
+                        })
+                    })
+                    .collect(),
+            )]
         }
         "rate_limit_event" => {
             let windows = &value["rate_limit_info"]["unifiedWindows"];
@@ -721,6 +750,26 @@ mod tests {
                 ],
             }]
         );
+    }
+
+    #[test]
+    fn the_initialize_answer_lists_the_models_but_the_default() {
+        let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"initialize","response":{"models":[{"value":"default","displayName":"Default (recommended)"},{"value":"opus","displayName":"Opus 5.5"},{"value":"claude-haiku-4-5","displayName":"Haiku 4.5"},{"displayName":"no value"}]}}}"#;
+        assert_eq!(
+            one(line),
+            Event::Models(vec![
+                Model {
+                    value: "opus".into(),
+                    name: "Opus 5.5".into(),
+                },
+                Model {
+                    value: "claude-haiku-4-5".into(),
+                    name: "Haiku 4.5".into(),
+                },
+            ])
+        );
+        let other = r#"{"type":"control_response","response":{"subtype":"success","request_id":"set-model","response":{}}}"#;
+        assert_eq!(parse_events(other), vec![]);
     }
 
     #[test]

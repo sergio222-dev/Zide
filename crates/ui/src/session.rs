@@ -87,6 +87,33 @@ pub fn remember_claude_commands(root: &Path, commands: &[String]) {
     write(root, "claude-commands", &commands.join("\n"));
 }
 
+/// The models Claude last reported for the project at `root`, in its order.
+pub fn claude_models(root: &Path) -> Vec<zide_claude::Model> {
+    fs::read_to_string(file_for(root, "claude-models"))
+        .map(|text| {
+            text.lines()
+                .filter_map(|line| line.split_once('\t'))
+                .map(|(value, name)| zide_claude::Model {
+                    value: value.to_owned(),
+                    name: name.to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Best effort, like `remember_file`. A model whose value or name has a tab or a line break
+/// cannot be stored and is left out.
+pub fn remember_claude_models(root: &Path, models: &[zide_claude::Model]) {
+    let storable = |text: &str| !text.contains(['\t', '\n', '\r']);
+    let lines: Vec<String> = models
+        .iter()
+        .filter(|model| storable(&model.value) && storable(&model.name))
+        .map(|model| format!("{}\t{}", model.value, model.name))
+        .collect();
+    write(root, "claude-models", &lines.join("\n"));
+}
+
 /// How the project was left: the panels that were showing and, when the Claude chat was, the
 /// conversation it was on.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -305,6 +332,25 @@ mod tests {
         let commands = vec!["compact".to_owned(), "review".to_owned()];
         remember_claude_commands(&root, &commands);
         assert_eq!(claude_commands(&root), commands);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_models_come_back_in_order() {
+        let root = std::env::temp_dir().join(format!("zide-models-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(claude_models(&root).is_empty());
+        let model = |value: &str, name: &str| zide_claude::Model {
+            value: value.to_owned(),
+            name: name.to_owned(),
+        };
+        let models = vec![
+            model("opus", "Opus 5.5"),
+            model("claude-haiku-4-5", "Haiku 4.5"),
+        ];
+        let broken = model("bad", "tab\there");
+        remember_claude_models(&root, &[models.clone(), vec![broken]].concat());
+        assert_eq!(claude_models(&root), models);
         fs::remove_dir_all(root).unwrap();
     }
 

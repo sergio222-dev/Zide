@@ -4,18 +4,33 @@
 
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::*;
-use zide_claude::{Defaults, Event};
+use zide_claude::{Defaults, Event, Model};
 
 use super::Chat;
 use super::Chats;
 
-/// The models offered, as the dropdown names them and as `claude --model` takes them.
-const MODELS: [(&str, &str); 4] = [
-    ("Fable", "fable"),
-    ("Opus", "opus"),
-    ("Sonnet", "sonnet"),
-    ("Haiku", "haiku"),
-];
+/// What is offered before the CLI ever said which models it has: its aliases.
+pub(super) fn fallback_models() -> Vec<Model> {
+    [
+        ("Fable", "fable"),
+        ("Opus", "opus"),
+        ("Sonnet", "sonnet"),
+        ("Haiku", "haiku"),
+    ]
+    .map(|(name, value)| Model {
+        value: value.to_owned(),
+        name: name.to_owned(),
+    })
+    .to_vec()
+}
+
+/// What to call the model `value`: its name among `models`, else `value` itself.
+fn name_of<'a>(value: &'a str, models: &'a [Model]) -> &'a str {
+    models
+        .iter()
+        .find(|model| model.value == value)
+        .map_or(value, |model| model.name.as_str())
+}
 
 pub(super) const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
@@ -27,13 +42,17 @@ pub(super) fn default_row(default: Option<&str>) -> String {
     }
 }
 
-/// The model rows: the default, the aliases and, when the value is neither, that exact name
-/// (a conversation made with a model the aliases no longer point to).
-pub(super) fn model_rows(defaults: &Defaults, value: Option<&str>) -> Vec<String> {
+/// The model rows: the default, the `models` offered and, when the value is none of them,
+/// that exact name (a conversation made with a model no longer offered).
+pub(super) fn model_rows(
+    defaults: &Defaults,
+    models: &[Model],
+    value: Option<&str>,
+) -> Vec<String> {
     let mut rows = vec![default_row(defaults.model.as_deref())];
-    rows.extend(MODELS.iter().map(|(label, _)| (*label).to_owned()));
+    rows.extend(models.iter().map(|model| model.name.clone()));
     if let Some(value) = value
-        && !MODELS.iter().any(|(_, alias)| *alias == value)
+        && !models.iter().any(|model| model.value == value)
     {
         rows.push(value.to_owned());
     }
@@ -46,29 +65,25 @@ pub(super) fn effort_rows(defaults: &Defaults) -> Vec<String> {
     rows
 }
 
-/// What a model row stands for: `None` for the default, the alias, or the exact name.
-fn model_value(row: &str, rows: &[String]) -> Option<String> {
+/// What a model row stands for: `None` for the default, the model's value, or the exact name.
+fn model_value(row: &str, models: &[Model], rows: &[String]) -> Option<String> {
     if rows.first().map(String::as_str) == Some(row) {
         return None;
     }
     Some(
-        MODELS
+        models
             .iter()
-            .find(|(label, _)| *label == row)
-            .map_or(row, |(_, alias)| alias)
+            .find(|model| model.name == row)
+            .map_or(row, |model| model.value.as_str())
             .to_owned(),
     )
 }
 
 /// The row that shows `value`.
-pub(super) fn model_row(value: Option<&str>, rows: &[String]) -> String {
+pub(super) fn model_row(value: Option<&str>, models: &[Model], rows: &[String]) -> String {
     match value {
         None => rows[0].clone(),
-        Some(value) => MODELS
-            .iter()
-            .find(|(_, alias)| *alias == value)
-            .map_or(value, |(label, _)| label)
-            .to_owned(),
+        Some(value) => name_of(value, models).to_owned(),
     }
 }
 
@@ -77,13 +92,9 @@ fn effort_value(row: &str, rows: &[String]) -> Option<String> {
 }
 
 /// What the model button says: the name of the model in use.
-pub(super) fn model_label(value: Option<&str>, defaults: &Defaults) -> String {
+pub(super) fn model_label(value: Option<&str>, defaults: &Defaults, models: &[Model]) -> String {
     match value.or(defaults.model.as_deref()) {
-        Some(alias) => MODELS
-            .iter()
-            .find(|(_, a)| *a == alias)
-            .map_or(alias, |(label, _)| label)
-            .to_owned(),
+        Some(value) => name_of(value, models).to_owned(),
         None => "Default".to_owned(),
     }
 }
@@ -178,8 +189,8 @@ impl Chats {
     /// The row the user picked in the model menu.
     pub(super) fn claude_pick_model(&mut self, id: u64, row: &str, cx: &mut Context<Self>) {
         let current = self.find(id).and_then(|chat| chat.model.clone());
-        let rows = model_rows(&self.defaults, current.as_deref());
-        let value = model_value(row, &rows);
+        let rows = model_rows(&self.defaults, &self.models, current.as_deref());
+        let value = model_value(row, &self.models, &rows);
         let Some(chat) = self.find(id) else { return };
         if chat.model == value {
             return;
@@ -230,12 +241,25 @@ impl Chat {
 
 #[cfg(test)]
 mod tests {
-    use zide_claude::Defaults;
+    use zide_claude::{Defaults, Model};
 
     use super::{
-        effort_label, effort_position, effort_rows, effort_value, model_label, model_row,
-        model_rows, model_value,
+        effort_label, effort_position, effort_rows, effort_value, fallback_models, model_label,
+        model_row, model_rows, model_value,
     };
+
+    fn models() -> Vec<Model> {
+        [
+            ("opus", "Opus 5.5"),
+            ("sonnet", "Sonnet 5.5"),
+            ("claude-haiku-4-5", "Haiku 4.5"),
+        ]
+        .map(|(value, name)| Model {
+            value: value.into(),
+            name: name.into(),
+        })
+        .to_vec()
+    }
 
     fn defaults() -> Defaults {
         Defaults {
@@ -247,30 +271,57 @@ mod tests {
 
     #[test]
     fn the_first_row_names_the_default() {
-        assert_eq!(model_rows(&defaults(), None)[0], "Default (sonnet)");
+        assert_eq!(
+            model_rows(&defaults(), &models(), None)[0],
+            "Default (sonnet)"
+        );
         assert_eq!(effort_rows(&defaults())[0], "Default (medium)");
-        assert_eq!(model_rows(&Defaults::default(), None)[0], "Default");
+        assert_eq!(
+            model_rows(&Defaults::default(), &models(), None)[0],
+            "Default"
+        );
+    }
+
+    #[test]
+    fn every_model_offered_gets_a_row() {
+        let rows = model_rows(&defaults(), &models(), None);
+        assert_eq!(
+            rows,
+            ["Default (sonnet)", "Opus 5.5", "Sonnet 5.5", "Haiku 4.5"]
+        );
+        let aliases = model_rows(&Defaults::default(), &fallback_models(), None);
+        assert_eq!(aliases, ["Default", "Fable", "Opus", "Sonnet", "Haiku"]);
     }
 
     #[test]
     fn a_model_the_aliases_do_not_cover_gets_its_own_row() {
-        let rows = model_rows(&defaults(), Some("claude-old-1"));
+        let rows = model_rows(&defaults(), &models(), Some("claude-old-1"));
         assert_eq!(rows.last().map(String::as_str), Some("claude-old-1"));
-        assert_eq!(model_rows(&defaults(), Some("opus")).len(), 5);
-        assert_eq!(model_row(Some("claude-old-1"), &rows), "claude-old-1");
+        assert_eq!(model_rows(&defaults(), &models(), Some("opus")).len(), 4);
         assert_eq!(
-            model_value("claude-old-1", &rows).as_deref(),
+            model_row(Some("claude-old-1"), &models(), &rows),
+            "claude-old-1"
+        );
+        assert_eq!(
+            model_value("claude-old-1", &models(), &rows).as_deref(),
             Some("claude-old-1")
         );
     }
 
     #[test]
     fn rows_and_values_map_both_ways() {
-        let rows = model_rows(&defaults(), None);
-        assert_eq!(model_value("Default (sonnet)", &rows), None);
-        assert_eq!(model_value("Opus", &rows).as_deref(), Some("opus"));
-        assert_eq!(model_row(Some("opus"), &rows), "Opus");
-        assert_eq!(model_row(None, &rows), "Default (sonnet)");
+        let rows = model_rows(&defaults(), &models(), None);
+        assert_eq!(model_value("Default (sonnet)", &models(), &rows), None);
+        assert_eq!(
+            model_value("Opus 5.5", &models(), &rows).as_deref(),
+            Some("opus")
+        );
+        assert_eq!(
+            model_value("Haiku 4.5", &models(), &rows).as_deref(),
+            Some("claude-haiku-4-5")
+        );
+        assert_eq!(model_row(Some("opus"), &models(), &rows), "Opus 5.5");
+        assert_eq!(model_row(None, &models(), &rows), "Default (sonnet)");
         let efforts = effort_rows(&defaults());
         assert_eq!(effort_value("Default (medium)", &efforts), None);
         assert_eq!(effort_value("high", &efforts).as_deref(), Some("high"));
@@ -278,9 +329,19 @@ mod tests {
 
     #[test]
     fn the_buttons_name_what_is_in_use() {
-        assert_eq!(model_label(None, &defaults()), "Sonnet");
-        assert_eq!(model_label(Some("opus"), &defaults()), "Opus");
-        assert_eq!(model_label(None, &Defaults::default()), "Default");
+        assert_eq!(model_label(None, &defaults(), &models()), "Sonnet 5.5");
+        assert_eq!(
+            model_label(Some("opus"), &defaults(), &models()),
+            "Opus 5.5"
+        );
+        assert_eq!(
+            model_label(Some("claude-old-1"), &defaults(), &models()),
+            "claude-old-1"
+        );
+        assert_eq!(
+            model_label(None, &Defaults::default(), &models()),
+            "Default"
+        );
         assert_eq!(effort_label(None, &defaults()), "Medium");
         assert_eq!(effort_label(Some("xhigh"), &defaults()), "Xhigh");
     }
