@@ -289,7 +289,7 @@ impl Transcript {
             Event::Usage(usage) => self.usage = Some(usage),
             Event::ContextWindow(tokens) => self.context_window = Some(tokens),
             // account-wide, so the workspace keeps it, not a conversation
-            Event::Limits(_) => {}
+            Event::Limits(_) | Event::Models(_) => {}
             Event::PermissionRequest {
                 request_id,
                 tool_name,

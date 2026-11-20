@@ -107,7 +107,7 @@ impl Chats {
                                             .child(text)
                                     },
                                 ))
-                                .child(self.model_menu(chat, &chats.defaults, cx))
+                                .child(self.model_menu(chat, &chats.defaults, &chats.models, cx))
                                 .child(self.effort_menu(chat, &chats.defaults, cx))
                                 .child(self.context_menu(chat, chats, now))
                             }),
@@ -146,21 +146,19 @@ impl Chats {
         &self,
         chat: &Chat,
         defaults: &zide_claude::Defaults,
+        models: &[zide_claude::Model],
         cx: &mut Context<Self>,
     ) -> Popover {
         let workspace = cx.weak_entity();
         let id = chat.id;
-        let rows = options::model_rows(defaults, chat.model.as_deref());
-        let selected = options::model_row(chat.model.as_deref(), &rows);
+        let rows = options::model_rows(defaults, models, chat.model.as_deref());
+        let selected = options::model_row(chat.model.as_deref(), models, &rows);
         Popover::new("claude-model")
             .anchor(Anchor::BottomRight)
             .appearance(false)
-            .trigger(
-                Button::new("claude-model-button")
-                    .ghost()
-                    .xsmall()
-                    .label(options::model_label(chat.model.as_deref(), defaults)),
-            )
+            .trigger(Button::new("claude-model-button").ghost().xsmall().label(
+                options::model_label(chat.model.as_deref(), defaults, models),
+            ))
             .content(move |_, _, cx| {
                 let popover = cx.entity();
                 panel(240.).children(rows.iter().map(|row| {

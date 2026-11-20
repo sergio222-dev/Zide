@@ -29,7 +29,7 @@ use gpui_kit::*;
 use zide_claude::agents::{self, Agent, Kind};
 use zide_claude::history::{self, SessionInfo};
 use zide_claude::{
-    AgentSession, Block, Defaults, Event, Limits, Options, Overall, Permission, Resolution,
+    AgentSession, Block, Defaults, Event, Limits, Model, Options, Overall, Permission, Resolution,
     Session, Status, Transcript, Value,
 };
 
@@ -54,6 +54,9 @@ pub struct Chats {
     commands: Vec<String>,
     /// What `claude` uses for the project when no model or effort is picked.
     defaults: Defaults,
+    /// The models the model menu offers: the ones Claude last reported for this project, or
+    /// its aliases until it ever did.
+    models: Vec<Model>,
     /// The account's usage limits as the last turn of any chat reported them.
     limits: Option<Limits>,
     /// The list of earlier conversations, while it is open.
@@ -99,6 +102,9 @@ impl Chats {
         let mut chats = Chats {
             commands: crate::session::claude_commands(&root),
             defaults: zide_claude::defaults(&root),
+            models: Some(crate::session::claude_models(&root))
+                .filter(|models| !models.is_empty())
+                .unwrap_or_else(options::fallback_models),
             titles: crate::session::claude_titles(&root),
             root,
             bare,
@@ -1020,6 +1026,13 @@ impl Chats {
         {
             self.commands = commands.clone();
             crate::session::remember_claude_commands(&self.root, commands);
+        }
+        if let Event::Models(models) = &event
+            && !models.is_empty()
+            && self.models != *models
+        {
+            self.models = models.clone();
+            crate::session::remember_claude_models(&self.root, models);
         }
         if let Event::Limits(limits) = &event {
             self.limits = Some(*limits);

@@ -16,7 +16,7 @@ pub use cli::{
     Launcher, MIN_VERSION, Version, command_for, installed, launcher, probe, set_launcher,
 };
 pub use defaults::{Defaults, defaults};
-pub use event::{Event, Limits, Question, QuestionOption, Usage, Window, parse_events};
+pub use event::{Event, Limits, Model, Question, QuestionOption, Usage, Window, parse_events};
 pub use serde_json::Value;
 pub use session::{Image, Options, Session};
 pub use transcript::{

@@ -108,6 +108,14 @@ impl Session {
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
 
+        let mut session = Session { child, stdin };
+        // Its answer lists the models the CLI offers (`Event::Models`).
+        session.write(&json!({
+            "type": "control_request",
+            "request_id": "initialize",
+            "request": {"subtype": "initialize"},
+        }))?;
+
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -119,7 +127,7 @@ impl Session {
             }
             let _ = sender.send(Event::Exit);
         });
-        Ok((Session { child, stdin }, receiver))
+        Ok((session, receiver))
     }
 
     pub fn send(&mut self, text: &str) -> io::Result<()> {
