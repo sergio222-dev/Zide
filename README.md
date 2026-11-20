@@ -60,7 +60,7 @@ Only Linux x86_64 is published for now.
   with its files. A merge is finished by committing it in the commit panel. *Merge…* (or a double click on the file) opens the merge editor: yours on the left, theirs on the right and the result
   (it starts as the common ancestor) in the middle. The arrow of a change (`»` / `«`) puts it in the result — both sides go one
   under the other — and the cross (`✕`) leaves it out; additions are green, removals gray, replacements blue and changes both
-  sides made red. The toolbar applies every non-conflicting change (`F7` / `Shift+F7` move between changes); *Apply* is enabled
+  sides made red. Long lines scroll sideways, the three panes together (scrollbar at the bottom, or `Shift`+wheel). The toolbar applies every non-conflicting change (`F7` / `Shift+F7` move between changes); *Apply* is enabled
   once no conflict is left, and writes the result and marks the file resolved. The result can be typed over: click or use the
   arrows, `Home`/`End`, type, `Enter`, `Backspace`, `Delete`, `Ctrl+V` to paste, `Ctrl+Z` to undo. Typing does not settle a
   change: it keeps its color and arrows until its sides are applied or discarded (an arrow puts the side's lines over what was

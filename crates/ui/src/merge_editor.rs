@@ -10,7 +10,7 @@ use std::sync::Arc;
 use gpui_kit::component::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::scroll::{ScrollableMask, Scrollbar, ScrollbarHandle, ScrollbarMode};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use zide_git::merge::{Change, Handling, Kind, Merge, Segment, Which};
@@ -22,6 +22,80 @@ const ROW_HEIGHT: f32 = 22.;
 /// Width of the column of a side where its arrow, cross and line numbers are.
 const GUTTER: f32 = 88.;
 const NUMBER: f32 = 36.;
+/// Room after the widest line, so the caret at its end shows.
+const CARET_ROOM: f32 = 16.;
+
+/// The sideways scroll the three panes share: each keeps its third and its gutter, and shifts its
+/// text by this one offset. The list's handle measures the viewport for the scrollbar.
+#[derive(Clone)]
+pub(crate) struct HScroll {
+    /// Pixels the text is shifted by, zero or less.
+    x: Rc<Shared<f32>>,
+    max: Rc<Shared<f32>>,
+    /// Width a pane leaves for its text, as of the last frame.
+    text_width: Rc<Shared<f32>>,
+    viewport: UniformListScrollHandle,
+}
+
+impl HScroll {
+    fn new(viewport: UniformListScrollHandle) -> Self {
+        Self {
+            x: Rc::default(),
+            max: Rc::default(),
+            text_width: Rc::default(),
+            viewport,
+        }
+    }
+
+    pub(crate) fn x(&self) -> f32 {
+        self.x.get()
+    }
+
+    /// Moves the text, within what the widest line leaves to see.
+    pub(crate) fn set_x(&self, x: f32) {
+        self.x.set(x.clamp(-self.max.get(), 0.));
+    }
+
+    /// Takes the width of the widest line and the width a pane shows.
+    pub(crate) fn fit(&self, widest: f32, text_width: f32) {
+        self.text_width.set(text_width);
+        self.max.set((widest + CARET_ROOM - text_width).max(0.));
+        self.set_x(self.x());
+    }
+
+    /// Shifts the text so that `at` (pixels from the start of a line) shows.
+    fn reveal(&self, at: f32, cell: f32) {
+        let width = self.text_width.get();
+        if width <= 0. {
+            return;
+        }
+        // not clamped: a line typed longer only widens the limit on the next frame
+        if at + self.x() > width - cell {
+            self.x.set(-(at - width + cell));
+        } else if at + self.x() < 0. {
+            self.x.set(-at);
+        }
+    }
+}
+
+impl ScrollbarHandle for HScroll {
+    fn viewport_bounds(&self) -> Bounds<Pixels> {
+        ScrollbarHandle::viewport_bounds(&self.viewport)
+    }
+
+    fn offset(&self) -> Point<Pixels> {
+        point(px(self.x()), px(0.))
+    }
+
+    fn set_offset(&self, offset: Point<Pixels>) {
+        self.set_x(f32::from(offset.x));
+    }
+
+    fn content_size(&self) -> Size<Pixels> {
+        let viewport = self.viewport_bounds().size;
+        size(viewport.width + px(self.max.get()), viewport.height)
+    }
+}
 
 /// One line of a pane.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -184,6 +258,9 @@ pub struct MergeEditor {
     at: usize,
     pub busy: bool,
     scroll: UniformListScrollHandle,
+    h_scroll: HScroll,
+    /// Pixels the longest line of the three panes takes.
+    widest: f32,
 }
 
 /// What a line shows: no line break, tabs as spaces.
@@ -320,6 +397,7 @@ impl MergeEditor {
         family: SharedString,
         cell: f32,
     ) -> Self {
+        let scroll = UniformListScrollHandle::new();
         let mut editor = Self {
             path,
             merge,
@@ -335,7 +413,9 @@ impl MergeEditor {
             starts: Vec::new(),
             at: 0,
             busy: false,
-            scroll: UniformListScrollHandle::new(),
+            h_scroll: HScroll::new(scroll.clone()),
+            scroll,
+            widest: 0.,
         };
         editor.rebuild();
         editor.settle_caret();
@@ -420,6 +500,9 @@ impl MergeEditor {
     fn reveal(&mut self) {
         if let Some(row) = self.row_of(self.caret) {
             self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+        }
+        if let Some((_, at)) = self.caret_position() {
+            self.h_scroll.reveal(at, self.cell);
         }
     }
 
@@ -512,7 +595,9 @@ impl MergeEditor {
             return;
         };
         self.typing = false;
-        let cells = ((x - self.origin.get()) / self.cell).round().max(0.) as usize;
+        let cells = ((x - self.origin.get() - self.h_scroll.x()) / self.cell)
+            .round()
+            .max(0.) as usize;
         let text = self.line_text(segment, line);
         self.caret = Caret {
             segment,
@@ -530,6 +615,14 @@ impl MergeEditor {
 
     fn rebuild(&mut self) {
         let (rows, starts) = build_rows(&self.merge);
+        let cells = |cell: &Cell| cells_before(&cell.text, cell.text.chars().count());
+        let widest = rows
+            .iter()
+            .flat_map(|row| [&row.left, &row.mid, &row.right])
+            .map(cells)
+            .max()
+            .unwrap_or(0);
+        self.widest = widest as f32 * self.cell;
         (self.rows, self.starts) = (Arc::new(rows), starts);
     }
 
@@ -751,6 +844,11 @@ impl Workspace {
         let font = editor.family.clone();
         let caret = editor.caret_position();
         let origin = editor.origin.clone();
+        let h_scroll = editor.h_scroll.clone();
+        // a side pane's text is its third less its gutter and padding (the middle one has more)
+        let list_width = f32::from(ScrollbarHandle::viewport_bounds(&scroll).size.width);
+        h_scroll.fit(editor.widest, list_width / 3. - GUTTER - 8.);
+        let shift = h_scroll.x();
         let file_name = editor.path.rsplit('/').next().unwrap_or(&editor.path);
 
         let tool = |id: &'static str, glyph: &'static str| {
@@ -865,7 +963,15 @@ impl Workspace {
                 range
                     .map(|position| {
                         let caret = caret.filter(|(row, _)| *row == position).map(|(_, x)| x);
-                        row_view(&rows[position], position, &workspace, &font, caret, &origin)
+                        row_view(
+                            &rows[position],
+                            position,
+                            &workspace,
+                            &font,
+                            caret,
+                            &origin,
+                            shift,
+                        )
                     })
                     .collect()
             })
@@ -907,7 +1013,15 @@ impl Workspace {
                             .min_h_0()
                             .bg(rgb(theme::BACKGROUND))
                             .child(list)
-                            .child(Scrollbar::new(&editor.scroll)),
+                            .child(
+                                // over the list, so the wheel and Shift+wheel reach it anywhere
+                                div().absolute().inset_0().child(
+                                    ScrollableMask::new(Axis::Horizontal, &h_scroll)
+                                        .id("merge-horizontal-wheel"),
+                                ),
+                            )
+                            .child(Scrollbar::new(&editor.scroll))
+                            .child(Scrollbar::horizontal(&h_scroll).mode(ScrollbarMode::Always)),
                     )
                     .child(
                         div()
@@ -1008,7 +1122,9 @@ fn row_view(
     font: &SharedString,
     caret: Option<f32>,
     origin: &Rc<Shared<f32>>,
+    shift: f32,
 ) -> AnyElement {
+    // the text moves by the shared sideways scroll; the cell clips it to its pane
     let text = |cell: &Cell| {
         div()
             .flex_1()
@@ -1020,7 +1136,13 @@ fn row_view(
             .overflow_hidden()
             .whitespace_nowrap()
             .text_color(rgb(if cell.dim { theme::DIM } else { theme::TEXT }))
-            .child(cell.text.clone())
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .relative()
+                    .left(px(shift))
+                    .child(cell.text.clone()),
+            )
     };
     let number = |cell: &Cell, width: f32| {
         div()
@@ -1149,7 +1271,7 @@ fn row_view(
                             d.child(
                                 div()
                                     .absolute()
-                                    .left(px(4. + x))
+                                    .left(px(4. + x + shift))
                                     .top_0()
                                     .h_full()
                                     .w(px(2.))
@@ -1376,6 +1498,39 @@ mod tests {
         assert_eq!(editor.caret, caret_at(0, 0, 3));
         assert_eq!(col_at("\tx", 4), 1);
         assert_eq!(cells_before("\tx", 2), 5);
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_click_on_lines_scrolled_sideways_counts_the_hidden_characters() {
+        let mut editor = editor("abcdefghij\n", "abcdefghij\n", "abcdefghij\n");
+        editor.origin.set(100.);
+        editor.h_scroll.fit(editor.widest, 40.);
+        editor.h_scroll.set_x(-3. * 8.);
+        editor.click(0, 100. + 2. * 8. + 1.);
+        assert_eq!(editor.caret, caret_at(0, 0, 5));
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_caret_pulls_the_lines_sideways_to_stay_in_sight() {
+        let long = format!("{}\n", "x".repeat(100));
+        let mut editor = editor(&long, &long, &long);
+        editor.h_scroll.fit(editor.widest, 80.);
+        editor.move_caret(Move::End);
+        let shown = 100. * 8. + editor.h_scroll.x();
+        assert!((0. ..=80.).contains(&shown), "caret at {shown}");
+        editor.move_caret(Move::Home);
+        assert_eq!(editor.h_scroll.x(), 0.);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_widest_line_of_any_pane_sets_how_far_they_scroll() {
+        let editor = editor("ab\n", "abcdef\n", "ab\n");
+        assert_eq!(editor.widest, 6. * 8.);
+        editor.h_scroll.fit(editor.widest, 16.);
+        editor.h_scroll.set_x(-1000.);
+        assert_eq!(editor.h_scroll.x(), -(6. * 8. + CARET_ROOM - 16.));
+        editor.h_scroll.set_x(50.);
+        assert_eq!(editor.h_scroll.x(), 0.);
     }
 
     #[::core::prelude::v1::test]
