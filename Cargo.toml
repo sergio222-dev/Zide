@@ -7,3 +7,11 @@ edition = "2024"
 version = "0.1.17"
 license = "Apache-2.0"
 publish = false
+
+# Synchronized horizontal scroll for split diffs, until gpui-kit releases it.
+[patch.crates-io]
+gpui-base = { path = "../gpui-kit/crates/base" }
+gpui-component = { path = "../gpui-kit/crates/component" }
+gpui-component-macros = { path = "../gpui-kit/crates/component-macros" }
+gpui-kit = { path = "../gpui-kit/crates/kit" }
+gpui-kit-assets = { path = "../gpui-kit/crates/assets" }
