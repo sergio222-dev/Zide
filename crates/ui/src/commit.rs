@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::scroll::Scrollbar;
-use gpui_kit::component::{Disableable, Icon};
+use gpui_kit::component::{Disableable, Icon, WindowExt};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use zide_git::{ChangeKind, FileChange, stash::Stash};
@@ -180,6 +180,11 @@ impl Changes {
         })
     }
 
+    /// The changes the row `key` stands for.
+    pub fn changes_under(&self, key: &str) -> Vec<FileChange> {
+        self.under(key).cloned().collect()
+    }
+
     fn check_of(&self, key: &str) -> Check {
         let (mut on, mut total) = (0, 0);
         for change in self.under(key) {
@@ -315,6 +320,8 @@ pub struct CommitPanel {
     pub list_focused: bool,
     /// A `g` waits for the second one.
     g_pending: bool,
+    /// The context menu of a row (right click): its key and where it opened.
+    pub menu: Option<(String, Point<Pixels>)>,
 }
 
 impl CommitPanel {
@@ -329,6 +336,7 @@ impl CommitPanel {
             scroll: UniformListScrollHandle::new(),
             list_focused: false,
             g_pending: false,
+            menu: None,
         }
     }
 }
@@ -391,6 +399,59 @@ fn join(path: &str, name: &str) -> String {
     } else {
         format!("{path}/{name}")
     }
+}
+
+/// The context menu of a row of the changes, drawn at the mouse, with a layer under it that closes
+/// it on a click anywhere else.
+fn commit_menu(at: Point<Pixels>, workspace: Entity<Workspace>) -> impl IntoElement {
+    let (left, right, discard) = (workspace.clone(), workspace.clone(), workspace);
+    let backdrop = deferred(
+        div()
+            .id("changes-menu-backdrop")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                left.update(cx, |this, cx| this.close_commit_menu(cx))
+            })
+            .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                right.update(cx, |this, cx| this.close_commit_menu(cx))
+            }),
+    )
+    .with_priority(1);
+    let list = deferred(
+        anchored()
+            .position(at)
+            .snap_to_window_with_margin(px(8.))
+            .child(
+                div()
+                    .id("changes-menu")
+                    .occlude()
+                    .min_w(px(200.))
+                    .py_1()
+                    .bg(rgb(theme::POPUP))
+                    .border_1()
+                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .rounded_md()
+                    .child(
+                        div()
+                            .id("changes-menu-discard")
+                            .h(px(26.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .whitespace_nowrap()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(theme::SELECTION)))
+                            .on_click(move |_, window, cx| {
+                                discard.update(cx, |this, cx| this.confirm_discard(window, cx))
+                            })
+                            .child("Discard Changes…"),
+                    ),
+            ),
+    )
+    .with_priority(2);
+    div().absolute().inset_0().child(backdrop).child(list)
 }
 
 pub(crate) fn kind_color(kind: ChangeKind) -> u32 {
@@ -541,6 +602,12 @@ impl Workspace {
         if panel.tab == PanelTab::Stash {
             return self.stash_key(event, window, cx);
         }
+        if panel.menu.is_some() {
+            if event.keystroke.key == "escape" {
+                self.close_commit_menu(cx);
+            }
+            return cx.stop_propagation();
+        }
         let pending_g = std::mem::take(&mut panel.g_pending);
         let selected = panel.changes.selected_row();
         let key = crate::vim_key(event);
@@ -658,6 +725,76 @@ impl Workspace {
         self.refresh_commit(cx);
     }
 
+    /// Opens the context menu of row `key` at the mouse; the row becomes the selected one.
+    fn open_commit_menu(
+        &mut self,
+        key: &str,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(panel) = &mut self.commit {
+            panel.changes.select(key);
+            panel.menu = Some((key.to_string(), at));
+        }
+        self.focus_commit_list(window, cx);
+    }
+
+    fn close_commit_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(panel) = &mut self.commit {
+            panel.menu = None;
+            cx.notify();
+        }
+    }
+
+    /// Asks before throwing away the changes of the row the menu was opened on, then does it.
+    fn confirm_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.commit else {
+            return;
+        };
+        let Some((key, _)) = panel.menu.take() else {
+            return;
+        };
+        let changes = panel.changes.changes_under(&key);
+        cx.notify();
+        if changes.is_empty() {
+            return;
+        }
+        let files = changes.len();
+        let what = match &changes[..] {
+            [one] => format!("'{}'", one.path),
+            _ => format!("{files} files"),
+        };
+        let workspace = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (workspace, changes) = (workspace.clone(), changes.clone());
+            alert
+                .title("Discard Changes")
+                .description(format!(
+                    "Discard the changes of {what}? They go back to the last commit; new files \
+                     are deleted. This cannot be undone."
+                ))
+                .ok_text("Discard")
+                .show_cancel(true)
+                .on_ok(move |_, _, cx| {
+                    let changes = changes.clone();
+                    workspace.update(cx, |this, cx| {
+                        let done = format!(
+                            "Discarded the changes of {files} file{}",
+                            if files == 1 { "" } else { "s" }
+                        );
+                        this.git_task(
+                            "Could not discard the changes",
+                            Some(done),
+                            move |root| zide_git::discard(&root, &changes),
+                            cx,
+                        );
+                    });
+                    true
+                })
+        });
+    }
+
     /// Commits the ticked files; with `push`, publishes the branch afterwards.
     fn commit_selected(&mut self, push: bool, cx: &mut Context<Self>) {
         let Some(panel) = &mut self.commit else {
@@ -712,6 +849,10 @@ impl Workspace {
         let can_commit = !busy && (ticked > 0 || merging) || amend;
         let selected = panel.changes.selected_row().map(|row| row.key);
         let list_focused = panel.list_focused;
+        let menu = panel
+            .menu
+            .as_ref()
+            .map(|(_, at)| commit_menu(*at, workspace.clone()));
 
         let list = uniform_list("commit-tree", rows.len(), {
             let workspace = workspace.clone();
@@ -722,9 +863,11 @@ impl Workspace {
                         let key = row.key.clone();
                         let foldable = !matches!(row.kind, RowKind::File(_));
                         let (on_check, on_fold) = (workspace.clone(), workspace.clone());
-                        let on_open = workspace.clone();
+                        let (on_open, on_menu) = (workspace.clone(), workspace.clone());
                         let is_selected = selected.as_deref() == Some(key.as_str());
-                        let (check_key, fold_key, open_key) = (key.clone(), key.clone(), key);
+                        let (check_key, fold_key, menu_key) =
+                            (key.clone(), key.clone(), key.clone());
+                        let open_key = key;
                         div()
                             .id(("commit-row", index))
                             .w_full()
@@ -751,6 +894,12 @@ impl Workspace {
                                     if !foldable && event.click_count() == 2 {
                                         this.show_diff(&open_key, window, cx);
                                     }
+                                })
+                            })
+                            .on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                                cx.stop_propagation();
+                                on_menu.update(cx, |this, cx| {
+                                    this.open_commit_menu(&menu_key, event.position, window, cx)
                                 })
                             })
                             .child(
@@ -837,7 +986,8 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .child(list)
-                    .child(Scrollbar::new(&scroll)),
+                    .child(Scrollbar::new(&scroll))
+                    .children(menu),
             )
             .child(
                 div()
@@ -969,6 +1119,28 @@ mod tests {
             change("apps/api/src/card/infra/repo.ts", ChangeKind::Added),
         ]);
         changes
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_row_discards_its_file_or_every_file_below_it() {
+        let changes = sample();
+        let paths = |key: &str| -> Vec<String> {
+            changes
+                .changes_under(key)
+                .into_iter()
+                .map(|c| c.path)
+                .collect()
+        };
+        assert_eq!(paths(".atl/b.md"), [".atl/b.md"]);
+        assert_eq!(
+            paths("apps/api/src/card"),
+            [
+                "apps/api/src/card/create.ts",
+                "apps/api/src/card/infra/repo.ts"
+            ]
+        );
+        assert_eq!(paths("").len(), 4);
+        assert!(paths("apps/api/src/ca").is_empty());
     }
 
     fn names(changes: &Changes) -> Vec<(String, usize, usize)> {
