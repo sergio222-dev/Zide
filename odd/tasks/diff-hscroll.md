@@ -11,7 +11,7 @@ Objective: synchronized horizontal scroll in the side-by-side diff dialog. Branc
 
 ## Tasks
 
-- T1 [S2,S3] gpui-kit: per-column synchronized horizontal scroll in Split mode, with test. Route: inline (explorer mapped first: Mapping trigger, 9k-line module). Status: done, fork commit 229b814b (RED: canvas offset -120 != 0; GREEN: 762 component tests, clippy -D warnings clean; hit-test clipping mutation caught).
+- T1 [S2,S3] gpui-kit: per-column synchronized horizontal scroll in Split mode, with test. Route: inline (explorer mapped first: Mapping trigger, 9k-line module). Status: done, fork commit 229b814b (RED: canvas offset -120 != 0; GREEN: 762 component tests, clippy -D warnings clean; hit-test clipping mutation caught). Verifier blocker B1 (press on a short line scrolled out of sight picked the next line) fixed in fork commit after 229b814b, pinned by `a_short_line_scrolled_out_of_sight_still_takes_presses_on_its_row`.
 - T2 [S1,S4] zide: `[patch.crates-io]` to the fork (local path `../gpui-kit`), soft wrap removed in `crates/ui/src/diff_view.rs`, README. Route: inline. Status: done locally (workspace tests + clippy green); manual app check pending (user); not pushable while the patch is a local path.
 
 ## Log
@@ -20,3 +20,4 @@ Objective: synchronized horizontal scroll in the side-by-side diff dialog. Branc
 - L2 (2026-11-20): finding — gpui-kit `Diff` in Split without soft-wrap scrolls the whole two-column canvas with one `ScrollHandle`; the left column leaves the screen. Options offered; user chose "Patch en gpui-kit (Recommended)".
 - L3: read-only explorer mapping `crates/component/src/diff` for the design.
 - L4 (2026-11-20): design — split columns keep half the viewport; max shift = (content_width - viewport)/2; `SplitScroll` implements `ScrollbarHandle` so `ScrollableMask`/`Scrollbar` reuse it; `#source` wrapped in an `overflow_hidden` clip with `left(offset)`; selection hit-testing uses run bounds intersected with the content mask.
+- L5 (2026-11-20): independent verifier (Risk item 5): S3 PASS; S2 FAIL on B1 (run_at filtered hidden runs for line choice). Fix: visible bounds pick the side only, full bounds pick the line. Recheck: RED (Original,1) -> GREEN; 763 component tests, clippy clean. Advisories kept: 1px border not in code_width (pre-existing), single-column split files can over-scroll (pre-existing), no auto-scroll on drag to column edge (missing feature).
