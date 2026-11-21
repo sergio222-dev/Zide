@@ -763,7 +763,7 @@ impl Viewer {
             .scroll_to_item(self.rows.row_of(line), ScrollStrategy::Center);
     }
 
-    /// Puts the cursor on 1-based `line` and brings it into view.
+    /// Puts the cursor on 1-based `line` and centers it, as a search result or a usage is reached.
     pub fn go_to_line(&mut self, line: u32) {
         let row = (line as usize).saturating_sub(1).min(self.lines.len() - 1);
         let offset = self.buffer.line_start(row);
@@ -771,7 +771,7 @@ impl Viewer {
         self.vim.handle(&mut self.buffer, Key::Char('^')); // first non-blank of the line
         self.unfold_hiding(row);
         self.scroll
-            .scroll_to_item(self.rows.row_of(row), ScrollStrategy::Top);
+            .scroll_to_item(self.rows.row_of(row), ScrollStrategy::Center);
     }
 
     /// What the status bar shows of this file.
@@ -3757,6 +3757,21 @@ mod tests {
         assert_eq!(cursor_line(&viewer), 0);
         type_keys(&mut viewer, "G");
         assert!(viewer.rows.shows(cursor_line(&viewer)));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn going_to_a_line_centers_it_in_the_view() {
+        let (dir, file) = temp_file_as("line-center", "a.rs", FOLDABLE);
+        let mut viewer = Viewer::open(&dir, &file);
+        viewer.go_to_line(3);
+        let scroll = viewer.scroll.0.borrow();
+        let wanted = scroll
+            .deferred_scroll_to_item
+            .expect("a scroll is asked for");
+        assert_eq!(wanted.item_index, viewer.rows.row_of(2));
+        assert_eq!(wanted.strategy, ScrollStrategy::Center);
+        drop(scroll);
         fs::remove_dir_all(dir).unwrap();
     }
 
