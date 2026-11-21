@@ -2224,10 +2224,88 @@ pub fn commit(root: &Path, paths: &[String], message: &str, amend: bool) -> Resu
     run(root, &commit, false).map(drop)
 }
 
+/// Throws away the uncommitted changes of `changes`, staged or not: a file the last commit has
+/// goes back to it, and a file it does not have (added, or where a rename went) is deleted.
+pub fn discard(root: &Path, changes: &[FileChange]) -> Result<(), String> {
+    let (mut new, mut old) = (Vec::new(), Vec::new());
+    for change in changes {
+        match change.kind {
+            ChangeKind::Untracked => {}
+            ChangeKind::Added => new.push(change.path.as_str()),
+            ChangeKind::Renamed => {
+                new.push(change.path.as_str());
+                old.extend(change.from.as_deref());
+            }
+            _ => old.push(change.path.as_str()),
+        }
+    }
+    if !new.is_empty() {
+        let mut remove = vec!["--literal-pathspecs", "rm", "-q", "-f", "--"];
+        remove.extend(new);
+        run(root, &remove, false)?;
+    }
+    if !old.is_empty() {
+        let mut restore = vec![
+            "--literal-pathspecs",
+            "restore",
+            "--source=HEAD",
+            "--staged",
+            "--worktree",
+            "--",
+        ];
+        restore.extend(old);
+        run(root, &restore, false)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod commit_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn discarding_puts_every_kind_of_change_back_to_the_last_commit() {
+        let dir = repo("discard");
+        for name in [
+            "edited.txt",
+            "staged.txt",
+            "gone.txt",
+            "moved.txt",
+            "kept.txt",
+        ] {
+            fs::write(dir.join(name), "base\n").unwrap();
+        }
+        run(&dir, &["add", "."], false).unwrap();
+        run(&dir, &["commit", "-q", "-m", "base"], false).unwrap();
+        fs::write(dir.join("edited.txt"), "edit\n").unwrap();
+        fs::write(dir.join("staged.txt"), "staged\n").unwrap();
+        fs::remove_file(dir.join("gone.txt")).unwrap();
+        fs::write(dir.join("new.txt"), "new\n").unwrap();
+        fs::write(dir.join("kept.txt"), "kept edit\n").unwrap();
+        run(&dir, &["add", "staged.txt", "new.txt"], false).unwrap();
+        run(&dir, &["mv", "moved.txt", "renamed.txt"], false).unwrap();
+
+        let all = changes(&dir);
+        let picked: Vec<FileChange> = all
+            .into_iter()
+            .filter(|change| change.path != "kept.txt")
+            .collect();
+        assert_eq!(picked.len(), 5, "{picked:?}");
+        discard(&dir, &picked).unwrap();
+
+        let left: Vec<String> = changes(&dir).into_iter().map(|c| c.path).collect();
+        assert_eq!(left, ["kept.txt"]);
+        for name in ["edited.txt", "staged.txt", "gone.txt", "moved.txt"] {
+            assert_eq!(fs::read_to_string(dir.join(name)).unwrap(), "base\n");
+        }
+        assert!(!dir.join("new.txt").exists());
+        assert!(!dir.join("renamed.txt").exists());
+        assert_eq!(
+            fs::read_to_string(dir.join("kept.txt")).unwrap(),
+            "kept edit\n"
+        );
+    }
 
     fn repo(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("zide-git-{name}-{}", std::process::id()));
