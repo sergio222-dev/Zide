@@ -7,6 +7,7 @@ use gpui_kit::component::diff::{
     Diff, DiffDecoration, DiffFile, DiffLineRange, DiffMode, DiffSide, DiffState,
 };
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::*;
 use zide_git::FileChange;
 
@@ -234,10 +235,11 @@ impl Workspace {
                 .margin_top(size.height * 0.04)
                 .child(
                     div().h(size.height * 0.8).child(
+                        // long lines scroll sideways, both sides by the same offset
                         Diff::new(&state)
                             .header_visible(false)
-                            // one horizontal scroll is shared by both sides, so long lines wrap
-                            .soft_wrap(true)
+                            // in sight before any scrolling, so it is clear lines go on
+                            .horizontal_scrollbar_mode(ScrollbarMode::Always)
                             .decorations(decorations.clone()),
                     ),
                 )
