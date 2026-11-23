@@ -28,7 +28,7 @@ use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
 use crate::{
-    indent, minimap,
+    fonts, indent, minimap,
     rows::Rows,
     sticky::{MAX_STICKY, Scope, sticky_headers},
     theme,
@@ -45,18 +45,6 @@ const ROW_RATIO: f32 = 1.25;
 pub const DEFAULT_FONT_SIZE: f32 = 16.;
 pub const MIN_FONT_SIZE: f32 = 8.;
 pub const MAX_FONT_SIZE: f32 = 48.;
-/// Monospace families, in order of preference. GPUI does not resolve the generic `monospace`.
-pub(crate) const EDITOR_FONTS: &[&str] = &[
-    "JetBrains Mono",
-    "Iosevka Nerd Font Mono",
-    "0xProto Nerd Font Mono",
-    "Noto Sans Mono",
-    "DejaVu Sans Mono",
-    "Adwaita Mono",
-    "Liberation Mono",
-    "Menlo",
-    "Consolas",
-];
 
 /// Called with the start line of the region whose chevron was clicked.
 pub type FoldClick = Rc<dyn Fn(usize, &mut App)>;
@@ -318,6 +306,8 @@ pub struct Viewer {
     /// Scroll position (px) as of the last frame, before any wheel event of the next one.
     settled_top: f32,
     font_family: SharedString,
+    /// `fonts::generation()` when `font_family` was picked.
+    font_generation: u64,
     /// Declarations of the file as of `built_at`, for the breadcrumb.
     outline: Vec<StubNode>,
     /// The declarations of `outline` that span several lines, for sticky scroll.
@@ -395,7 +385,8 @@ impl Viewer {
             cell_width: None,
             font_size: DEFAULT_FONT_SIZE,
             settled_top: 0.,
-            font_family: EDITOR_FONTS[0].into(),
+            font_family: fonts::editor(),
+            font_generation: fonts::generation(),
             outline: Vec::new(),
             scopes: Vec::new(),
             root_name: root
@@ -1010,16 +1001,11 @@ impl Viewer {
     /// Advances the glide one frame; asks for another while it lasts.
     pub fn tick(&mut self, window: &mut Window) {
         self.settled_top = -f32::from(self.scroll.0.borrow().base_handle.offset().y);
-        if self.cell_width.is_none() {
+        if self.cell_width.is_none() || self.font_generation != fonts::generation() {
             let text_system = window.text_system();
             let size = px(self.font_size);
-            let installed = text_system.all_font_names();
-            if let Some(family) = EDITOR_FONTS
-                .iter()
-                .find(|family| installed.iter().any(|name| name == *family))
-            {
-                self.font_family = (*family).into();
-            }
+            self.font_family = fonts::editor();
+            self.font_generation = fonts::generation();
             let id = text_system.resolve_font(&font(self.font_family.clone()));
             self.cell_width = text_system
                 .advance(id, size, 'm')

@@ -15,7 +15,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use zide_git::merge::{Change, Handling, Kind, Merge, Segment, Which};
 
-use crate::viewer::EDITOR_FONTS;
+use crate::fonts;
 use crate::{Workspace, theme};
 
 const ROW_HEIGHT: f32 = 22.;
@@ -1086,16 +1086,10 @@ impl Workspace {
     }
 }
 
-/// The first editor font that is installed, and the width of one of its characters.
+/// The editor font and the width of one of its characters.
 fn measure_font(window: &Window) -> (SharedString, f32) {
     let text_system = window.text_system();
-    let installed = text_system.all_font_names();
-    let family: SharedString = EDITOR_FONTS
-        .iter()
-        .find(|family| installed.iter().any(|name| name == *family))
-        .unwrap_or(&EDITOR_FONTS[0])
-        .to_string()
-        .into();
+    let family = fonts::editor();
     let id = text_system.resolve_font(&font(family.clone()));
     let cell = text_system
         .advance(id, px(13.), 'm')
