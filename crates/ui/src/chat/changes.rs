@@ -7,7 +7,6 @@ use gpui_kit::*;
 use similar::{ChangeTag, TextDiff};
 use zide_claude::Value;
 
-use super::tools::MONO;
 use crate::theme;
 
 /// Rows shown for one change before the rest is counted, as the Claude CLI does for an edit.
@@ -233,7 +232,7 @@ pub(super) fn view(edit: &Edit, numbered: bool) -> Div {
             .overflow_hidden()
             .bg(rgb(theme::BACKGROUND))
             .py_1()
-            .font_family(MONO)
+            .font_family(crate::fonts::editor())
             .text_sm()
             .children(shown)
             .children((hidden > 0).then(|| {

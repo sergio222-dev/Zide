@@ -24,6 +24,7 @@ mod definition;
 mod diff_view;
 mod file_icon;
 mod fileops;
+mod fonts;
 mod git_state;
 mod gitlog;
 mod gitop;
@@ -532,6 +533,21 @@ fn action_registry() -> Vec<ActionDef> {
             only_when_conflicted: false,
             state: None,
             run: |ws, window, cx| ws.configure_agent(window, cx),
+        },
+        ActionDef {
+            name: "Fonts",
+            synonyms: &[
+                "font family",
+                "typeface",
+                "editor font",
+                "ui font",
+                "settings",
+            ],
+            action: None,
+            closes_popup: true,
+            only_when_conflicted: false,
+            state: None,
+            run: |ws, window, cx| ws.configure_fonts(window, cx),
         },
         ActionDef {
             name: "Update Zide",
@@ -4670,8 +4686,6 @@ fn apply_palette(cx: &mut App) {
     // `update` (not `global_mut`) keeps the theme's tokens in step: the dialogs paint their
     // surface from them
     gpui_kit::component::Theme::update(cx, |theme| {
-        // the bundled default (`.SystemUIFont`) showed no bold; naming the family finds its bold face
-        theme.font_family = "Noto Sans".into();
         // toasts stack from the bottom right: keep them above the status bar
         theme.notification.margins.bottom = STATUS_BAR_HEIGHT + px(16.);
         let colors = &mut theme.colors;
@@ -4708,6 +4722,7 @@ fn main() {
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         apply_palette(cx);
         settings::apply();
+        fonts::apply(cx);
         // Root binds Tab to focus-next; a deeper context wins over it.
         cx.bind_keys([
             KeyBinding::new("tab", SwitchTab, Some("Workspace")),

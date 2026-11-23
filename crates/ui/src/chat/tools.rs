@@ -10,9 +10,6 @@ use super::{Chat, Chats, changes, summary};
 use crate::markdown::TextView;
 use crate::theme;
 
-/// Monospace for code and output; GPUI falls back to its default font when it is missing.
-pub(super) const MONO: &str = "JetBrains Mono";
-
 /// Lines of output shown before the rest is folded away.
 const OUTPUT_LINES: usize = 30;
 
@@ -36,7 +33,7 @@ fn mono_block() -> Div {
         .bg(rgb(theme::BACKGROUND))
         .px_3()
         .py_2()
-        .font_family(MONO)
+        .font_family(crate::fonts::editor())
         .text_sm()
 }
 

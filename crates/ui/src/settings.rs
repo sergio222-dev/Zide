@@ -1,6 +1,7 @@
 //! Zide's own settings, in `~/.config/zide/settings.json`. They say how to start the agent:
 //! `agent_servers` maps a name to the command that runs Claude (a sandbox wrapper, say), and
 //! `agent` names the one in use; and `confirm_stop: false` lets Esc stop Claude without asking.
+//! `editor_font` and `ui_font` name the font families Zide draws code and its interface in.
 //! Keys Zide does not know are kept when the file is saved.
 
 use std::io;
@@ -56,6 +57,61 @@ pub fn toggle_confirm_stop() -> Result<bool, String> {
     let path = path().ok_or("No config folder to save the setting in")?;
     update(&path, |file| with_confirm_stop(file, on)).map_err(|e| e.to_string())?;
     Ok(on)
+}
+
+/// The font families chosen in `editor_font` and `ui_font`; `None` is Zide's own pick.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Fonts {
+    pub editor: Option<String>,
+    pub ui: Option<String>,
+}
+
+static FONTS: std::sync::RwLock<Fonts> = std::sync::RwLock::new(Fonts {
+    editor: None,
+    ui: None,
+});
+
+/// The fonts as the settings last applied (or the Fonts dialog) say.
+pub fn fonts() -> Fonts {
+    FONTS.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn fonts_in(file: &Value) -> Fonts {
+    let family = |key: &str| {
+        file.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    };
+    Fonts {
+        editor: family("editor_font"),
+        ui: family("ui_font"),
+    }
+}
+
+/// `file` with `fonts`; a font left to Zide has no key. The other settings stay.
+pub fn with_fonts(mut file: Value, fonts: &Fonts) -> Value {
+    if !file.is_object() {
+        file = json!({});
+    }
+    let map = file.as_object_mut().expect("made an object above");
+    for (key, family) in [("editor_font", &fonts.editor), ("ui_font", &fonts.ui)] {
+        match family {
+            Some(family) => map.insert(key.into(), json!(family)),
+            None => map.remove(key),
+        };
+    }
+    file
+}
+
+/// The Fonts dialog: takes effect at once and is saved; a file that cannot be saved is
+/// reported, and the choice then lasts until Zide closes.
+pub fn set_fonts(fonts: Fonts) -> Result<(), String> {
+    *FONTS.write().unwrap_or_else(|e| e.into_inner()) = fonts.clone();
+    let path = path().ok_or("No config folder to save the setting in")?;
+    update(&path, |file| with_fonts(file, &fonts)).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// One entry of `agent_servers`. `args` go before Claude's own arguments: Zide speaks Claude's
@@ -246,6 +302,7 @@ pub fn use_file(file: &Value) {
     *PROTOCOL.write().unwrap_or_else(|e| e.into_inner()) =
         agent.map(|agent| agent.protocol).unwrap_or_default();
     CONFIRM_STOP.store(confirm_stop_in(file), Ordering::Relaxed);
+    *FONTS.write().unwrap_or_else(|e| e.into_inner()) = fonts_in(file);
 }
 
 /// Reads the settings and makes Claude start as they say; a problem is logged, and Claude then
@@ -443,5 +500,20 @@ mod tests {
         assert!(!confirm_stop_in(&off));
         assert_eq!(active(&off), Some(sandbox()));
         assert!(confirm_stop_in(&with_confirm_stop(off, true)));
+    }
+
+    #[::core::prelude::v1::test]
+    fn fonts_are_saved_beside_the_other_settings_and_dropped_when_left_to_zide() {
+        assert_eq!(fonts_in(&json!({})), Fonts::default());
+        assert_eq!(fonts_in(&json!({ "editor_font": "  " })), Fonts::default());
+        let chosen = Fonts {
+            editor: named("MonoLisaCode"),
+            ui: named("Inter"),
+        };
+        let file = with_fonts(with_confirm_stop(json!({}), false), &chosen);
+        assert_eq!(fonts_in(&file), chosen);
+        assert!(!confirm_stop_in(&file));
+        let file = with_fonts(file, &Fonts::default());
+        assert_eq!(file, json!({ "confirm_stop": false }));
     }
 }

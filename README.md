@@ -81,6 +81,7 @@ Only Linux x86_64 is published for now.
 - **Syntax highlighting** with tree-sitter (Rust, JavaScript, TypeScript, TSX, Go, Python, Markdown).
 - **Breadcrumb** with the enclosing symbols at the cursor.
 - **Whitespace dots and rainbow indent guides**, per-project font size (Ctrl+wheel to zoom).
+- **Fonts**: run **Fonts** in Find Action to pick the code font (monospace families only) and the interface font; saved as `editor_font` and `ui_font` in `~/.config/zide/settings.json`.
 - **Navigation**: next/previous method (`Alt+Down` / `Alt+Up`), extend/shrink selection.
 - **Autosave** and live reload of the project tree.
 - **Self-updater**: checks GitHub Releases at startup and verifies the minisign signature
