@@ -1,4 +1,4 @@
-use std::{io, path::Path, sync::mpsc};
+use std::{collections::HashSet, io, path::Path, sync::mpsc};
 
 use ignore::{WalkBuilder, WalkState};
 
@@ -6,6 +6,9 @@ use ignore::{WalkBuilder, WalkState};
 #[derive(Debug, Default)]
 pub struct Scan {
     pub files: Vec<String>,
+    /// Aligned with `files`: true for a file git ignores, listed only because the scan was
+    /// asked to show ignored files.
+    pub ignored: Vec<bool>,
     /// Directories, including empty ones and excluding `root` itself.
     pub dirs: Vec<String>,
 }
@@ -24,6 +27,20 @@ pub fn scan_files(root: &Path) -> io::Result<Vec<String>> {
 /// `show_ignored`, what git ignores (`.gitignore`, `.git/info/exclude`, the global ignore file,
 /// `.ignore`) is listed too; `.git` and Zide's own folder never are.
 pub fn scan_project(root: &Path, show_ignored: bool) -> io::Result<Scan> {
+    let mut scan = walk(root, show_ignored)?;
+    scan.ignored = if show_ignored {
+        // a second walk that honours the ignore files is cheap: it never enters what they
+        // ignore, which is where nearly all the files of the first one are
+        let kept: HashSet<String> = walk(root, false)?.files.into_iter().collect();
+        scan.files.iter().map(|file| !kept.contains(file)).collect()
+    } else {
+        vec![false; scan.files.len()]
+    };
+    Ok(scan)
+}
+
+/// The files and directories under `root`, the ignored ones too with `show_ignored`.
+fn walk(root: &Path, show_ignored: bool) -> io::Result<Scan> {
     if !root.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotADirectory,
@@ -108,14 +125,22 @@ mod tests {
         fs::write(dir.join("target/out.bin"), "").unwrap();
         fs::write(dir.join(".git/HEAD"), "").unwrap();
 
-        let mut files = scan_project(&dir, true).unwrap().files;
+        let scan = scan_project(&dir, true).unwrap();
+        let mut files: Vec<(String, bool)> = scan.files.into_iter().zip(scan.ignored).collect();
         files.sort();
+        let hidden = scan_project(&dir, false).unwrap();
         fs::remove_dir_all(&dir).unwrap();
 
+        // listed, and marked as what git ignores
         assert_eq!(
             files,
-            [".gitignore", "docker-compose.yml", "target/out.bin"]
+            [
+                (".gitignore".into(), false),
+                ("docker-compose.yml".into(), true),
+                ("target/out.bin".into(), true)
+            ]
         );
+        assert_eq!(hidden.ignored, [false]);
     }
 
     #[test]
