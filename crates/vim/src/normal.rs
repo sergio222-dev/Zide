@@ -386,16 +386,7 @@ impl Vim {
                 self.cursor = line_end(buffer, position.line);
                 self.mode = Mode::Insert;
             }
-            'o' | 'O' => {
-                let (at, text) = if c == 'o' {
-                    (line_end(buffer, position.line), "\n")
-                } else {
-                    (buffer.line_start(position.line), "\n")
-                };
-                buffer.insert(at, text);
-                self.cursor = if c == 'o' { at + 1 } else { at };
-                self.mode = Mode::Insert;
-            }
+            'o' | 'O' => self.open_line(buffer, c == 'o'),
             'x' => {
                 let length = buffer.line_len(position.line);
                 let end = self.cursor + count.min(length - position.column.min(length));

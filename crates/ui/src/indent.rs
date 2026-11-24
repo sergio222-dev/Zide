@@ -54,6 +54,34 @@ pub fn levels(lines: &[&str]) -> (usize, Vec<usize>) {
     (step, levels)
 }
 
+/// One indent level as the file already writes it: a tab when most indented lines start with
+/// one, else as many spaces as its usual step. `None` when nothing is indented (or only by one
+/// space, as in the ` *` of block comments), so the configured default applies.
+pub fn unit(lines: &[&str]) -> Option<String> {
+    let code = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('*'));
+    let (mut tabs, mut spaces) = (0, 0);
+    for line in code.clone() {
+        match line.chars().next() {
+            Some('\t') => tabs += 1,
+            Some(' ') => spaces += 1,
+            _ => {}
+        }
+    }
+    if tabs > spaces {
+        return Some("\t".into());
+    }
+    if spaces == 0 {
+        return None;
+    }
+    let widths: Vec<Option<usize>> = code
+        .map(|line| Some(line.chars().take_while(|&c| c == ' ').count()))
+        .collect();
+    let step = step(&widths);
+    (step >= 2).then(|| " ".repeat(step))
+}
+
 const DEFAULT_STEP: usize = 4;
 /// A bigger jump is a continuation or alignment, not a new level.
 const MAX_STEP: usize = 8;
@@ -130,6 +158,18 @@ mod tests {
             "    }",
         ];
         assert_eq!(levels(&lines).0, 4);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_unit_is_what_the_file_already_uses() {
+        assert_eq!(
+            unit(&["a {", "  b {", "    c", "  }", "}"]).as_deref(),
+            Some("  ")
+        );
+        assert_eq!(unit(&["a {", "\tb", "\t\tc", "}"]).as_deref(), Some("\t"));
+        assert_eq!(unit(&["a", "", "b"]), None);
+        // the space before a block comment's stars is not a level
+        assert_eq!(unit(&["/**", " * a", " */", "b"]), None);
     }
 
     #[::core::prelude::v1::test]

@@ -82,6 +82,7 @@ Only Linux x86_64 is published for now.
 - **Breadcrumb** with the enclosing symbols at the cursor.
 - **Whitespace dots and rainbow indent guides**, per-project font size (Ctrl+wheel to zoom).
 - **Fonts**: run **Fonts** in Find Action to pick the code font (monospace families only) and the interface font; saved as `editor_font` and `ui_font` in `~/.config/zide/settings.json`.
+- **Auto-indent**: Enter, `o` and `O` keep the line's indentation, one level deeper after `{`, `[`, `(` or `:`; Enter between a pair puts the closer on its own line, and a closer typed first on a line goes back one level. Tab and Backspace work by whole levels. The level is the one the file already uses; files without indentation take `indent` from `~/.config/zide/settings.json` (`"tab"` or a number of spaces, 4 by default).
 - **Navigation**: next/previous method (`Alt+Down` / `Alt+Up`), extend/shrink selection.
 - **Autosave** and live reload of the project tree.
 - **Self-updater**: checks GitHub Releases at startup and verifies the minisign signature
