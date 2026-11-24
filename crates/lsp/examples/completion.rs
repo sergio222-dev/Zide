@@ -46,6 +46,38 @@ fn main() {
         _ => CompletionTrigger::Invoked,
     };
     let character = utf16_column(&source_line, cursor);
+    // after a character that opens signature help, show the signature too
+    let (signature_triggers, _) = client.signature_triggers();
+    if let Some(c) = typed
+        .chars()
+        .last()
+        .filter(|c| signature_triggers.contains(&c.to_string()))
+    {
+        let asked = Instant::now();
+        let hint = client
+            .signature_help(
+                &path,
+                line as u32 - 1,
+                character,
+                Some(c),
+                false,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        println!("signature in {:?}: {hint:?}", asked.elapsed());
+        if let Some(range) = hint.and_then(|h| {
+            Some(
+                h.label
+                    .chars()
+                    .skip(h.active.clone()?.start)
+                    .take(h.active?.len())
+                    .collect::<String>(),
+            )
+        }) {
+            println!("active parameter: {range}");
+        }
+        return;
+    }
     // a server still loading the project may answer nothing at first
     let started = Instant::now();
     let found = loop {

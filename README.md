@@ -38,8 +38,12 @@ Only Linux x86_64 is published for now.
   symbol index and the status line says so.
 - **Code completion** while inserting: the file's language server offers what fits as you type a word or after a character the server lists (`.`, `:`),
   in a popup at the caret narrowed down as you keep typing (IntelliJ matching: `gBN` finds `getByName`).
-  `Up`/`Down` or `Ctrl+N`/`Ctrl+P` pick, `Enter` or `Tab` accepts (with the import it needs, when the server offers
-  one), `Esc` leaves Insert and the popup; `Ctrl+Space` asks by hand. `.` repeats the completed word.
+  `Up`/`Down` or `Ctrl+N`/`Ctrl+P` pick, `Enter`, `Tab` or a click accepts (with the import it needs, when the server
+  offers one), `Esc` leaves Insert and the popup; `Ctrl+Space` asks by hand. `.` repeats the completed word.
+  Without a language server (or when it has nothing for a word) the project's symbols of the file's language and the
+  words of the file are offered instead; typing offers them in code files, `Ctrl+Space` in any file.
+- **Signature help** while typing a call: after `(` or `,` the signature shows over the line, the parameter being
+  typed in bold, and follows the cursor until the call is closed.
 - **Status bar**: messages on the left; on the right the branch's state against its upstream (`↑` to push, `↓` to pull,
   `Δ` when diverged), the branch name, the cursor position and the vim mode.
 - **Branch switcher** (``Ctrl+Shift+` ``, click the branch in the status bar, or Find Action → *Switch Branch*): Recent, Local, Remote and

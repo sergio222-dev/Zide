@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use crate::{
     completion::{Completion, CompletionTrigger, parse_completion},
     connection::{Connection, Error},
+    signature::{SignatureHint, parse_signature_help},
     text::{path_to_uri, uri_to_path},
 };
 
@@ -195,6 +196,10 @@ pub struct Client {
     has_completion: bool,
     /// The characters after which the server has something to offer (`.`, `:`).
     completion_triggers: Vec<String>,
+    /// The characters that open signature help (`(`, `,`), and those that update one already
+    /// shown (`)`); both empty for a server without it.
+    signature_triggers: Vec<String>,
+    signature_retriggers: Vec<String>,
 }
 
 impl Client {
@@ -299,6 +304,13 @@ impl Client {
                                 "labelDetailsSupport": true,
                             },
                         },
+                        "signatureHelp": {
+                            "contextSupport": true,
+                            "signatureInformation": {
+                                "parameterInformation": {"labelOffsetSupport": true},
+                                "activeParameterSupport": true,
+                            },
+                        },
                     },
                     "workspace": {"workspaceFolders": true, "configuration": true},
                     "window": {"workDoneProgress": true},
@@ -322,15 +334,15 @@ impl Client {
             has_inlay_hints: !initialized["capabilities"]["inlayHintProvider"].is_null()
                 && initialized["capabilities"]["inlayHintProvider"] != false,
             has_completion: !initialized["capabilities"]["completionProvider"].is_null(),
-            completion_triggers:
-                initialized["capabilities"]["completionProvider"]["triggerCharacters"]
-                    .as_array()
-                    .map_or_else(Vec::new, |triggers| {
-                        triggers
-                            .iter()
-                            .filter_map(|t| t.as_str().map(str::to_string))
-                            .collect()
-                    }),
+            completion_triggers: strings(
+                &initialized["capabilities"]["completionProvider"]["triggerCharacters"],
+            ),
+            signature_triggers: strings(
+                &initialized["capabilities"]["signatureHelpProvider"]["triggerCharacters"],
+            ),
+            signature_retriggers: strings(
+                &initialized["capabilities"]["signatureHelpProvider"]["retriggerCharacters"],
+            ),
         })
     }
 
@@ -488,6 +500,54 @@ impl Client {
         })
     }
 
+    /// The characters that open signature help (`(`, `,`) and those that only update one
+    /// already shown (`)`); empty for a server without it.
+    pub fn signature_triggers(&self) -> (&[String], &[String]) {
+        (&self.signature_triggers, &self.signature_retriggers)
+    }
+
+    /// The signature of the call around `line`:`character` (0-based, UTF-16) of `path` (synced
+    /// before), `None` outside a call. `trigger` is the character just typed, if it was one;
+    /// `shown` says a hint is already up, so the server updates it. Setting `cancelled` gives
+    /// up on the answer.
+    pub fn signature_help(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+        trigger: Option<char>,
+        shown: bool,
+        cancelled: &AtomicBool,
+    ) -> Result<Option<SignatureHint>, Error> {
+        if self.signature_triggers.is_empty() {
+            return Ok(None);
+        }
+        let mut context = match trigger {
+            Some(c) => json!({"triggerKind": 2, "triggerCharacter": c.to_string()}),
+            None => json!({"triggerKind": 3}),
+        };
+        context["isRetrigger"] = json!(shown);
+        let result = self.connection.request_cancellable(
+            "textDocument/signatureHelp",
+            json!({
+                "textDocument": {"uri": path_to_uri(path)},
+                "position": {"line": line, "character": character},
+                "context": context,
+            }),
+            COMPLETION_TIMEOUT,
+            cancelled,
+        );
+        let result = match result {
+            // the text changed under the question: no hint, the next key asks again
+            Err(Error::Server { code: -32801, .. }) => return Ok(None),
+            other => other?,
+        };
+        parse_signature_help(result).map_err(|e| Error::Server {
+            code: 0,
+            message: format!("unexpected signature help answer: {e}"),
+        })
+    }
+
     /// Where the symbol at `line`:`character` (0-based, UTF-16) appears in its own document,
     /// as ranges.
     pub fn document_highlight(
@@ -604,6 +664,16 @@ impl Drop for Client {
             let _ = child.wait();
         }
     }
+}
+
+/// The strings of a JSON array (trigger characters); empty for anything else.
+fn strings(value: &Value) -> Vec<String> {
+    value.as_array().map_or_else(Vec::new, |items| {
+        items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+            .collect()
+    })
 }
 
 /// The locations of a `textDocument/definition` answer, which is a `Location`, a list of them,
@@ -737,6 +807,10 @@ mod tests {
                         "diagnosticProvider": {},
                         "inlayHintProvider": true,
                         "completionProvider": {"triggerCharacters": [".", ":"]},
+                        "signatureHelpProvider": {
+                            "triggerCharacters": ["(", ","],
+                            "retriggerCharacters": [")"],
+                        },
                     }})
                 } else {
                     answer(method)
@@ -960,6 +1034,48 @@ mod tests {
         assert_eq!(
             initialize["params"]["capabilities"]["textDocument"]["completion"]["completionItem"]["snippetSupport"],
             false
+        );
+        drop(client);
+    }
+
+    #[test]
+    fn signature_help_says_what_typed_it_and_whether_a_hint_is_up() {
+        let (connection, wire, server) = connect(|_, _| {});
+        let _server = serve(wire.clone(), server, |method| {
+            assert_eq!(method, "textDocument/signatureHelp");
+            json!({"signatures": [{"label": "f(x: u8)", "parameters": [{"label": "x: u8"}]}]})
+        });
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        let (triggers, retriggers) = client.signature_triggers();
+        assert_eq!(
+            (triggers, retriggers),
+            (
+                &["(".to_string(), ",".to_string()][..],
+                &[")".to_string()][..]
+            )
+        );
+        let never = AtomicBool::new(false);
+        let path = Path::new("/w/a.ts");
+        let hint = client
+            .signature_help(path, 1, 2, Some('('), false, &never)
+            .unwrap()
+            .unwrap();
+        assert_eq!((hint.label.as_str(), hint.active), ("f(x: u8)", Some(2..7)));
+        client
+            .signature_help(path, 1, 3, None, true, &never)
+            .unwrap();
+        let asked: Vec<_> = wire
+            .messages()
+            .into_iter()
+            .filter(|m| m["method"] == "textDocument/signatureHelp")
+            .map(|m| m["params"]["context"].clone())
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                json!({"triggerKind": 2, "triggerCharacter": "(", "isRetrigger": false}),
+                json!({"triggerKind": 3, "isRetrigger": true}),
+            ]
         );
         drop(client);
     }

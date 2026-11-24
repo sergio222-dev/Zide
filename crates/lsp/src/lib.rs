@@ -6,6 +6,7 @@ mod connection;
 mod framing;
 mod servers;
 mod settings;
+mod signature;
 mod text;
 
 pub use client::{Client, ParameterHint, ServerSpec, server_for};
@@ -18,4 +19,5 @@ pub use lsp_types::{
     NumberOrString, Position, Range, TextEdit,
 };
 pub use servers::servers_dir;
+pub use signature::{SignatureHint, parse_signature_help};
 pub use text::{char_column, path_to_uri, uri_to_path, utf16_column};

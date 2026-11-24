@@ -6,10 +6,17 @@
 
 use std::ops::Range;
 
+use std::{collections::HashSet, rc::Rc, sync::atomic::AtomicBool};
+
 use gpui_kit::{prelude::FluentBuilder, *};
+use zide_index::FileIndex;
 use zide_lsp::{Completion, CompletionItem, CompletionItemKind, rank};
+use zide_stubs::{StubKind, StubStore, language_for_path, search_symbols};
 
 use crate::theme;
+
+/// A click on a row of the completion popup, by its index among the rows shown.
+pub type CompletionPick = Rc<dyn Fn(usize, &mut App)>;
 
 /// How many rows the popup shows at once; the selection scrolls the rest into view.
 pub const VISIBLE_ROWS: usize = 10;
@@ -76,6 +83,14 @@ impl CompletionPopup {
         }
     }
 
+    /// Selects the `index`-th row shown (from the top of the list, not of the screen).
+    pub fn select(&mut self, index: usize) {
+        if index < self.shown.len() {
+            self.selected = index;
+            self.keep_visible();
+        }
+    }
+
     pub fn selected(&self) -> Option<&CompletionItem> {
         self.items.get(*self.shown.get(self.selected)?)
     }
@@ -92,15 +107,22 @@ impl CompletionPopup {
 
     /// The popup's box, to be placed at the caret: one row per item with its kind, label,
     /// signature and detail, the selected one highlighted.
-    pub fn view(&self, row_height: f32) -> Div {
+    pub fn view(&self, row_height: f32, on_pick: CompletionPick) -> Div {
         let window = self.window();
         let rows = self.shown[window.clone()]
             .iter()
             .enumerate()
             .map(|(at, &i)| {
                 let item = &self.items[i];
-                let selected = window.start + at == self.selected;
+                let index = window.start + at;
+                let selected = index == self.selected;
+                let pick = on_pick.clone();
                 div()
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        cx.stop_propagation(); // not a click on the text under it
+                        pick(index, cx);
+                    })
                     .flex()
                     .items_center()
                     .gap_2()
@@ -154,6 +176,102 @@ impl CompletionPopup {
     }
 }
 
+/// How many project symbols local completion looks at for one word.
+const SYMBOL_LIMIT: usize = 200;
+
+/// Completion without a language server: the project's symbols of the file's language whose
+/// names match `typed`, then the other words of `text` (the word at the cursor, char range
+/// `typing`, left out). Always incomplete: the symbols depend on what is typed, so each key
+/// asks again.
+pub fn local_completion(
+    text: &str,
+    typing: Range<usize>,
+    typed: &str,
+    path: &str,
+    project: Option<(&StubStore, &FileIndex)>,
+) -> Completion {
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    if let Some((store, index)) = project.filter(|_| !typed.is_empty()) {
+        let language = language_for_path(path);
+        let hits = search_symbols(store, typed, SYMBOL_LIMIT, &AtomicBool::new(false));
+        for hit in hits.unwrap_or_default() {
+            let symbol = store.symbol(hit.entry);
+            let file = index.paths().get(symbol.file).map_or("", String::as_str);
+            let (Some(name), true) = (&symbol.node.name, language_for_path(file) == language)
+            else {
+                continue;
+            };
+            if seen.insert(name.to_string()) {
+                let detail = symbol
+                    .container
+                    .map(str::to_string)
+                    .or_else(|| Some(file.rsplit('/').next().unwrap_or(file).to_string()));
+                let kind = symbol_kind(symbol.node.kind);
+                items.push(CompletionItem::plain(name.to_string(), kind, detail));
+            }
+        }
+    }
+    for word in buffer_words(text, typing) {
+        if seen.insert(word.clone()) {
+            items.push(CompletionItem::plain(
+                word,
+                Some(CompletionItemKind::TEXT),
+                None,
+            ));
+        }
+    }
+    Completion {
+        items,
+        incomplete: true,
+    }
+}
+
+/// The identifiers of `text` (two characters or more), first appearance first, leaving out
+/// the one overlapping the char range `skip`: the word being typed is no suggestion for itself.
+fn buffer_words(text: &str, skip: Range<usize>) -> Vec<String> {
+    let word_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$');
+    let mut seen = HashSet::new();
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut start = 0;
+    let chars = text.chars().chain(std::iter::once(' '));
+    for (at, c) in chars.enumerate() {
+        if word_char(c) {
+            if word.is_empty() {
+                start = at;
+            }
+            word.push(c);
+            continue;
+        }
+        let overlaps = !skip.is_empty() && start < skip.end && skip.start < at;
+        let identifier = !word.starts_with(|c: char| c.is_ascii_digit());
+        if word.chars().nth(1).is_some() && identifier && !overlaps && seen.insert(word.clone()) {
+            words.push(std::mem::take(&mut word));
+        }
+        word.clear();
+    }
+    words
+}
+
+/// The completion kind of a declaration, for its tag in the popup.
+fn symbol_kind(kind: StubKind) -> Option<CompletionItemKind> {
+    Some(match kind {
+        StubKind::Function | StubKind::Macro => CompletionItemKind::FUNCTION,
+        StubKind::Method => CompletionItemKind::METHOD,
+        StubKind::Struct => CompletionItemKind::STRUCT,
+        StubKind::Class => CompletionItemKind::CLASS,
+        StubKind::Interface | StubKind::Trait => CompletionItemKind::INTERFACE,
+        StubKind::Enum => CompletionItemKind::ENUM,
+        StubKind::Variant => CompletionItemKind::ENUM_MEMBER,
+        StubKind::Field => CompletionItemKind::FIELD,
+        StubKind::Module => CompletionItemKind::MODULE,
+        StubKind::TypeAlias => CompletionItemKind::TYPE_PARAMETER,
+        StubKind::Const => CompletionItemKind::CONSTANT,
+        StubKind::Impl | StubKind::Import => return None,
+    })
+}
+
 /// A short tag for what an item is, shown before its label.
 pub fn kind_label(kind: Option<CompletionItemKind>) -> &'static str {
     let Some(kind) = kind else { return "" };
@@ -173,6 +291,7 @@ pub fn kind_label(kind: Option<CompletionItemKind>) -> &'static str {
         CompletionItemKind::SNIPPET => "snip",
         CompletionItemKind::TYPE_PARAMETER => "type",
         CompletionItemKind::FILE | CompletionItemKind::FOLDER => "file",
+        CompletionItemKind::TEXT => "word",
         _ => "",
     }
 }
@@ -250,6 +369,58 @@ mod tests {
         // narrowing down starts again from the top
         popup.refilter("item0");
         assert_eq!(popup.window(), 0..VISIBLE_ROWS);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_words_of_the_file_are_offered_once_without_the_one_being_typed() {
+        let text = "let total = totals + 1;\nlet x = to";
+        let typing = 32..34; // the `to` at the end
+        assert_eq!(&text.chars().skip(32).collect::<String>(), "to");
+        assert_eq!(
+            buffer_words(text, typing.clone()),
+            ["let", "total", "totals"]
+        );
+        let completion = local_completion(text, typing, "to", "a.rs", None);
+        assert!(completion.incomplete);
+        let popup = CompletionPopup::new(completion, 32, "to").unwrap();
+        assert_eq!(shown(&popup), ["total", "totals"]);
+        assert_eq!(
+            popup.selected().unwrap().kind,
+            Some(CompletionItemKind::TEXT)
+        );
+        // numbers and one-letter words are no suggestions; `$` and `_` are word characters
+        assert_eq!(buffer_words("a 12 x9 $el _id", 0..0), ["x9", "$el", "_id"]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn project_symbols_of_the_same_language_come_first() {
+        let dir = std::env::temp_dir().join(format!("zide-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "struct Totals;\nfn total_count() {}\n").unwrap();
+        std::fs::write(dir.join("b.py"), "def total_py():\n    pass\n").unwrap();
+        let index = std::sync::Arc::new(FileIndex::new(vec!["a.rs".into(), "b.py".into()]));
+        let store = StubStore::build(index.clone(), &dir, None, &AtomicBool::new(false)).unwrap();
+        let completion = local_completion(
+            "let total = to",
+            12..14,
+            "to",
+            "c.rs",
+            Some((&store, &index)),
+        );
+        let labels: Vec<_> = completion.items.iter().map(|i| i.label.as_str()).collect();
+        // the Python one is left out; the file's own `total` comes after the symbols
+        assert_eq!(labels, ["total_count", "Totals", "let", "total"]);
+        assert_eq!(completion.items[0].kind, Some(CompletionItemKind::FUNCTION));
+        assert_eq!(completion.items[0].detail.as_deref(), Some("a.rs"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_word_right_after_the_cursor_is_still_offered() {
+        // with nothing typed yet, the word that follows the cursor is not the one being typed
+        assert_eq!(buffer_words("ab\ncd", 3..3), ["ab", "cd"]);
+        assert_eq!(buffer_words("ab cd", 3..3), ["ab", "cd"]);
     }
 
     #[::core::prelude::v1::test]

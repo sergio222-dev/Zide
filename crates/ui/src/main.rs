@@ -792,6 +792,8 @@ struct Workspace {
     highlight_requested: Option<(String, HighlightKey)>,
     /// Set to give up on the completion asked last, once typing made it stale.
     completion_asked: Option<Arc<AtomicBool>>,
+    /// The same for the signature of the call being typed.
+    signature_asked: Option<Arc<AtomicBool>>,
     tree_scroll: UniformListScrollHandle,
     /// Language servers by `ServerSpec::name`, started the first time they are needed.
     lsp: std::collections::HashMap<&'static str, LspState>,
@@ -943,6 +945,7 @@ impl Workspace {
             tree_g: false,
             highlight_requested: None,
             completion_asked: None,
+            signature_asked: None,
             tree_scroll: UniformListScrollHandle::new(),
             lsp: std::collections::HashMap::new(),
             root,
@@ -2458,10 +2461,11 @@ impl Workspace {
             viewer.offer_clipboard(&text);
         }
         let effect = viewer.handle_key(key);
-        viewer.settle_completion();
+        viewer.settle_popups();
         if let Some(text) = viewer.take_yank() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+        self.signature_as_typed(key, cx);
         self.complete_as_typed(key, cx);
         if key == zide_vim::Key::Esc && self.find.is_some() {
             self.close_find(window, cx);
@@ -2487,7 +2491,7 @@ impl Workspace {
         let ctrl = m.control && !(m.alt || m.platform || m.shift);
         let key = event.keystroke.key.as_str();
         if ctrl && key == "space" && viewer.inserting() {
-            self.request_completion(CompletionTrigger::Invoked, cx);
+            self.request_completion(CompletionTrigger::Invoked, true, cx);
             return true;
         }
         if viewer.completion_state().is_none() {
@@ -2539,27 +2543,38 @@ impl Workspace {
             Key::Backspace if open.is_some() => return,
             _ => return self.cancel_completion(),
         };
-        self.request_completion(trigger, cx);
+        self.request_completion(trigger, false, cx);
     }
 
     /// Asks the open file's language server what fits at the caret, a moment after the last
     /// key, and opens the popup with the answer unless typing moved off the word meanwhile.
-    /// A newer question cancels this one.
-    fn request_completion(&mut self, trigger: CompletionTrigger, cx: &mut Context<Self>) {
+    /// Without a server, or when it offers nothing for a word, the project's symbols and the
+    /// file's words stand in (see [`completion::local_completion`]); `by_hand` (Ctrl+Space)
+    /// offers them in any file, typing only in code. A newer question cancels this one.
+    fn request_completion(
+        &mut self,
+        trigger: CompletionTrigger,
+        by_hand: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.cancel_completion();
-        let Some((spec, language, path, client)) = self.open_file_server() else {
-            return;
-        };
+        let server = self.open_file_server();
         let Some(viewer) = &self.viewer else {
             return;
         };
         let Some(point) = viewer.completion_point() else {
             return;
         };
+        let file = viewer.path().to_string();
+        // prose would pop words up at every key
+        if server.is_none() && !by_hand && zide_stubs::language_for_path(&file).is_none() {
+            return;
+        }
         let asked = Arc::new(AtomicBool::new(false));
         self.completion_asked = Some(asked.clone());
         let text = viewer.text();
-        let file = viewer.path().to_string();
+        let project = self.symbols.clone().zip(self.index.clone());
+        let server_name = server.as_ref().map(|(spec, ..)| spec.name);
         cx.spawn(async move |this, cx| {
             // a burst of keys asks once, after the last of them
             cx.background_executor()
@@ -2572,15 +2587,43 @@ impl Workspace {
                 .background_executor()
                 .spawn({
                     let asked = asked.clone();
+                    let file = file.clone();
                     async move {
-                        client.sync(&path, language, &text)?;
-                        client.completion(&path, point.line, point.character, trigger, &asked)
+                        let answer = match &server {
+                            Some((_, language, path, client)) => {
+                                client.sync(path, language, &text)?;
+                                let (line, character) = (point.line, point.character);
+                                client.completion(path, line, character, trigger, &asked)?
+                            }
+                            None => zide_lsp::Completion::default(),
+                        };
+                        // after `.` the words of the file would only be noise
+                        if !answer.items.is_empty()
+                            || matches!(trigger, CompletionTrigger::Character(_))
+                        {
+                            return Ok(answer);
+                        }
+                        let typed: String = text
+                            .chars()
+                            .skip(point.start)
+                            .take(point.cursor - point.start)
+                            .collect();
+                        let project = project.as_ref().map(|(store, index)| (&**store, &**index));
+                        Ok::<_, LspError>(completion::local_completion(
+                            &text,
+                            point.start..point.cursor,
+                            &typed,
+                            &file,
+                            project,
+                        ))
                     }
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if matches!(outcome, Err(LspError::Closed | LspError::Io(_))) {
-                    this.lsp.remove(spec.name);
+                if matches!(outcome, Err(LspError::Closed | LspError::Io(_)))
+                    && let Some(name) = server_name
+                {
+                    this.lsp.remove(name);
                 }
                 if asked.load(Ordering::Relaxed) {
                     return; // a newer question took over
@@ -2599,10 +2642,87 @@ impl Workspace {
         .detach();
     }
 
-    fn cancel_completion(&mut self) {
-        if let Some(asked) = self.completion_asked.take() {
-            asked.store(true, Ordering::Relaxed);
+    /// After a key typed in the editor: asks for the signature of the call when a character the
+    /// server lists opens or moves through one (`(`, `,`), and again at any edit while a
+    /// signature is up, so its parameter follows the cursor and it goes once the call is left.
+    fn signature_as_typed(&mut self, key: zide_vim::Key, cx: &mut Context<Self>) {
+        use zide_vim::Key;
+        let Some(viewer) = &self.viewer else {
+            return;
+        };
+        if !viewer.inserting() {
+            return cancel(&mut self.signature_asked);
         }
+        let shown = viewer.signature_shown();
+        let Some((.., client)) = self.open_file_server() else {
+            return;
+        };
+        let (triggers, retriggers) = client.signature_triggers();
+        let listed = |c: char, list: &[String]| list.iter().any(|t| t.chars().eq([c]));
+        let trigger = match key {
+            Key::Char(c) if listed(c, triggers) || (shown && listed(c, retriggers)) => Some(c),
+            Key::Char(_) | Key::Backspace if shown => None,
+            _ => return,
+        };
+        self.request_signature(trigger, shown, cx);
+    }
+
+    /// Asks the open file's language server for the signature of the call at the caret, a
+    /// moment after the last key; a newer question cancels this one.
+    fn request_signature(&mut self, trigger: Option<char>, shown: bool, cx: &mut Context<Self>) {
+        cancel(&mut self.signature_asked);
+        let (Some((spec, language, path, client)), Some(viewer)) =
+            (self.open_file_server(), &self.viewer)
+        else {
+            return;
+        };
+        let Some(point) = viewer.completion_point() else {
+            return;
+        };
+        let asked = Arc::new(AtomicBool::new(false));
+        self.signature_asked = Some(asked.clone());
+        let text = viewer.text();
+        let file = viewer.path().to_string();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(30))
+                .await;
+            if asked.load(Ordering::Relaxed) {
+                return;
+            }
+            let outcome = cx
+                .background_executor()
+                .spawn({
+                    let asked = asked.clone();
+                    async move {
+                        client.sync(&path, language, &text)?;
+                        let (line, character) = (point.line, point.character);
+                        client.signature_help(&path, line, character, trigger, shown, &asked)
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if matches!(outcome, Err(LspError::Closed | LspError::Io(_))) {
+                    this.lsp.remove(spec.name);
+                }
+                if asked.load(Ordering::Relaxed) {
+                    return; // a newer question took over
+                }
+                this.signature_asked = None;
+                if let (Ok(hint), Some(viewer)) =
+                    (outcome, this.viewer.as_mut().filter(|v| v.path() == file))
+                {
+                    viewer.show_signature(hint, point.line as usize);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn cancel_completion(&mut self) {
+        cancel(&mut self.completion_asked);
     }
 
     fn switch_tab(&mut self, cx: &mut Context<Self>) {
@@ -3874,6 +3994,19 @@ impl Workspace {
                                             });
                                         }
                                     }),
+                                    std::rc::Rc::new({
+                                        let workspace = cx.entity();
+                                        move |index, cx| {
+                                            workspace.update(cx, |this, cx| {
+                                                if let Some(viewer) = &mut this.viewer
+                                                    && viewer.pick_completion(index)
+                                                {
+                                                    this.cancel_completion();
+                                                    cx.notify();
+                                                }
+                                            });
+                                        }
+                                    }),
                                 ))
                                 .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                                     if event.modifiers.control {
@@ -4133,6 +4266,13 @@ fn vim_key(event: &KeyDownEvent) -> Option<zide_vim::Key> {
             .as_ref()
             .and_then(|text| text.chars().next())
             .map(Key::Char),
+    }
+}
+
+/// Gives up on the question in flight that `asked` holds, if any.
+fn cancel(asked: &mut Option<Arc<AtomicBool>>) {
+    if let Some(asked) = asked.take() {
+        asked.store(true, Ordering::Relaxed);
     }
 }
 

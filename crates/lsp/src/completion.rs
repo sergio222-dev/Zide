@@ -58,6 +58,29 @@ pub struct CompletionItem {
 }
 
 impl CompletionItem {
+    /// An item that puts its label in place of the word typed, for completion made without a
+    /// server (the words of the file, the project's symbols).
+    pub fn plain(
+        label: impl Into<String>,
+        kind: Option<CompletionItemKind>,
+        detail: Option<String>,
+    ) -> Self {
+        let label = label.into();
+        Self {
+            label_detail: None,
+            detail,
+            kind,
+            filter_text: label.clone(),
+            sort_text: label.clone(),
+            preselect: false,
+            cursor: label.chars().count(),
+            text: label.clone(),
+            range: None,
+            additional: Vec::new(),
+            label,
+        }
+    }
+
     /// The edit that puts this item in place of what was typed, with the cursor at char
     /// `column` of `line`, whose text is `line_text`. The server's range is stretched to the
     /// cursor, since typing may have gone on since the question; without one the word before
@@ -320,6 +343,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!((list.items.len(), list.incomplete), (2, true));
+    }
+
+    #[test]
+    fn a_plain_item_replaces_the_word_with_its_label() {
+        let item = CompletionItem::plain("length", Some(CompletionItemKind::TEXT), None);
+        let edit = item.edit(0, "x.le", 4);
+        assert_eq!(
+            edit.range,
+            Range::new(Position::new(0, 2), Position::new(0, 4))
+        );
+        assert_eq!((edit.new_text.as_str(), item.cursor()), ("length", 6));
+        assert!(item.additional_edits().is_empty());
     }
 
     #[test]
