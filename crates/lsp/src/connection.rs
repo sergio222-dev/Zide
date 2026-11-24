@@ -6,11 +6,11 @@ use std::{
     io::{self, BufReader, Read, Write},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Sender},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
@@ -26,6 +26,8 @@ pub enum Error {
         message: String,
     },
     Timeout,
+    /// We gave up on the request before the server answered (it was told so).
+    Cancelled,
     /// The server went away before answering.
     Closed,
     /// The server program is not on the PATH.
@@ -38,6 +40,7 @@ impl std::fmt::Display for Error {
             Error::Io(e) => write!(f, "{e}"),
             Error::Server { message, .. } => write!(f, "{message}"),
             Error::Timeout => write!(f, "the server did not answer in time"),
+            Error::Cancelled => write!(f, "the request was cancelled"),
             Error::Closed => write!(f, "the server closed the connection"),
             Error::NotInstalled(command) => write!(f, "{command} is not installed"),
         }
@@ -87,6 +90,21 @@ impl Connection {
     }
 
     pub fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, Error> {
+        self.request_cancellable(method, params, timeout, &AtomicBool::new(false))
+    }
+
+    /// A request the caller can give up on by setting `cancelled`, for questions whose answer
+    /// goes stale (completion while typing): the server is sent `$/cancelRequest` so it stops
+    /// working on it, and the request ends with [`Error::Cancelled`].
+    pub fn request_cancellable(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        cancelled: &AtomicBool,
+    ) -> Result<Value, Error> {
+        /// How often a waiting request looks at `cancelled`.
+        const POLL: Duration = Duration::from_millis(10);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         self.pending.lock().unwrap().insert(id, tx);
@@ -96,13 +114,23 @@ impl Connection {
             self.pending.lock().unwrap().remove(&id);
             return Err(Error::Io(e));
         }
-        match rx.recv_timeout(timeout) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if cancelled.load(Ordering::Relaxed) {
                 self.pending.lock().unwrap().remove(&id);
-                Err(Error::Timeout)
+                let _ = self.notify("$/cancelRequest", json!({"id": id}));
+                return Err(Error::Cancelled);
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(Error::Closed),
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left.min(POLL)) {
+                Ok(result) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) if left > POLL => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.pending.lock().unwrap().remove(&id);
+                    return Err(Error::Timeout);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(Error::Closed),
+            }
         }
     }
 
@@ -361,6 +389,36 @@ mod tests {
         server
             .send(frame(
                 json!({"jsonrpc": "2.0", "id": sent[1]["id"], "result": "ok"}),
+            ))
+            .unwrap();
+        assert_eq!(handle.join().unwrap().unwrap(), json!("ok"));
+    }
+
+    #[test]
+    fn a_cancelled_request_tells_the_server_and_ignores_a_late_answer() {
+        let (connection, wire, server) = connect(|_, _| {});
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let asker = connection.clone();
+        let flag = cancelled.clone();
+        let handle = thread::spawn(move || {
+            asker.request_cancellable("m", Value::Null, Duration::from_secs(5), &flag)
+        });
+        let id = wire.wait_for(1)[0]["id"].clone();
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(matches!(handle.join().unwrap(), Err(Error::Cancelled)));
+        let sent = wire.wait_for(2);
+        assert_eq!(sent[1]["method"], "$/cancelRequest");
+        assert_eq!(sent[1]["params"]["id"], id);
+        // the answer the server may still send goes nowhere, and the next request works
+        server
+            .send(frame(json!({"jsonrpc": "2.0", "id": id, "result": 1})))
+            .unwrap();
+        let asker = connection.clone();
+        let handle = thread::spawn(move || asker.request("n", Value::Null, Duration::from_secs(5)));
+        let sent = wire.wait_for(3);
+        server
+            .send(frame(
+                json!({"jsonrpc": "2.0", "id": sent[2]["id"], "result": "ok"}),
             ))
             .unwrap();
         assert_eq!(handle.join().unwrap().unwrap(), json!("ok"));

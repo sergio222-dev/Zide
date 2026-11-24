@@ -9008,6 +9008,7 @@ dependencies = [
  "dirs 6.0.0",
  "lsp-types",
  "serde_json",
+ "zide-matcher",
 ]
 
 [[package]]
