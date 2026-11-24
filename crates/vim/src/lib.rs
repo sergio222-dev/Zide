@@ -33,6 +33,26 @@ pub(crate) enum Operator {
     Yank,
 }
 
+/// One step of a recorded command, which `.` plays again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Step {
+    Key(Key),
+    /// A completion accepted while inserting. Kept as the edit, not as keys: typed again, its
+    /// brackets and line breaks would bring auto-pairs and auto-indent along.
+    Complete(Completed),
+}
+
+/// What accepting a completion did around the cursor, so it can be done again elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Completed {
+    /// Chars replaced before the cursor (what was typed of the word) and after it.
+    before: usize,
+    after: usize,
+    text: String,
+    /// Where the cursor went, in chars into `text`.
+    caret: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Register {
     pub text: String,
@@ -54,10 +74,10 @@ pub struct Vim {
     pub(crate) object: Option<bool>,
     /// Where the Visual selection started.
     pub(crate) anchor: usize,
-    /// Keys of the command being typed; becomes `last_change` if it edited the text.
-    current: Vec<Key>,
+    /// Steps of the command being typed; becomes `last_change` if it edited the text.
+    current: Vec<Step>,
     start_revision: Revision,
-    last_change: Vec<Key>,
+    last_change: Vec<Step>,
     pub(crate) replaying: bool,
     pub(crate) register: Register,
     /// Text yanked and not yet taken for the system clipboard.
@@ -226,7 +246,7 @@ impl Vim {
             self.current.clear();
             self.start_revision = buffer.revision();
         }
-        self.current.push(key);
+        self.current.push(Step::Key(key));
         match self.mode {
             Mode::Insert => self.insert(buffer, key),
             _ => self.normal(buffer, key),
@@ -235,7 +255,7 @@ impl Vim {
             // undo, redo and `.` itself are not changes to repeat
             let history = matches!(
                 self.current.first(),
-                Some(Key::Char('u' | '.') | Key::Ctrl('r'))
+                Some(Step::Key(Key::Char('u' | '.') | Key::Ctrl('r')))
             );
             if buffer.revision() != self.start_revision && !history {
                 self.last_change = std::mem::take(&mut self.current);
@@ -288,6 +308,59 @@ impl Vim {
             }
             Key::Backspace | Key::Ctrl(_) => {}
         }
+    }
+
+    /// Accepts a completion while inserting: `replace` (char offsets; it is stretched to hold
+    /// the cursor) becomes `text`, and the cursor goes `caret` chars into it. `elsewhere` are
+    /// edits away from it, such as the import the item needs, as char ranges of the text before
+    /// any edit; one overlapping `replace` is left out. `.` repeats the replacement, not the
+    /// edits elsewhere. Outside Insert mode nothing happens.
+    pub fn complete(
+        &mut self,
+        buffer: &mut Buffer,
+        replace: Range<usize>,
+        text: &str,
+        caret: usize,
+        elsewhere: &[(Range<usize>, String)],
+    ) {
+        if self.mode != Mode::Insert {
+            return;
+        }
+        self.auto_indented = None;
+        let end = replace.end.max(self.cursor).min(buffer.len());
+        let replace = replace.start.min(self.cursor)..end;
+        let step = Completed {
+            before: self.cursor - replace.start,
+            after: replace.end - self.cursor,
+            text: text.to_string(),
+            caret: caret.min(text.chars().count()),
+        };
+        let mut apart: Vec<&(Range<usize>, String)> = elsewhere
+            .iter()
+            .filter(|(range, _)| range.end <= replace.start || range.start >= replace.end)
+            .collect();
+        // from the end, so the offsets of those still to come hold
+        apart.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+        for (range, new) in apart {
+            let end = range.end.min(buffer.len());
+            let start = range.start.min(end);
+            buffer.edit(start..end, new);
+            if end <= replace.start {
+                // an edit above (an import) moves the cursor along with the text
+                self.cursor = self.cursor + new.chars().count() - (end - start);
+            }
+        }
+        self.apply_completed(buffer, &step);
+        self.current.push(Step::Complete(step));
+    }
+
+    /// Replaces the chars around the cursor that `step` says with its text.
+    pub(crate) fn apply_completed(&mut self, buffer: &mut Buffer, step: &Completed) {
+        let start = self.cursor.saturating_sub(step.before);
+        let end = (self.cursor + step.after).min(buffer.len());
+        buffer.edit(start..end, &step.text);
+        self.cursor = start + step.caret;
+        self.want_column = buffer.position_of(self.cursor).column;
     }
 
     /// Typing a character in Insert: a closer steps over the one already there, an opener

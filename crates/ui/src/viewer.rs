@@ -15,7 +15,8 @@ use std::{
 use gpui_kit::{component::scroll::Scrollbar, *};
 use zide_git::{BlameLine, LineChange};
 use zide_lsp::{
-    Diagnostic, DiagnosticSeverity, NumberOrString, ParameterHint, char_column, uri_to_path,
+    Completion, Diagnostic, DiagnosticSeverity, NumberOrString, ParameterHint, SignatureHint,
+    char_column, uri_to_path, utf16_column, word_start,
 };
 use zide_stubs::{
     StubKind, StubNode, extract_nodes, extract_nodes_in, language_for_path as stub_language,
@@ -28,6 +29,7 @@ use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
 use zide_vim::{Key, Mode, Vim};
 
 use crate::{
+    completion::{CompletionPick, CompletionPopup, VISIBLE_ROWS},
     fonts, indent, minimap,
     rows::Rows,
     settings,
@@ -270,6 +272,19 @@ pub struct HighlightTarget {
     pub character: u32,
 }
 
+/// Where completion is asked: the cursor in the server's terms, and where the word being
+/// typed starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletionPoint {
+    pub line: u32,
+    /// UTF-16 column.
+    pub character: u32,
+    /// Char offset of the word's start.
+    pub start: usize,
+    /// Char offset of the cursor.
+    pub cursor: usize,
+}
+
 pub struct Viewer {
     find: Option<FindState>,
     path: String,
@@ -302,6 +317,10 @@ pub struct Viewer {
     scroll: UniformListScrollHandle,
     /// A `z` was typed and its second key (`t`, `z`, `b`...) is awaited.
     z_pending: bool,
+    /// The completion popup at the caret, while inserting.
+    completion: Option<CompletionPopup>,
+    /// The signature of the call being typed, and the line it was asked on.
+    signature: Option<(SignatureHint, usize)>,
     anim: Option<ScrollAnim>,
     /// Advance of one monospace cell in pixels, measured on the first frame.
     cell_width: Option<f32>,
@@ -384,6 +403,8 @@ impl Viewer {
             buffer,
             scroll: UniformListScrollHandle::new(),
             z_pending: false,
+            completion: None,
+            signature: None,
             anim: None,
             cell_width: None,
             font_size: DEFAULT_FONT_SIZE,
@@ -591,6 +612,8 @@ impl Viewer {
         let offset = self.buffer.line_start(row) + column;
         self.anim = None;
         self.z_pending = false;
+        self.completion = None;
+        self.signature = None;
         self.vim.click(&mut self.buffer, offset);
         true
     }
@@ -1206,6 +1229,303 @@ impl Viewer {
         self.snap_cursor(before);
         self.reveal_cursor();
         Effect::None
+    }
+
+    pub fn inserting(&self) -> bool {
+        self.editable && self.vim.mode() == Mode::Insert
+    }
+
+    /// Where completion asks while inserting: the cursor (0-based line, UTF-16 column) and the
+    /// char offset where the word being typed starts.
+    pub fn completion_point(&self) -> Option<CompletionPoint> {
+        if !self.inserting() {
+            return None;
+        }
+        let cursor = self.vim.cursor();
+        let position = self.buffer.position_of(cursor);
+        let line = self.buffer.line(position.line);
+        Some(CompletionPoint {
+            line: position.line as u32,
+            character: utf16_column(&line, position.column),
+            start: cursor - (position.column - word_start(&line, position.column)),
+            cursor,
+        })
+    }
+
+    /// The word typed from `start` to the cursor, while the cursor is still on its line, after
+    /// it, with only word characters between.
+    fn typed_since(&self, start: usize) -> Option<String> {
+        let cursor = self.vim.cursor();
+        if cursor < start || self.buffer.position_of(start).line != self.cursor_line() {
+            return None;
+        }
+        let typed = self.buffer.slice(start..cursor);
+        let column = typed.chars().count();
+        (word_start(&typed, column) == 0).then_some(typed)
+    }
+
+    /// Opens the popup with a server's answer for the word that starts at `start`, narrowed
+    /// to what was typed meanwhile. False when typing moved off that word, or nothing matches.
+    pub fn show_completion(&mut self, completion: Completion, start: usize) -> bool {
+        let typed = self.typed_since(start).filter(|_| self.inserting());
+        self.completion = typed.and_then(|typed| CompletionPopup::new(completion, start, &typed));
+        self.completion.is_some()
+    }
+
+    /// After a key: narrows the popup to the word as typed now, or closes it when the cursor
+    /// left the word or Insert mode; the signature goes when the cursor leaves its line or
+    /// Insert mode.
+    pub fn settle_popups(&mut self) {
+        if self
+            .signature
+            .as_ref()
+            .is_some_and(|(_, line)| *line != self.cursor_line() || !self.inserting())
+        {
+            self.signature = None;
+        }
+        let Some(start) = self.completion.as_ref().map(|popup| popup.start) else {
+            return;
+        };
+        let typed = self.typed_since(start).filter(|_| self.inserting());
+        let kept = match (typed, &mut self.completion) {
+            (Some(typed), Some(popup)) => popup.refilter(&typed),
+            _ => false,
+        };
+        if !kept {
+            self.completion = None;
+        }
+    }
+
+    /// Whether a popup is open, and whether its list is complete.
+    pub fn completion_state(&self) -> Option<bool> {
+        self.completion.as_ref().map(|popup| !popup.incomplete)
+    }
+
+    /// Shows the signature of the call being typed (`None` hides it), unless the cursor left
+    /// `line` or Insert mode meanwhile.
+    pub fn show_signature(&mut self, hint: Option<SignatureHint>, line: usize) {
+        let here = self.inserting() && self.cursor_line() == line;
+        self.signature = hint.filter(|_| here).map(|hint| (hint, line));
+    }
+
+    pub fn signature_shown(&self) -> bool {
+        self.signature.is_some()
+    }
+
+    /// Selects the item of the `index`-th row shown, as a click on it does before accepting.
+    pub fn select_completion(&mut self, index: usize) {
+        if let Some(popup) = &mut self.completion {
+            popup.select(index);
+        }
+    }
+
+    pub fn move_completion(&mut self, step: isize) {
+        if let Some(popup) = &mut self.completion {
+            popup.move_selection(step);
+        }
+    }
+
+    /// Puts the selected item in place of the word typed, with the edits it brings (an
+    /// import), and closes the popup. False when nothing was open.
+    pub fn accept_completion(&mut self) -> bool {
+        let Some(popup) = self.completion.take() else {
+            return false;
+        };
+        let Some(item) = popup.selected() else {
+            return false;
+        };
+        let position = self.buffer.position_of(self.vim.cursor());
+        let line = self.buffer.line(position.line);
+        let edit = item.edit(position.line as u32, &line, position.column);
+        let start = self.offset_of_lsp(edit.range.start);
+        let end = self.offset_of_lsp(edit.range.end).max(start);
+        let elsewhere: Vec<(Range<usize>, String)> = item
+            .additional_edits()
+            .iter()
+            .map(|extra| {
+                let from = self.offset_of_lsp(extra.range.start);
+                let to = self.offset_of_lsp(extra.range.end).max(from);
+                (from..to, extra.new_text.clone())
+            })
+            .collect();
+        let before = self.cursor_line();
+        self.vim.complete(
+            &mut self.buffer,
+            start..end,
+            &edit.new_text,
+            item.cursor(),
+            &elsewhere,
+        );
+        if self.buffer.revision() != self.built_at {
+            self.rebuild();
+        }
+        self.snap_cursor(before);
+        self.reveal_cursor();
+        true
+    }
+
+    /// The caret's top-left corner within the editor, in pixels, as drawn.
+    fn caret_xy(&self) -> Option<(f32, f32)> {
+        let (line, cell) = self.cursor_cell();
+        let shown = self.lines.get(line)?;
+        let column = shown.text[..cell.start.min(shown.text.len())]
+            .chars()
+            .count();
+        let offset = self.scroll.0.borrow().base_handle.offset();
+        let x = self.gutter_width()
+            + column as f32 * self.cell_width.unwrap_or(8.)
+            + f32::from(offset.x);
+        let y = self.rows.row_of(line) as f32 * self.row_height() + f32::from(offset.y);
+        Some((x, y))
+    }
+
+    /// The signature of the call being typed, over the caret's line (under it on the first
+    /// row), its active parameter in bold.
+    fn signature_view(&self) -> Option<Div> {
+        let (hint, _) = self.signature.as_ref()?;
+        let (caret_x, caret_y) = self.caret_xy()?;
+        let row_height = self.row_height();
+        let top = if caret_y >= row_height + 4. {
+            caret_y - row_height - 4.
+        } else {
+            caret_y + row_height
+        };
+        let room = f32::from(self.editor_bounds.get().size.width);
+        let label = hint.label.clone();
+        let active = hint.active.as_ref().map(|chars| {
+            let byte = |char: usize| {
+                label
+                    .char_indices()
+                    .nth(char)
+                    .map_or(label.len(), |(b, _)| b)
+            };
+            let style = HighlightStyle {
+                color: Some(rgb(theme::STRONG).into()),
+                font_weight: Some(FontWeight::BOLD),
+                ..HighlightStyle::default()
+            };
+            (byte(chars.start)..byte(chars.end), style)
+        });
+        Some(
+            div()
+                .absolute()
+                .left(px(caret_x.min(room - 320.).max(0.)))
+                .top(px(top))
+                .h(px(row_height))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(theme::CONTROL_BORDER))
+                .bg(rgb(theme::POPUP))
+                .text_color(rgb(theme::MUTED))
+                .whitespace_nowrap()
+                .child(StyledText::new(label.clone()).with_highlights(active))
+                .children((hint.count > 1).then(|| {
+                    div()
+                        .text_color(rgb(theme::DIM))
+                        .child(format!("+{} overloads", hint.count - 1))
+                })),
+        )
+    }
+
+    /// The popup placed under the caret, or above it when there is no room below.
+    fn completion_view(&self, on_pick: CompletionPick) -> Option<Div> {
+        let popup = self.completion.as_ref()?;
+        let (caret_x, caret_y) = self.caret_xy()?;
+        let row_height = self.row_height();
+        let room = self.editor_bounds.get().size;
+        let height = popup.rows_shown().min(VISIBLE_ROWS) as f32 * row_height + 10.;
+        let below = caret_y + row_height + height <= f32::from(room.height) || caret_y < height;
+        let top = if below {
+            caret_y + row_height
+        } else {
+            caret_y - height
+        };
+        // the documentation goes beside the list, so both move left near the edge
+        let left = caret_x
+            .min(f32::from(room.width) - 260. - popup.docs_width())
+            .max(0.);
+        Some(
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(popup.view(row_height, on_pick))
+                .children(popup.docs_view(VISIBLE_ROWS as f32 * row_height + 10.)),
+        )
+    }
+
+    /// The selected item of the popup, with its index, when the server has not filled it in.
+    pub fn completion_to_resolve(&self) -> Option<(usize, zide_lsp::CompletionItem)> {
+        self.completion.as_ref()?.to_resolve()
+    }
+
+    /// Applies the edits an item brought only once resolved (TypeScript's import of an
+    /// auto-imported name) after it was accepted without them. They go in only when they all
+    /// end before the cursor's place `at` (line, char column) when it was accepted: what was
+    /// typed since is at or after it, so the edits' positions still hold. False otherwise.
+    pub fn apply_late_edits(&mut self, edits: &[zide_lsp::TextEdit], at: (usize, usize)) -> bool {
+        let before = |edit: &zide_lsp::TextEdit| {
+            let end = edit.range.end;
+            let line = self.buffer.line(at.0);
+            (end.line as usize) < at.0
+                || (end.line as usize == at.0 && end.character <= utf16_column(&line, at.1))
+        };
+        if edits.is_empty() || !edits.iter().all(before) {
+            return false;
+        }
+        let elsewhere: Vec<(Range<usize>, String)> = edits
+            .iter()
+            .map(|edit| {
+                let from = self.offset_of_lsp(edit.range.start);
+                let to = self.offset_of_lsp(edit.range.end).max(from);
+                (from..to, edit.new_text.clone())
+            })
+            .collect();
+        let cursor = self.vim.cursor();
+        if self.vim.mode() == Mode::Insert {
+            // an empty completion at the cursor: the edits shift the cursor along with the text
+            self.vim
+                .complete(&mut self.buffer, cursor..cursor, "", 0, &elsewhere);
+        } else {
+            let mut sorted = elsewhere;
+            sorted.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+            let mut moved = cursor;
+            for (range, text) in &sorted {
+                self.buffer.edit(range.clone(), text);
+                if range.end <= cursor {
+                    moved = moved + text.chars().count() - range.len();
+                }
+            }
+            self.buffer.commit();
+            self.vim.set_cursor(&self.buffer, moved);
+        }
+        self.rebuild();
+        true
+    }
+
+    /// The cursor's line and char column.
+    pub fn cursor_place(&self) -> (usize, usize) {
+        let position = self.buffer.position_of(self.vim.cursor());
+        (position.line, position.column)
+    }
+
+    /// See [`CompletionPopup::resolved`].
+    pub fn resolved_completion(
+        &mut self,
+        index: usize,
+        item: Option<zide_lsp::CompletionItem>,
+        label: &str,
+    ) {
+        if let Some(popup) = &mut self.completion {
+            popup.resolved(index, item, label);
+        }
     }
 
     /// Comments or uncomments the lines of the selection, or the cursor's line without one,
@@ -1973,7 +2293,13 @@ impl Viewer {
     }
 
     /// `on_fold` is called with the start line of the region whose chevron was clicked.
-    pub fn render(&self, on_fold: FoldClick, on_hover: HoverMove, on_click: TextClick) -> Div {
+    pub fn render(
+        &self,
+        on_fold: FoldClick,
+        on_hover: HoverMove,
+        on_click: TextClick,
+        on_pick: CompletionPick,
+    ) -> Div {
         let lines = self.lines.clone();
         let rows = self.rows.clone();
         let folded: BTreeSet<usize> = self
@@ -2263,7 +2589,9 @@ impl Viewer {
                             .child(list)
                             .child(Scrollbar::new(&self.scroll))
                             .children(sticky)
-                            .children(popup),
+                            .children(popup)
+                            .children(self.signature_view())
+                            .children(self.completion_view(on_pick)),
                     )
                     .children(minimap),
             )
@@ -2833,6 +3161,162 @@ mod tests {
         assert_eq!(viewer.cursor_spot().0, 0);
         // `d` not preceded by `g` is no request
         assert_eq!(viewer.handle_key(Key::Char('d')), Effect::None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn completion(items: serde_json::Value) -> Completion {
+        zide_lsp::parse_completion(items).unwrap()
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_accepted_completion_replaces_the_word_and_brings_its_import() {
+        let (dir, name) = temp_file_as("complete", "a.rs", "fn a() {\n    \n}\n");
+        let mut viewer = Viewer::open(&dir, &name);
+        type_keys(&mut viewer, "jAHashM");
+        let point = viewer.completion_point().unwrap();
+        assert_eq!((point.line, point.character, point.start), (1, 9, 13));
+        let import = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+                            "newText": "use std::collections::HashMap;\n"});
+        let answer = completion(serde_json::json!([
+            {"label": "HashMap", "additionalTextEdits": [import]},
+            {"label": "HashSet"},
+        ]));
+        assert!(viewer.show_completion(answer, point.start));
+        assert_eq!(viewer.completion_state(), Some(true));
+        assert!(viewer.accept_completion());
+        assert_eq!(viewer.completion_state(), None);
+        assert_eq!(
+            viewer.text(),
+            "use std::collections::HashMap;\nfn a() {\n    HashMap\n}\n"
+        );
+        // still inserting, right after the word
+        type_keys(&mut viewer, "::new");
+        assert!(viewer.text().contains("    HashMap::new\n"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_popup_follows_typing_and_closes_off_the_word() {
+        let (dir, name) = temp_file_as("complete-typing", "a.rs", "x.\n");
+        let mut viewer = Viewer::open(&dir, &name);
+        type_keys(&mut viewer, "Ale");
+        let start = viewer.completion_point().unwrap().start;
+        let answer = completion(
+            serde_json::json!([{"label": "len"}, {"label": "length"}, {"label": "last"}]),
+        );
+        assert!(viewer.show_completion(answer, start));
+        // narrowed down as the word grows
+        type_keys(&mut viewer, "ng");
+        viewer.settle_popups();
+        assert_eq!(viewer.completion.as_ref().unwrap().rows_shown(), 1);
+        // a space ends the word, and the popup
+        type_keys(&mut viewer, " ");
+        viewer.settle_popups();
+        assert_eq!(viewer.completion_state(), None);
+        // an answer for a word the cursor already left is not shown
+        let answer = completion(serde_json::json!([{"label": "len"}]));
+        assert!(!viewer.show_completion(answer, start));
+        // nor after leaving Insert mode
+        viewer.handle_key(Key::Esc);
+        assert!(viewer.completion_point().is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn arrows_pick_the_item_that_is_accepted() {
+        let (dir, name) = temp_file_as("complete-pick", "a.rs", "\n");
+        let mut viewer = Viewer::open(&dir, &name);
+        type_keys(&mut viewer, "ia");
+        let start = viewer.completion_point().unwrap().start;
+        let answer = completion(
+            serde_json::json!([{"label": "alpha", "sortText": "1"}, {"label": "able", "sortText": "2"}]),
+        );
+        assert!(viewer.show_completion(answer, start));
+        viewer.move_completion(1);
+        assert!(viewer.accept_completion());
+        assert_eq!(viewer.text(), "able\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_import_resolved_after_accepting_still_goes_in_above() {
+        let (dir, name) = temp_file_as("late-import", "a.ts", "let a = 1;\nlet b = Wid\n");
+        let mut viewer = Viewer::open(&dir, &name);
+        type_keys(&mut viewer, "jA");
+        let import = || zide_lsp::TextEdit {
+            range: zide_lsp::Range::new(
+                zide_lsp::Position::new(0, 0),
+                zide_lsp::Position::new(0, 0),
+            ),
+            new_text: "import { Widget } from './w';\n".into(),
+        };
+        let at = viewer.cursor_place();
+        assert_eq!(at, (1, 11));
+        type_keys(&mut viewer, "get");
+        assert!(viewer.apply_late_edits(&[import()], at));
+        assert_eq!(
+            viewer.text(),
+            "import { Widget } from './w';\nlet a = 1;\nlet b = Widget\n"
+        );
+        // still typing where it was
+        type_keys(&mut viewer, "!");
+        assert!(viewer.text().contains("Widget!\n"));
+        // an edit at or after the accepted place could land on what was typed since: skipped
+        let below = zide_lsp::TextEdit {
+            range: zide_lsp::Range::new(
+                zide_lsp::Position::new(2, 12),
+                zide_lsp::Position::new(2, 12),
+            ),
+            new_text: "x".into(),
+        };
+        assert!(!viewer.apply_late_edits(&[import(), below], (2, 11)));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_click_on_a_row_accepts_its_item() {
+        let (dir, name) = temp_file_as("complete-click", "a.rs", "\n");
+        let mut viewer = Viewer::open(&dir, &name);
+        type_keys(&mut viewer, "ia");
+        let start = viewer.completion_point().unwrap().start;
+        let answer = completion(
+            serde_json::json!([{"label": "alpha", "sortText": "1"}, {"label": "able", "sortText": "2"}]),
+        );
+        assert!(viewer.show_completion(answer, start));
+        viewer.select_completion(1);
+        assert!(viewer.accept_completion());
+        assert_eq!(viewer.text(), "able\n");
+        assert!(!viewer.accept_completion()); // closed by the first
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_signature_stays_on_its_line_while_inserting() {
+        let (dir, name) = temp_file_as("signature", "a.ts", "f\nx\n");
+        let mut viewer = Viewer::open(&dir, &name);
+        type_keys(&mut viewer, "A(");
+        let hint = || {
+            zide_lsp::parse_signature_help(serde_json::json!({
+                "signatures": [{"label": "f(a: number)", "parameters": [{"label": "a: number"}]}],
+            }))
+            .unwrap()
+        };
+        // an answer for another line is not shown
+        viewer.show_signature(hint(), 1);
+        assert!(!viewer.signature_shown());
+        viewer.show_signature(hint(), 0);
+        assert!(viewer.signature_shown());
+        type_keys(&mut viewer, "1");
+        viewer.settle_popups();
+        assert!(viewer.signature_shown());
+        // `None` (out of the call) hides it
+        viewer.show_signature(None, 0);
+        assert!(!viewer.signature_shown());
+        // so does leaving Insert mode
+        viewer.show_signature(hint(), 0);
+        viewer.handle_key(Key::Esc);
+        viewer.settle_popups();
+        assert!(!viewer.signature_shown());
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -570,3 +570,85 @@ fn the_indent_level_is_only_a_tab_or_spaces() {
     vim.set_indent("\t");
     assert_eq!(vim.indent(), "\t");
 }
+
+/// Types `keys`, `@` accepting a completion that turns the word before the cursor into `text`
+/// (the cursor `caret` chars into it) and adds `import` at the top of the file.
+fn complete(text: &str, keys: &str, item: &str, caret: usize, import: &str) -> (String, usize) {
+    let mut buffer = Buffer::new(text);
+    let mut vim = Vim::default();
+    for c in keys.chars() {
+        if c != '@' {
+            let key = if c == '\u{1b}' {
+                Key::Esc
+            } else {
+                Key::Char(c)
+            };
+            vim.handle(&mut buffer, key);
+            continue;
+        }
+        let cursor = vim.cursor();
+        let line_start = buffer.line_start(buffer.position_of(cursor).line);
+        let word = buffer
+            .slice(line_start..cursor)
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric())
+            .count();
+        let elsewhere = [(0..0, import.to_string())];
+        let elsewhere = if import.is_empty() {
+            &[][..]
+        } else {
+            &elsewhere[..]
+        };
+        vim.complete(&mut buffer, cursor - word..cursor, item, caret, elsewhere);
+    }
+    (buffer.text(), vim.cursor())
+}
+
+#[test]
+fn accepting_a_completion_replaces_the_word_typed() {
+    assert_eq!(
+        complete("", "ilet v = Ve@", "Vec", 3, ""),
+        ("let v = Vec".into(), 11)
+    );
+    // the cursor goes where the item says: between the parentheses here
+    assert_eq!(
+        complete("x.", "Ape@", "push()", 5, ""),
+        ("x.push()".into(), 7)
+    );
+    // typing goes on after it
+    assert_eq!(complete("", "ile@n\u{1b}", "len", 3, "").0, "lenn");
+}
+
+#[test]
+fn an_import_that_comes_with_a_completion_moves_the_cursor_down() {
+    let (text, cursor) = complete(
+        "fn a() {\n    \n}",
+        "jAHashM@",
+        "HashMap",
+        7,
+        "use std::HashMap;\n",
+    );
+    assert_eq!(text, "use std::HashMap;\nfn a() {\n    HashMap\n}");
+    assert_eq!(cursor, 18 + 9 + 4 + 7);
+}
+
+#[test]
+fn dot_repeats_the_completion_but_not_its_import() {
+    let (text, _) = complete("a.\nb.", "Ape@\u{1b}j.", "push", 4, "// i\n");
+    assert_eq!(text, "// i\na.push\nb.push");
+}
+
+#[test]
+fn a_completed_bracket_does_not_bring_its_closer_again_on_repeat() {
+    let (text, _) = complete("a.\nb.", "Af@\u{1b}j.", "f(", 2, "");
+    assert_eq!(text, "a.f(\nb.f(");
+}
+
+#[test]
+fn completing_outside_insert_does_nothing() {
+    let mut buffer = Buffer::new("abc");
+    let mut vim = Vim::default();
+    vim.complete(&mut buffer, 0..3, "x", 1, &[]);
+    assert_eq!(buffer.text(), "abc");
+}

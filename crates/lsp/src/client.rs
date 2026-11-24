@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -15,7 +15,9 @@ use lsp_types::{
 use serde_json::{Value, json};
 
 use crate::{
+    completion::{Completion, CompletionItem, CompletionTrigger, parse_completion, parse_resolved},
     connection::{Connection, Error},
+    signature::{SignatureHint, parse_signature_help},
     text::{path_to_uri, uri_to_path},
 };
 
@@ -120,6 +122,8 @@ pub fn server_for(path: &str) -> Option<(&'static ServerSpec, &'static str)> {
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Completion is asked while typing: an answer later than this is not worth waiting for.
+const COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a request waits for the server to finish loading the project.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -188,6 +192,16 @@ pub struct Client {
     pulls_diagnostics: bool,
     /// The server answers `textDocument/inlayHint`.
     has_inlay_hints: bool,
+    /// The server answers `textDocument/completion`.
+    has_completion: bool,
+    /// The server fills items in on `completionItem/resolve` (documentation, imports).
+    resolves_completion: bool,
+    /// The characters after which the server has something to offer (`.`, `:`).
+    completion_triggers: Vec<String>,
+    /// The characters that open signature help (`(`, `,`), and those that update one already
+    /// shown (`)`); both empty for a server without it.
+    signature_triggers: Vec<String>,
+    signature_retriggers: Vec<String>,
 }
 
 impl Client {
@@ -284,6 +298,25 @@ impl Client {
                         "publishDiagnostics": {"relatedInformation": true},
                         "diagnostic": {"dynamicRegistration": false},
                         "inlayHint": {"dynamicRegistration": false},
+                        "completion": {
+                            "contextSupport": true,
+                            "completionItem": {
+                                "snippetSupport": false,
+                                "insertReplaceSupport": true,
+                                "labelDetailsSupport": true,
+                                "documentationFormat": ["markdown", "plaintext"],
+                                "resolveSupport": {
+                                    "properties": ["documentation", "detail", "additionalTextEdits"],
+                                },
+                            },
+                        },
+                        "signatureHelp": {
+                            "contextSupport": true,
+                            "signatureInformation": {
+                                "parameterInformation": {"labelOffsetSupport": true},
+                                "activeParameterSupport": true,
+                            },
+                        },
                     },
                     "workspace": {"workspaceFolders": true, "configuration": true},
                     "window": {"workDoneProgress": true},
@@ -306,6 +339,18 @@ impl Client {
             pulls_diagnostics: !initialized["capabilities"]["diagnosticProvider"].is_null(),
             has_inlay_hints: !initialized["capabilities"]["inlayHintProvider"].is_null()
                 && initialized["capabilities"]["inlayHintProvider"] != false,
+            has_completion: !initialized["capabilities"]["completionProvider"].is_null(),
+            resolves_completion: initialized["capabilities"]["completionProvider"]["resolveProvider"]
+                == true,
+            completion_triggers: strings(
+                &initialized["capabilities"]["completionProvider"]["triggerCharacters"],
+            ),
+            signature_triggers: strings(
+                &initialized["capabilities"]["signatureHelpProvider"]["triggerCharacters"],
+            ),
+            signature_retriggers: strings(
+                &initialized["capabilities"]["signatureHelpProvider"]["retriggerCharacters"],
+            ),
         })
     }
 
@@ -407,6 +452,131 @@ impl Client {
                     .map_err(Error::Io)
             }
         }
+    }
+
+    /// The characters after which the server offers completion without being asked by hand,
+    /// such as `.`; empty for a server without completion.
+    pub fn completion_triggers(&self) -> &[String] {
+        &self.completion_triggers
+    }
+
+    /// What the server offers at `line`:`character` (0-based, UTF-16) of `path` (synced
+    /// before). Setting `cancelled` gives up on the answer, for when typing moved on; a server
+    /// without completion offers nothing.
+    pub fn completion(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+        trigger: CompletionTrigger,
+        cancelled: &AtomicBool,
+    ) -> Result<Completion, Error> {
+        if !self.has_completion {
+            return Ok(Completion::default());
+        }
+        let context = match trigger {
+            CompletionTrigger::Invoked => json!({"triggerKind": 1}),
+            CompletionTrigger::Character(c) => {
+                json!({"triggerKind": 2, "triggerCharacter": c.to_string()})
+            }
+            CompletionTrigger::Incomplete => json!({"triggerKind": 3}),
+        };
+        let result = self.connection.request_cancellable(
+            "textDocument/completion",
+            json!({
+                "textDocument": {"uri": path_to_uri(path)},
+                "position": {"line": line, "character": character},
+                "context": context,
+            }),
+            COMPLETION_TIMEOUT,
+            cancelled,
+        );
+        let result = match result {
+            // "content modified": the answer would be stale (rust-glancer says it while it
+            // indexes); nothing yet, and the next key asks again
+            Err(Error::Server { code: -32801, .. }) => {
+                return Ok(Completion {
+                    items: Vec::new(),
+                    incomplete: true,
+                });
+            }
+            other => other?,
+        };
+        parse_completion(result).map_err(|e| Error::Server {
+            code: 0,
+            message: format!("unexpected completion answer: {e}"),
+        })
+    }
+
+    /// `item` (from this server's last answer) filled in: its documentation, detail and the
+    /// import it needs. `None` when the server does not resolve items, or for an item made
+    /// without it. Setting `cancelled` gives up on the answer.
+    pub fn resolve_completion(
+        &self,
+        item: &CompletionItem,
+        cancelled: &AtomicBool,
+    ) -> Result<Option<CompletionItem>, Error> {
+        if !self.resolves_completion || item.raw().is_null() {
+            return Ok(None);
+        }
+        let result = self.connection.request_cancellable(
+            "completionItem/resolve",
+            item.raw().clone(),
+            COMPLETION_TIMEOUT,
+            cancelled,
+        )?;
+        parse_resolved(result).map(Some).map_err(|e| Error::Server {
+            code: 0,
+            message: format!("unexpected resolved item: {e}"),
+        })
+    }
+
+    /// The characters that open signature help (`(`, `,`) and those that only update one
+    /// already shown (`)`); empty for a server without it.
+    pub fn signature_triggers(&self) -> (&[String], &[String]) {
+        (&self.signature_triggers, &self.signature_retriggers)
+    }
+
+    /// The signature of the call around `line`:`character` (0-based, UTF-16) of `path` (synced
+    /// before), `None` outside a call. `trigger` is the character just typed, if it was one;
+    /// `shown` says a hint is already up, so the server updates it. Setting `cancelled` gives
+    /// up on the answer.
+    pub fn signature_help(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+        trigger: Option<char>,
+        shown: bool,
+        cancelled: &AtomicBool,
+    ) -> Result<Option<SignatureHint>, Error> {
+        if self.signature_triggers.is_empty() {
+            return Ok(None);
+        }
+        let mut context = match trigger {
+            Some(c) => json!({"triggerKind": 2, "triggerCharacter": c.to_string()}),
+            None => json!({"triggerKind": 3}),
+        };
+        context["isRetrigger"] = json!(shown);
+        let result = self.connection.request_cancellable(
+            "textDocument/signatureHelp",
+            json!({
+                "textDocument": {"uri": path_to_uri(path)},
+                "position": {"line": line, "character": character},
+                "context": context,
+            }),
+            COMPLETION_TIMEOUT,
+            cancelled,
+        );
+        let result = match result {
+            // the text changed under the question: no hint, the next key asks again
+            Err(Error::Server { code: -32801, .. }) => return Ok(None),
+            other => other?,
+        };
+        parse_signature_help(result).map_err(|e| Error::Server {
+            code: 0,
+            message: format!("unexpected signature help answer: {e}"),
+        })
     }
 
     /// Where the symbol at `line`:`character` (0-based, UTF-16) appears in its own document,
@@ -525,6 +695,16 @@ impl Drop for Client {
             let _ = child.wait();
         }
     }
+}
+
+/// The strings of a JSON array (trigger characters); empty for anything else.
+fn strings(value: &Value) -> Vec<String> {
+    value.as_array().map_or_else(Vec::new, |items| {
+        items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+            .collect()
+    })
 }
 
 /// The locations of a `textDocument/definition` answer, which is a `Location`, a list of them,
@@ -654,7 +834,15 @@ mod tests {
                     continue;
                 };
                 let result = if method == "initialize" {
-                    json!({"capabilities": {"diagnosticProvider": {}, "inlayHintProvider": true}})
+                    json!({"capabilities": {
+                        "diagnosticProvider": {},
+                        "inlayHintProvider": true,
+                        "completionProvider": {"triggerCharacters": [".", ":"], "resolveProvider": true},
+                        "signatureHelpProvider": {
+                            "triggerCharacters": ["(", ","],
+                            "retriggerCharacters": [")"],
+                        },
+                    }})
                 } else {
                     answer(method)
                 };
@@ -836,6 +1024,184 @@ mod tests {
             .find(|m| m["method"] == "textDocument/rangeFormatting")
             .unwrap();
         assert_eq!(part["params"]["range"]["end"]["line"], 4);
+        drop(client);
+    }
+
+    #[test]
+    fn completion_says_why_it_asks_and_learns_the_trigger_characters() {
+        let (connection, wire, server) = connect(|_, _| {});
+        let _server = serve(wire.clone(), server, |method| {
+            assert_eq!(method, "textDocument/completion");
+            json!({"isIncomplete": true, "items": [{"label": "len"}, {"label": "push"}]})
+        });
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        assert_eq!(client.completion_triggers(), [".", ":"]);
+        let path = Path::new("/w/a.rs");
+        let never = AtomicBool::new(false);
+        let found = client
+            .completion(path, 2, 6, CompletionTrigger::Character('.'), &never)
+            .unwrap();
+        assert_eq!((found.items.len(), found.incomplete), (2, true));
+        client
+            .completion(path, 2, 7, CompletionTrigger::Invoked, &never)
+            .unwrap();
+        client
+            .completion(path, 2, 8, CompletionTrigger::Incomplete, &never)
+            .unwrap();
+        let asked: Vec<_> = wire
+            .messages()
+            .into_iter()
+            .filter(|m| m["method"] == "textDocument/completion")
+            .map(|m| m["params"].clone())
+            .collect();
+        assert_eq!(asked[0]["position"], json!({"line": 2, "character": 6}));
+        assert_eq!(
+            asked[0]["context"],
+            json!({"triggerKind": 2, "triggerCharacter": "."})
+        );
+        assert_eq!(asked[1]["context"], json!({"triggerKind": 1}));
+        assert_eq!(asked[2]["context"], json!({"triggerKind": 3}));
+        let initialize = &wire.messages()[0];
+        assert_eq!(
+            initialize["params"]["capabilities"]["textDocument"]["completion"]["completionItem"]["snippetSupport"],
+            false
+        );
+        drop(client);
+    }
+
+    #[test]
+    fn signature_help_says_what_typed_it_and_whether_a_hint_is_up() {
+        let (connection, wire, server) = connect(|_, _| {});
+        let _server = serve(wire.clone(), server, |method| {
+            assert_eq!(method, "textDocument/signatureHelp");
+            json!({"signatures": [{"label": "f(x: u8)", "parameters": [{"label": "x: u8"}]}]})
+        });
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        let (triggers, retriggers) = client.signature_triggers();
+        assert_eq!(
+            (triggers, retriggers),
+            (
+                &["(".to_string(), ",".to_string()][..],
+                &[")".to_string()][..]
+            )
+        );
+        let never = AtomicBool::new(false);
+        let path = Path::new("/w/a.ts");
+        let hint = client
+            .signature_help(path, 1, 2, Some('('), false, &never)
+            .unwrap()
+            .unwrap();
+        assert_eq!((hint.label.as_str(), hint.active), ("f(x: u8)", Some(2..7)));
+        client
+            .signature_help(path, 1, 3, None, true, &never)
+            .unwrap();
+        let asked: Vec<_> = wire
+            .messages()
+            .into_iter()
+            .filter(|m| m["method"] == "textDocument/signatureHelp")
+            .map(|m| m["params"]["context"].clone())
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                json!({"triggerKind": 2, "triggerCharacter": "(", "isRetrigger": false}),
+                json!({"triggerKind": 3, "isRetrigger": true}),
+            ]
+        );
+        drop(client);
+    }
+
+    #[test]
+    fn resolving_sends_the_item_back_as_it_came() {
+        let (connection, wire, server) = connect(|_, _| {});
+        let _server = serve(wire.clone(), server, |method| match method {
+            "textDocument/completion" => json!([{"label": "Map", "data": {"id": 7}}]),
+            "completionItem/resolve" => json!({
+                "label": "Map", "detail": "interface Map<K, V>",
+                "documentation": {"kind": "markdown", "value": "A **map**."},
+            }),
+            other => panic!("{other}"),
+        });
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        let never = AtomicBool::new(false);
+        let found = client
+            .completion(
+                Path::new("/w/a.ts"),
+                0,
+                1,
+                CompletionTrigger::Invoked,
+                &never,
+            )
+            .unwrap();
+        let mut item = found.items[0].clone();
+        let resolved = client.resolve_completion(&item, &never).unwrap().unwrap();
+        item.absorb(resolved);
+        assert_eq!(item.detail.as_deref(), Some("interface Map<K, V>"));
+        assert_eq!(
+            item.documentation,
+            Some(crate::Documentation::Markdown("A **map**.".into()))
+        );
+        let sent = wire
+            .messages()
+            .into_iter()
+            .find(|m| m["method"] == "completionItem/resolve")
+            .unwrap();
+        assert_eq!(sent["params"], json!({"label": "Map", "data": {"id": 7}}));
+        // an item made here is not the server's to resolve
+        let plain = CompletionItem::plain("x", None, None);
+        assert!(client.resolve_completion(&plain, &never).unwrap().is_none());
+        drop(client);
+    }
+
+    #[test]
+    fn content_modified_is_an_incomplete_empty_answer() {
+        let (connection, wire, server) = connect(|_, _| {});
+        thread::spawn(move || {
+            let sent = wire.wait_for(1);
+            let capabilities = json!({"capabilities": {"completionProvider": {}}});
+            let _ = server.send(frame(
+                json!({"jsonrpc": "2.0", "id": sent[0]["id"], "result": capabilities}),
+            ));
+            let sent = wire.wait_for(3);
+            let _ = server.send(frame(json!({"jsonrpc": "2.0", "id": sent[2]["id"],
+                "error": {"code": -32801, "message": "still being resolved"}})));
+        });
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        let found = client
+            .completion(
+                Path::new("/w/a.rs"),
+                0,
+                0,
+                CompletionTrigger::Invoked,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!((found.items.len(), found.incomplete), (0, true));
+        drop(client);
+    }
+
+    #[test]
+    fn a_server_without_completion_is_not_asked() {
+        let (connection, wire, server) = connect(|_, _| {});
+        // answers `initialize` with no capabilities at all
+        thread::spawn(move || {
+            let sent = wire.wait_for(1);
+            let _ = server.send(frame(
+                json!({"jsonrpc": "2.0", "id": sent[0]["id"], "result": {"capabilities": {}}}),
+            ));
+        });
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        assert!(client.completion_triggers().is_empty());
+        let found = client
+            .completion(
+                Path::new("/w/a.rs"),
+                0,
+                0,
+                CompletionTrigger::Invoked,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(found.items.is_empty());
         drop(client);
     }
 
