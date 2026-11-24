@@ -10,10 +10,13 @@ use std::{collections::HashSet, rc::Rc, sync::atomic::AtomicBool};
 
 use gpui_kit::{prelude::FluentBuilder, *};
 use zide_index::FileIndex;
-use zide_lsp::{Completion, CompletionItem, CompletionItemKind, rank};
+use zide_lsp::{Completion, CompletionItem, CompletionItemKind, Documentation, rank};
 use zide_stubs::{StubKind, StubStore, language_for_path, search_symbols};
 
-use crate::theme;
+use crate::{markdown, theme};
+
+/// Width of the documentation beside the popup.
+const DOCS_WIDTH: f32 = 420.;
 
 /// A click on a row of the completion popup, by its index among the rows shown.
 pub type CompletionPick = Rc<dyn Fn(usize, &mut App)>;
@@ -35,6 +38,8 @@ pub struct CompletionPopup {
     selected: usize,
     /// The first of the rows on screen, as an index into `shown`.
     first: usize,
+    /// Items (indices into `items`) the server already filled in, or had nothing more for.
+    resolved: HashSet<usize>,
 }
 
 impl CompletionPopup {
@@ -48,6 +53,7 @@ impl CompletionPopup {
             shown: Vec::new(),
             selected: 0,
             first: 0,
+            resolved: HashSet::new(),
         };
         popup.refilter(typed).then_some(popup)
     }
@@ -89,6 +95,70 @@ impl CompletionPopup {
             self.selected = index;
             self.keep_visible();
         }
+    }
+
+    /// The selected item, with its index, when the server has not filled it in yet.
+    pub fn to_resolve(&self) -> Option<(usize, CompletionItem)> {
+        let index = *self.shown.get(self.selected)?;
+        (!self.resolved.contains(&index)).then(|| (index, self.items[index].clone()))
+    }
+
+    /// Takes what the server filled in for the `index`-th item (`None`: nothing more), unless
+    /// the popup holds other items by now.
+    pub fn resolved(&mut self, index: usize, item: Option<CompletionItem>, label: &str) {
+        let Some(target) = self.items.get_mut(index).filter(|i| i.label == label) else {
+            return;
+        };
+        if let Some(item) = item {
+            target.absorb(item);
+        }
+        self.resolved.insert(index);
+    }
+
+    /// The selected item's documentation, with its detail on top, to show beside the popup;
+    /// `None` when it has none.
+    pub fn docs_view(&self, max_height: f32) -> Option<Div> {
+        let item = self.selected()?;
+        let documentation = item.documentation.as_ref()?;
+        let body = match documentation {
+            Documentation::Markdown(text) => div().child(
+                markdown::TextView::markdown(
+                    SharedString::from(format!("completion-docs-{}", item.label)),
+                    text.clone(),
+                )
+                .inline_code_style(markdown::inline_code()),
+            ),
+            Documentation::Plain(text) => div().whitespace_normal().child(text.clone()),
+        };
+        Some(
+            div()
+                .w(px(DOCS_WIDTH))
+                .max_h(px(max_height))
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(theme::CONTROL_BORDER))
+                .bg(rgb(theme::POPUP))
+                .text_sm()
+                .whitespace_normal()
+                .children(
+                    item.detail
+                        .clone()
+                        .map(|detail| div().text_color(rgb(theme::STRONG)).child(detail)),
+                )
+                .child(body),
+        )
+    }
+
+    /// Room the documentation beside the popup takes, in pixels (none without any).
+    pub fn docs_width(&self) -> f32 {
+        let shown = self.selected().is_some_and(|i| i.documentation.is_some());
+        if shown { DOCS_WIDTH + 8. } else { 0. }
     }
 
     pub fn selected(&self) -> Option<&CompletionItem> {
@@ -421,6 +491,36 @@ mod tests {
         // with nothing typed yet, the word that follows the cursor is not the one being typed
         assert_eq!(buffer_words("ab\ncd", 3..3), ["ab", "cd"]);
         assert_eq!(buffer_words("ab cd", 3..3), ["ab", "cd"]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn each_selected_item_is_resolved_once() {
+        let mut popup = CompletionPopup::new(answer(&["a1", "a2"], false), 0, "").unwrap();
+        let (index, item) = popup.to_resolve().unwrap();
+        assert_eq!((index, item.label.as_str()), (0, "a1"));
+        // still asked for until the answer comes: a question given up on is asked again
+        assert!(popup.to_resolve().is_some());
+        let filled = zide_lsp::parse_completion(serde_json::json!([
+            {"label": "a1", "documentation": "the first"}
+        ]))
+        .unwrap()
+        .items
+        .remove(0);
+        popup.resolved(0, Some(filled), "a1");
+        assert!(popup.to_resolve().is_none());
+        assert_eq!(
+            popup.selected().unwrap().documentation,
+            Some(Documentation::Plain("the first".into()))
+        );
+        assert!(popup.docs_width() > 0.);
+        popup.move_selection(1);
+        assert_eq!(popup.to_resolve().unwrap().0, 1);
+        assert_eq!(popup.docs_width(), 0.);
+        // nothing more to say is remembered too
+        popup.resolved(1, None, "a2");
+        assert!(popup.to_resolve().is_none());
+        // an answer meant for other items is dropped
+        popup.resolved(0, None, "zz");
     }
 
     #[::core::prelude::v1::test]

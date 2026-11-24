@@ -6,8 +6,8 @@
 //! typing without a round trip per key.
 
 use lsp_types::{
-    CompletionItemKind, CompletionResponse, CompletionTextEdit, InsertTextFormat, Position, Range,
-    TextEdit,
+    CompletionItemKind, CompletionResponse, CompletionTextEdit, Documentation as LspDocumentation,
+    InsertTextFormat, MarkupKind, Position, Range, TextEdit,
 };
 use serde_json::Value;
 use zide_matcher::{Matcher, MatchingMode, MinusculeMatcher};
@@ -33,6 +33,13 @@ pub struct Completion {
     pub incomplete: bool,
 }
 
+/// What an item's documentation is written in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Documentation {
+    Markdown(String),
+    Plain(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionItem {
     pub label: String,
@@ -47,6 +54,8 @@ pub struct CompletionItem {
     pub sort_text: String,
     /// The server's pick for the row selected first.
     pub preselect: bool,
+    /// What the item is, at length; many servers only send it once asked to resolve the item.
+    pub documentation: Option<Documentation>,
     text: String,
     /// Where `text` goes, in the document as it was when asked; `None` is the word before the
     /// cursor.
@@ -55,6 +64,8 @@ pub struct CompletionItem {
     cursor: usize,
     /// Edits elsewhere that come with the item, such as the import it needs.
     additional: Vec<TextEdit>,
+    /// The item as the server sent it, which is what resolving it sends back.
+    raw: Value,
 }
 
 impl CompletionItem {
@@ -73,12 +84,35 @@ impl CompletionItem {
             filter_text: label.clone(),
             sort_text: label.clone(),
             preselect: false,
+            documentation: None,
             cursor: label.chars().count(),
             text: label.clone(),
             range: None,
             additional: Vec::new(),
+            raw: Value::Null,
             label,
         }
+    }
+
+    /// Takes what resolving the item filled in: its detail, documentation and the edits it
+    /// brings (TypeScript adds the import of an auto-imported name only then). What it inserts
+    /// stays: the protocol does not let resolving change it.
+    pub fn absorb(&mut self, resolved: CompletionItem) {
+        if resolved.detail.is_some() {
+            self.detail = resolved.detail;
+        }
+        if resolved.documentation.is_some() {
+            self.documentation = resolved.documentation;
+        }
+        if !resolved.additional.is_empty() {
+            self.additional = resolved.additional;
+        }
+        self.raw = resolved.raw;
+    }
+
+    /// The item as the server sent it; null for one made here.
+    pub(crate) fn raw(&self) -> &Value {
+        &self.raw
     }
 
     /// The edit that puts this item in place of what was typed, with the cursor at char
@@ -121,17 +155,31 @@ pub fn parse_completion(result: Value) -> Result<Completion, serde_json::Error> 
     if result.is_null() {
         return Ok(Completion::default());
     }
+    // each item is kept as sent too, to resolve it later
+    let sent = match &result {
+        Value::Array(items) => items.clone(),
+        list => list["items"].as_array().cloned().unwrap_or_default(),
+    };
     let (items, incomplete) = match serde_json::from_value::<CompletionResponse>(result)? {
         CompletionResponse::Array(items) => (items, false),
         CompletionResponse::List(list) => (list.items, list.is_incomplete),
     };
     Ok(Completion {
-        items: items.into_iter().map(item).collect(),
+        items: items
+            .into_iter()
+            .zip(sent)
+            .map(|(i, sent)| item(i, sent))
+            .collect(),
         incomplete,
     })
 }
 
-fn item(raw: lsp_types::CompletionItem) -> CompletionItem {
+/// A `completionItem/resolve` answer: the item, filled in.
+pub(crate) fn parse_resolved(result: Value) -> Result<CompletionItem, serde_json::Error> {
+    Ok(item(serde_json::from_value(result.clone())?, result))
+}
+
+fn item(raw: lsp_types::CompletionItem, sent: Value) -> CompletionItem {
     let (text, range) = match raw.text_edit {
         Some(CompletionTextEdit::Edit(edit)) => (edit.new_text, Some(edit.range)),
         // accepting inserts, as Enter does elsewhere: the rest of the word after the cursor stays
@@ -152,6 +200,20 @@ fn item(raw: lsp_types::CompletionItem) -> CompletionItem {
         filter_text: raw.filter_text.unwrap_or_else(|| raw.label.clone()),
         sort_text: raw.sort_text.unwrap_or_else(|| raw.label.clone()),
         preselect: raw.preselect.unwrap_or(false),
+        documentation: raw.documentation.and_then(|documentation| {
+            let documentation = match documentation {
+                LspDocumentation::String(text) => Documentation::Plain(text),
+                LspDocumentation::MarkupContent(markup) if markup.kind == MarkupKind::Markdown => {
+                    Documentation::Markdown(markup.value)
+                }
+                LspDocumentation::MarkupContent(markup) => Documentation::Plain(markup.value),
+            };
+            match &documentation {
+                Documentation::Markdown(text) | Documentation::Plain(text) => {
+                    (!text.trim().is_empty()).then_some(documentation)
+                }
+            }
+        }),
         label: raw.label,
         label_detail: label_detail.filter(|d| !d.is_empty()),
         detail: raw.detail.or(description).filter(|d| !d.is_empty()),
@@ -160,6 +222,7 @@ fn item(raw: lsp_types::CompletionItem) -> CompletionItem {
         range,
         cursor,
         additional: raw.additional_text_edits.unwrap_or_default(),
+        raw: sent,
     }
 }
 
@@ -343,6 +406,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!((list.items.len(), list.incomplete), (2, true));
+    }
+
+    #[test]
+    fn documentation_may_be_a_string_plain_text_or_markdown() {
+        let found = items(json!([
+            {"label": "a", "documentation": "plain"},
+            {"label": "b", "documentation": {"kind": "plaintext", "value": "also plain"}},
+            {"label": "c", "documentation": {"kind": "markdown", "value": "`code`"}},
+            {"label": "d", "documentation": "  "},
+            {"label": "e"},
+        ]));
+        let docs: Vec<_> = found.iter().map(|i| i.documentation.clone()).collect();
+        assert_eq!(
+            docs,
+            [
+                Some(Documentation::Plain("plain".into())),
+                Some(Documentation::Plain("also plain".into())),
+                Some(Documentation::Markdown("`code`".into())),
+                None, // nothing worth showing
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn resolving_fills_in_what_was_missing_and_keeps_what_is_inserted() {
+        let mut item =
+            items(json!([{"label": "Map", "detail": "short", "insertText": "Map"}])).remove(0);
+        let resolved = parse_resolved(json!({
+            "label": "Map", "insertText": "Changed",
+            "documentation": "docs",
+            "additionalTextEdits": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+                                     "newText": "import { Map } from './map';\n"}],
+        }))
+        .unwrap();
+        item.absorb(resolved);
+        assert_eq!(item.detail.as_deref(), Some("short")); // not sent again: kept
+        assert_eq!(
+            item.documentation,
+            Some(Documentation::Plain("docs".into()))
+        );
+        assert_eq!(item.additional_edits().len(), 1);
+        assert_eq!(item.edit(0, "", 0).new_text, "Map");
     }
 
     #[test]

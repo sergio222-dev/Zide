@@ -11,7 +11,8 @@ mod text;
 
 pub use client::{Client, ParameterHint, ServerSpec, server_for};
 pub use completion::{
-    Completion, CompletionItem, CompletionTrigger, parse_completion, rank, word_start,
+    Completion, CompletionItem, CompletionTrigger, Documentation, parse_completion, rank,
+    word_start,
 };
 pub use connection::{Connection, Error};
 pub use lsp_types::{

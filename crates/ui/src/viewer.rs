@@ -1312,13 +1312,11 @@ impl Viewer {
         self.signature.is_some()
     }
 
-    /// Accepts the item of the `index`-th row shown, as a click on it does.
-    pub fn pick_completion(&mut self, index: usize) -> bool {
-        match &mut self.completion {
-            Some(popup) => popup.select(index),
-            None => return false,
+    /// Selects the item of the `index`-th row shown, as a click on it does before accepting.
+    pub fn select_completion(&mut self, index: usize) {
+        if let Some(popup) = &mut self.completion {
+            popup.select(index);
         }
-        self.accept_completion()
     }
 
     pub fn move_completion(&mut self, step: isize) {
@@ -1446,14 +1444,88 @@ impl Viewer {
         } else {
             caret_y - height
         };
-        let left = caret_x.min(f32::from(room.width) - 260.).max(0.);
+        // the documentation goes beside the list, so both move left near the edge
+        let left = caret_x
+            .min(f32::from(room.width) - 260. - popup.docs_width())
+            .max(0.);
         Some(
             div()
                 .absolute()
                 .left(px(left))
                 .top(px(top))
-                .child(popup.view(row_height, on_pick)),
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(popup.view(row_height, on_pick))
+                .children(popup.docs_view(VISIBLE_ROWS as f32 * row_height + 10.)),
         )
+    }
+
+    /// The selected item of the popup, with its index, when the server has not filled it in.
+    pub fn completion_to_resolve(&self) -> Option<(usize, zide_lsp::CompletionItem)> {
+        self.completion.as_ref()?.to_resolve()
+    }
+
+    /// Applies the edits an item brought only once resolved (TypeScript's import of an
+    /// auto-imported name) after it was accepted without them. They go in only when they all
+    /// end before the cursor's place `at` (line, char column) when it was accepted: what was
+    /// typed since is at or after it, so the edits' positions still hold. False otherwise.
+    pub fn apply_late_edits(&mut self, edits: &[zide_lsp::TextEdit], at: (usize, usize)) -> bool {
+        let before = |edit: &zide_lsp::TextEdit| {
+            let end = edit.range.end;
+            let line = self.buffer.line(at.0);
+            (end.line as usize) < at.0
+                || (end.line as usize == at.0 && end.character <= utf16_column(&line, at.1))
+        };
+        if edits.is_empty() || !edits.iter().all(before) {
+            return false;
+        }
+        let elsewhere: Vec<(Range<usize>, String)> = edits
+            .iter()
+            .map(|edit| {
+                let from = self.offset_of_lsp(edit.range.start);
+                let to = self.offset_of_lsp(edit.range.end).max(from);
+                (from..to, edit.new_text.clone())
+            })
+            .collect();
+        let cursor = self.vim.cursor();
+        if self.vim.mode() == Mode::Insert {
+            // an empty completion at the cursor: the edits shift the cursor along with the text
+            self.vim
+                .complete(&mut self.buffer, cursor..cursor, "", 0, &elsewhere);
+        } else {
+            let mut sorted = elsewhere;
+            sorted.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+            let mut moved = cursor;
+            for (range, text) in &sorted {
+                self.buffer.edit(range.clone(), text);
+                if range.end <= cursor {
+                    moved = moved + text.chars().count() - range.len();
+                }
+            }
+            self.buffer.commit();
+            self.vim.set_cursor(&self.buffer, moved);
+        }
+        self.rebuild();
+        true
+    }
+
+    /// The cursor's line and char column.
+    pub fn cursor_place(&self) -> (usize, usize) {
+        let position = self.buffer.position_of(self.vim.cursor());
+        (position.line, position.column)
+    }
+
+    /// See [`CompletionPopup::resolved`].
+    pub fn resolved_completion(
+        &mut self,
+        index: usize,
+        item: Option<zide_lsp::CompletionItem>,
+        label: &str,
+    ) {
+        if let Some(popup) = &mut self.completion {
+            popup.resolved(index, item, label);
+        }
     }
 
     /// Comments or uncomments the lines of the selection, or the cursor's line without one,
@@ -3167,6 +3239,41 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
+    fn an_import_resolved_after_accepting_still_goes_in_above() {
+        let (dir, name) = temp_file_as("late-import", "a.ts", "let a = 1;\nlet b = Wid\n");
+        let mut viewer = Viewer::open(&dir, &name);
+        type_keys(&mut viewer, "jA");
+        let import = || zide_lsp::TextEdit {
+            range: zide_lsp::Range::new(
+                zide_lsp::Position::new(0, 0),
+                zide_lsp::Position::new(0, 0),
+            ),
+            new_text: "import { Widget } from './w';\n".into(),
+        };
+        let at = viewer.cursor_place();
+        assert_eq!(at, (1, 11));
+        type_keys(&mut viewer, "get");
+        assert!(viewer.apply_late_edits(&[import()], at));
+        assert_eq!(
+            viewer.text(),
+            "import { Widget } from './w';\nlet a = 1;\nlet b = Widget\n"
+        );
+        // still typing where it was
+        type_keys(&mut viewer, "!");
+        assert!(viewer.text().contains("Widget!\n"));
+        // an edit at or after the accepted place could land on what was typed since: skipped
+        let below = zide_lsp::TextEdit {
+            range: zide_lsp::Range::new(
+                zide_lsp::Position::new(2, 12),
+                zide_lsp::Position::new(2, 12),
+            ),
+            new_text: "x".into(),
+        };
+        assert!(!viewer.apply_late_edits(&[import(), below], (2, 11)));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
     fn a_click_on_a_row_accepts_its_item() {
         let (dir, name) = temp_file_as("complete-click", "a.rs", "\n");
         let mut viewer = Viewer::open(&dir, &name);
@@ -3176,9 +3283,10 @@ mod tests {
             serde_json::json!([{"label": "alpha", "sortText": "1"}, {"label": "able", "sortText": "2"}]),
         );
         assert!(viewer.show_completion(answer, start));
-        assert!(viewer.pick_completion(1));
+        viewer.select_completion(1);
+        assert!(viewer.accept_completion());
         assert_eq!(viewer.text(), "able\n");
-        assert!(!viewer.pick_completion(0)); // closed by the first
+        assert!(!viewer.accept_completion()); // closed by the first
         fs::remove_dir_all(dir).unwrap();
     }
 

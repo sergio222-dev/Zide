@@ -794,6 +794,8 @@ struct Workspace {
     completion_asked: Option<Arc<AtomicBool>>,
     /// The same for the signature of the call being typed.
     signature_asked: Option<Arc<AtomicBool>>,
+    /// And for the documentation of the selected completion item.
+    resolve_asked: Option<Arc<AtomicBool>>,
     tree_scroll: UniformListScrollHandle,
     /// Language servers by `ServerSpec::name`, started the first time they are needed.
     lsp: std::collections::HashMap<&'static str, LspState>,
@@ -946,6 +948,7 @@ impl Workspace {
             highlight_requested: None,
             completion_asked: None,
             signature_asked: None,
+            resolve_asked: None,
             tree_scroll: UniformListScrollHandle::new(),
             lsp: std::collections::HashMap::new(),
             root,
@@ -2447,6 +2450,7 @@ impl Workspace {
             return;
         }
         if self.completion_key(event, cx) {
+            self.resolve_selected(cx);
             cx.stop_propagation();
             cx.notify();
             return;
@@ -2467,6 +2471,7 @@ impl Workspace {
         }
         self.signature_as_typed(key, cx);
         self.complete_as_typed(key, cx);
+        self.resolve_selected(cx);
         if key == zide_vim::Key::Esc && self.find.is_some() {
             self.close_find(window, cx);
         }
@@ -2503,8 +2508,7 @@ impl Workspace {
             "n" if ctrl => 1,
             "p" if ctrl => -1,
             "enter" | "tab" if plain => {
-                viewer.accept_completion();
-                self.cancel_completion();
+                self.accept_completion(None, cx);
                 return true;
             }
             _ => return false,
@@ -2635,6 +2639,7 @@ impl Workspace {
                     return;
                 };
                 viewer.show_completion(completion, point.start);
+                this.resolve_selected(cx);
                 cx.notify();
             })
             .ok();
@@ -2713,6 +2718,102 @@ impl Workspace {
                     (outcome, this.viewer.as_mut().filter(|v| v.path() == file))
                 {
                     viewer.show_signature(hint, point.line as usize);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Accepts the selected completion item (the `pick`-th row, for a click). An item the
+    /// server had not filled in yet is resolved afterwards, and the edits it brings then (the
+    /// import TypeScript adds for an auto-imported name) go in when they arrive.
+    fn accept_completion(&mut self, pick: Option<usize>, cx: &mut Context<Self>) -> bool {
+        let Some(viewer) = &mut self.viewer else {
+            return false;
+        };
+        if let Some(index) = pick {
+            viewer.select_completion(index);
+        }
+        // one that already brings its edits has them applied now: asking again would double them
+        let unresolved = viewer
+            .completion_to_resolve()
+            .map(|(_, item)| item)
+            .filter(|item| item.additional_edits().is_empty());
+        if !viewer.accept_completion() {
+            return false;
+        }
+        let at = viewer.cursor_place();
+        let file = viewer.path().to_string();
+        self.cancel_completion();
+        cancel(&mut self.resolve_asked);
+        let (Some(item), Some((spec, .., client))) = (unresolved, self.open_file_server()) else {
+            return true;
+        };
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { client.resolve_completion(&item, &AtomicBool::new(false)) })
+                .await;
+            this.update(cx, |this, cx| {
+                if matches!(outcome, Err(LspError::Closed | LspError::Io(_))) {
+                    this.lsp.remove(spec.name);
+                }
+                if let (Ok(Some(resolved)), Some(viewer)) =
+                    (outcome, this.viewer.as_mut().filter(|v| v.path() == file))
+                    && viewer.apply_late_edits(resolved.additional_edits(), at)
+                {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        true
+    }
+
+    /// Asks the server to fill in the selected completion item (its documentation, and the
+    /// import TypeScript adds only then), once it stays selected for a moment.
+    fn resolve_selected(&mut self, cx: &mut Context<Self>) {
+        cancel(&mut self.resolve_asked);
+        let (Some((spec, .., client)), Some(viewer)) = (self.open_file_server(), &self.viewer)
+        else {
+            return;
+        };
+        let Some((index, item)) = viewer.completion_to_resolve() else {
+            return;
+        };
+        let asked = Arc::new(AtomicBool::new(false));
+        self.resolve_asked = Some(asked.clone());
+        let file = viewer.path().to_string();
+        cx.spawn(async move |this, cx| {
+            // moving through the list asks only for the row it stops on
+            cx.background_executor()
+                .timer(Duration::from_millis(80))
+                .await;
+            if asked.load(Ordering::Relaxed) {
+                return;
+            }
+            let label = item.label.clone();
+            let outcome = cx
+                .background_executor()
+                .spawn({
+                    let asked = asked.clone();
+                    async move { client.resolve_completion(&item, &asked) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if matches!(outcome, Err(LspError::Closed | LspError::Io(_))) {
+                    this.lsp.remove(spec.name);
+                }
+                if asked.load(Ordering::Relaxed) {
+                    return; // the selection moved on, or a newer question took over
+                }
+                this.resolve_asked = None;
+                if let Some(viewer) = this.viewer.as_mut().filter(|v| v.path() == file) {
+                    // a failed answer is not asked again: the row shows what it has
+                    viewer.resolved_completion(index, outcome.ok().flatten(), &label);
                     cx.notify();
                 }
             })
@@ -3998,10 +4099,7 @@ impl Workspace {
                                         let workspace = cx.entity();
                                         move |index, cx| {
                                             workspace.update(cx, |this, cx| {
-                                                if let Some(viewer) = &mut this.viewer
-                                                    && viewer.pick_completion(index)
-                                                {
-                                                    this.cancel_completion();
+                                                if this.accept_completion(Some(index), cx) {
                                                     cx.notify();
                                                 }
                                             });

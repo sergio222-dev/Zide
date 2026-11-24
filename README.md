@@ -40,6 +40,8 @@ Only Linux x86_64 is published for now.
   in a popup at the caret narrowed down as you keep typing (IntelliJ matching: `gBN` finds `getByName`).
   `Up`/`Down` or `Ctrl+N`/`Ctrl+P` pick, `Enter`, `Tab` or a click accepts (with the import it needs, when the server
   offers one), `Esc` leaves Insert and the popup; `Ctrl+Space` asks by hand. `.` repeats the completed word.
+  The selected item's documentation shows beside the list (Markdown, as the server writes it). An import TypeScript
+  only sends once the item is looked at still goes in when the item was accepted before it arrived.
   Without a language server (or when it has nothing for a word) the project's symbols of the file's language and the
   words of the file are offered instead; typing offers them in code files, `Ctrl+Space` in any file.
 - **Signature help** while typing a call: after `(` or `,` the signature shows over the line, the parameter being

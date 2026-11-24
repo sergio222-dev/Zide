@@ -15,7 +15,7 @@ use lsp_types::{
 use serde_json::{Value, json};
 
 use crate::{
-    completion::{Completion, CompletionTrigger, parse_completion},
+    completion::{Completion, CompletionItem, CompletionTrigger, parse_completion, parse_resolved},
     connection::{Connection, Error},
     signature::{SignatureHint, parse_signature_help},
     text::{path_to_uri, uri_to_path},
@@ -194,6 +194,8 @@ pub struct Client {
     has_inlay_hints: bool,
     /// The server answers `textDocument/completion`.
     has_completion: bool,
+    /// The server fills items in on `completionItem/resolve` (documentation, imports).
+    resolves_completion: bool,
     /// The characters after which the server has something to offer (`.`, `:`).
     completion_triggers: Vec<String>,
     /// The characters that open signature help (`(`, `,`), and those that update one already
@@ -302,6 +304,10 @@ impl Client {
                                 "snippetSupport": false,
                                 "insertReplaceSupport": true,
                                 "labelDetailsSupport": true,
+                                "documentationFormat": ["markdown", "plaintext"],
+                                "resolveSupport": {
+                                    "properties": ["documentation", "detail", "additionalTextEdits"],
+                                },
                             },
                         },
                         "signatureHelp": {
@@ -334,6 +340,8 @@ impl Client {
             has_inlay_hints: !initialized["capabilities"]["inlayHintProvider"].is_null()
                 && initialized["capabilities"]["inlayHintProvider"] != false,
             has_completion: !initialized["capabilities"]["completionProvider"].is_null(),
+            resolves_completion: initialized["capabilities"]["completionProvider"]["resolveProvider"]
+                == true,
             completion_triggers: strings(
                 &initialized["capabilities"]["completionProvider"]["triggerCharacters"],
             ),
@@ -497,6 +505,29 @@ impl Client {
         parse_completion(result).map_err(|e| Error::Server {
             code: 0,
             message: format!("unexpected completion answer: {e}"),
+        })
+    }
+
+    /// `item` (from this server's last answer) filled in: its documentation, detail and the
+    /// import it needs. `None` when the server does not resolve items, or for an item made
+    /// without it. Setting `cancelled` gives up on the answer.
+    pub fn resolve_completion(
+        &self,
+        item: &CompletionItem,
+        cancelled: &AtomicBool,
+    ) -> Result<Option<CompletionItem>, Error> {
+        if !self.resolves_completion || item.raw().is_null() {
+            return Ok(None);
+        }
+        let result = self.connection.request_cancellable(
+            "completionItem/resolve",
+            item.raw().clone(),
+            COMPLETION_TIMEOUT,
+            cancelled,
+        )?;
+        parse_resolved(result).map(Some).map_err(|e| Error::Server {
+            code: 0,
+            message: format!("unexpected resolved item: {e}"),
         })
     }
 
@@ -806,7 +837,7 @@ mod tests {
                     json!({"capabilities": {
                         "diagnosticProvider": {},
                         "inlayHintProvider": true,
-                        "completionProvider": {"triggerCharacters": [".", ":"]},
+                        "completionProvider": {"triggerCharacters": [".", ":"], "resolveProvider": true},
                         "signatureHelpProvider": {
                             "triggerCharacters": ["(", ","],
                             "retriggerCharacters": [")"],
@@ -1077,6 +1108,48 @@ mod tests {
                 json!({"triggerKind": 3, "isRetrigger": true}),
             ]
         );
+        drop(client);
+    }
+
+    #[test]
+    fn resolving_sends_the_item_back_as_it_came() {
+        let (connection, wire, server) = connect(|_, _| {});
+        let _server = serve(wire.clone(), server, |method| match method {
+            "textDocument/completion" => json!([{"label": "Map", "data": {"id": 7}}]),
+            "completionItem/resolve" => json!({
+                "label": "Map", "detail": "interface Map<K, V>",
+                "documentation": {"kind": "markdown", "value": "A **map**."},
+            }),
+            other => panic!("{other}"),
+        });
+        let client = Client::with_connection(owned(connection), Path::new("/w")).unwrap();
+        let never = AtomicBool::new(false);
+        let found = client
+            .completion(
+                Path::new("/w/a.ts"),
+                0,
+                1,
+                CompletionTrigger::Invoked,
+                &never,
+            )
+            .unwrap();
+        let mut item = found.items[0].clone();
+        let resolved = client.resolve_completion(&item, &never).unwrap().unwrap();
+        item.absorb(resolved);
+        assert_eq!(item.detail.as_deref(), Some("interface Map<K, V>"));
+        assert_eq!(
+            item.documentation,
+            Some(crate::Documentation::Markdown("A **map**.".into()))
+        );
+        let sent = wire
+            .messages()
+            .into_iter()
+            .find(|m| m["method"] == "completionItem/resolve")
+            .unwrap();
+        assert_eq!(sent["params"], json!({"label": "Map", "data": {"id": 7}}));
+        // an item made here is not the server's to resolve
+        let plain = CompletionItem::plain("x", None, None);
+        assert!(client.resolve_completion(&plain, &never).unwrap().is_none());
         drop(client);
     }
 

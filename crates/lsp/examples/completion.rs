@@ -123,4 +123,17 @@ fn main() {
             item.additional_edits().len(),
         );
     }
+    // the best item, filled in by the server (its documentation, the import it needs)
+    if let Some(&best) = rank(&found.items, &word).first() {
+        let asked = Instant::now();
+        let resolved = client
+            .resolve_completion(&found.items[best], &AtomicBool::new(false))
+            .unwrap();
+        println!("resolved in {:?}:", asked.elapsed());
+        if let Some(item) = resolved {
+            println!("  detail: {:?}", item.detail);
+            println!("  documentation: {:?}", item.documentation);
+            println!("  edits: {}", item.additional_edits().len());
+        }
+    }
 }
