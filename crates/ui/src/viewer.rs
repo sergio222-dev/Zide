@@ -30,6 +30,7 @@ use zide_vim::{Key, Mode, Vim};
 use crate::{
     fonts, indent, minimap,
     rows::Rows,
+    settings,
     sticky::{MAX_STICKY, Scope, sticky_headers},
     theme,
 };
@@ -40,6 +41,8 @@ const MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// pair matching, which would reread the whole file at every edit.
 pub const SYNTAX_LINE_LIMIT: usize = 20_000;
 const TAB_WIDTH: usize = 4;
+/// How much of a file is read to tell how it indents: enough to see, cheap on huge files.
+const INDENT_SAMPLE_LINES: usize = 2_000;
 /// Row height as a multiple of the font size (20px at the default 16px).
 const ROW_RATIO: f32 = 1.25;
 pub const DEFAULT_FONT_SIZE: f32 = 16.;
@@ -406,8 +409,18 @@ impl Viewer {
             changes: Arc::default(),
             pair: RefCell::new(None),
         };
+        viewer.detect_indent();
         viewer.rebuild();
         viewer
+    }
+
+    /// Indents new lines as the file already does; a file without indentation follows the
+    /// `indent` setting.
+    fn detect_indent(&mut self) {
+        let text = self.buffer.text();
+        let lines: Vec<&str> = text.lines().take(INDENT_SAMPLE_LINES).collect();
+        let unit = indent::unit(&lines).unwrap_or_else(|| settings::indent().unit());
+        self.vim.set_indent(&unit);
     }
 
     /// True when the file was too long for syntax features and is edited as plain text.
@@ -827,6 +840,7 @@ impl Viewer {
         self.saved_at = self.buffer.revision();
         self.notice = None;
         self.vim.set_cursor(&self.buffer, self.buffer.offset_of(at));
+        self.detect_indent();
         self.rebuild();
         true
     }

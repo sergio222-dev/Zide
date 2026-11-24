@@ -5,8 +5,14 @@ use super::*;
 /// Types `keys` into `text` with the cursor at `at`; `<Esc>`, `<CR>`, `<BS>` and `<C-r>` are
 /// special keys. Returns the text and the cursor.
 fn run_at(text: &str, at: usize, keys: &str) -> (String, usize) {
+    run_indented("    ", text, at, keys)
+}
+
+/// [`run_at`] with `indent` as one indent level.
+fn run_indented(indent: &str, text: &str, at: usize, keys: &str) -> (String, usize) {
     let mut buffer = Buffer::new(text);
     let mut vim = Vim::default();
+    vim.set_indent(indent);
     vim.set_cursor(&buffer, at);
     let mut rest = keys;
     while let Some(c) = rest.chars().next() {
@@ -475,4 +481,80 @@ fn the_clipboard_zide_yanked_to_does_not_replace_a_later_delete() {
     vim.offer_clipboard(&clipboard); // unchanged since the yank
     vim.handle(&mut buffer, Key::Char('P'));
     assert_eq!(buffer.text(), "foo bar");
+}
+
+#[test]
+fn enter_keeps_the_indentation_of_the_line() {
+    assert_eq!(run("    a", "A<CR>b").0, "    a\n    b");
+    assert_eq!(run("\ta", "A<CR>b").0, "\ta\n\tb");
+    // the text after the cursor moves to the new line, without the spaces it was after
+    assert_eq!(run_at("  a b", 3, "i<CR>").0, "  a\n  b");
+}
+
+#[test]
+fn enter_after_a_block_opener_goes_one_level_deeper() {
+    assert_eq!(run("fn a() {", "A<CR>b").0, "fn a() {\n    b");
+    assert_eq!(run("  if x:", "A<CR>y").0, "  if x:\n      y");
+    assert_eq!(run_indented("\t", "a {", 0, "A<CR>b").0, "a {\n\tb");
+    assert_eq!(run_indented("  ", "a(", 0, "A<CR>b").0, "a(\n  b");
+}
+
+#[test]
+fn enter_between_a_pair_puts_the_closer_on_its_own_line() {
+    let (text, cursor) = run_at("  a {}", 5, "i<CR>");
+    assert_eq!(text, "  a {\n      \n  }");
+    assert_eq!(cursor, 12);
+    assert_eq!(run_at("  a {}", 5, "i<CR>b<Esc>").0, "  a {\n      b\n  }");
+}
+
+#[test]
+fn a_line_left_with_only_indentation_is_emptied() {
+    // Enter twice: the blank line between keeps no whitespace
+    assert_eq!(run("    a", "A<CR><CR>b").0, "    a\n\n    b");
+    // leaving Insert right after the indent takes it back
+    assert_eq!(run("    a", "A<CR><Esc>").0, "    a\n");
+    assert_eq!(run_at("    a", 0, "o<Esc>").0, "    a\n");
+    // indentation typed by hand stays
+    assert_eq!(run("a", "A<CR>  <Esc>").0, "a\n  ");
+}
+
+#[test]
+fn o_and_capital_o_indent_the_new_line() {
+    assert_eq!(run_at("  a\n", 0, "ob<Esc>").0, "  a\n  b\n");
+    assert_eq!(run_at("a {\n}\n", 0, "ob<Esc>").0, "a {\n    b\n}\n");
+    assert_eq!(run_at("  a\n", 0, "Ob<Esc>").0, "  b\n  a\n");
+}
+
+#[test]
+fn a_closer_first_on_its_line_goes_back_one_level() {
+    assert_eq!(run("a {", "A<CR>}").0, "a {\n}");
+    assert_eq!(run_indented("\t", "\ta {", 0, "A<CR>]").0, "\ta {\n\t]");
+    // after other text the closer is just typed
+    assert_eq!(run("    a", "A)").0, "    a)");
+}
+
+#[test]
+fn tab_types_one_level_up_to_the_next_stop() {
+    assert_eq!(run("", "i\t").0, "    ");
+    assert_eq!(run("ab", "A\t").0, "ab  ");
+    assert_eq!(run_indented("\t", "", 0, "i\t").0, "\t");
+    assert_eq!(run_indented("  ", "", 0, "i\t\t").0, "    ");
+}
+
+#[test]
+fn backspace_in_the_indentation_takes_a_whole_level() {
+    assert_eq!(run_at("        a", 8, "i<BS>").0, "    a");
+    assert_eq!(run_at("      a", 6, "i<BS>").0, "    a"); // off the grid: back to it
+    assert_eq!(run("    a", "A<BS>").0, "    "); // after text, one char
+    assert_eq!(run_indented("\t", "\t\ta", 2, "i<BS>").0, "\ta");
+}
+
+#[test]
+fn the_indent_level_is_only_a_tab_or_spaces() {
+    let mut vim = Vim::default();
+    vim.set_indent("");
+    vim.set_indent("x");
+    assert_eq!(vim.indent(), "    ");
+    vim.set_indent("\t");
+    assert_eq!(vim.indent(), "\t");
 }

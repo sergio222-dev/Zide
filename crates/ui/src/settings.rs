@@ -2,6 +2,7 @@
 //! `agent_servers` maps a name to the command that runs Claude (a sandbox wrapper, say), and
 //! `agent` names the one in use; and `confirm_stop: false` lets Esc stop Claude without asking.
 //! `editor_font` and `ui_font` name the font families Zide draws code and its interface in.
+//! `indent` is the indent level of files that do not show their own: `"tab"` or a number of spaces.
 //! Keys Zide does not know are kept when the file is saved.
 
 use std::io;
@@ -57,6 +58,45 @@ pub fn toggle_confirm_stop() -> Result<bool, String> {
     let path = path().ok_or("No config folder to save the setting in")?;
     update(&path, |file| with_confirm_stop(file, on)).map_err(|e| e.to_string())?;
     Ok(on)
+}
+
+/// One indent level for files that do not show their own: `"indent": "tab"` or a number of
+/// spaces (`"indent": 2`). Four spaces without the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Indent {
+    Tab,
+    Spaces(usize),
+}
+
+impl Indent {
+    /// The text one level is typed as.
+    pub fn unit(self) -> String {
+        match self {
+            Indent::Tab => "\t".into(),
+            Indent::Spaces(n) => " ".repeat(n),
+        }
+    }
+}
+
+const DEFAULT_INDENT: Indent = Indent::Spaces(4);
+
+static INDENT: std::sync::RwLock<Indent> = std::sync::RwLock::new(DEFAULT_INDENT);
+
+/// The default indent level, as the settings last applied say.
+pub fn indent() -> Indent {
+    *INDENT.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A value that is neither `"tab"` nor 1 to 8 spaces is the default.
+fn indent_in(file: &Value) -> Indent {
+    match file.get("indent") {
+        Some(Value::String(text)) if matches!(text.trim(), "tab" | "tabs") => Indent::Tab,
+        Some(value) => match value.as_u64() {
+            Some(n @ 1..=8) => Indent::Spaces(n as usize),
+            _ => DEFAULT_INDENT,
+        },
+        None => DEFAULT_INDENT,
+    }
 }
 
 /// The font families chosen in `editor_font` and `ui_font`; `None` is Zide's own pick.
@@ -303,6 +343,7 @@ pub fn use_file(file: &Value) {
         agent.map(|agent| agent.protocol).unwrap_or_default();
     CONFIRM_STOP.store(confirm_stop_in(file), Ordering::Relaxed);
     *FONTS.write().unwrap_or_else(|e| e.into_inner()) = fonts_in(file);
+    *INDENT.write().unwrap_or_else(|e| e.into_inner()) = indent_in(file);
 }
 
 /// Reads the settings and makes Claude start as they say; a problem is logged, and Claude then
@@ -500,6 +541,17 @@ mod tests {
         assert!(!confirm_stop_in(&off));
         assert_eq!(active(&off), Some(sandbox()));
         assert!(confirm_stop_in(&with_confirm_stop(off, true)));
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_indent_is_a_tab_or_some_spaces_and_four_spaces_otherwise() {
+        assert_eq!(indent_in(&json!({})), Indent::Spaces(4));
+        assert_eq!(indent_in(&json!({ "indent": "tab" })), Indent::Tab);
+        assert_eq!(indent_in(&json!({ "indent": 2 })), Indent::Spaces(2));
+        assert_eq!(indent_in(&json!({ "indent": 0 })), Indent::Spaces(4));
+        assert_eq!(indent_in(&json!({ "indent": "wide" })), Indent::Spaces(4));
+        assert_eq!(Indent::Spaces(2).unit(), "  ");
+        assert_eq!(Indent::Tab.unit(), "\t");
     }
 
     #[::core::prelude::v1::test]
