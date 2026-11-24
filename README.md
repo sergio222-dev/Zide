@@ -36,6 +36,10 @@ Only Linux x86_64 is published for now.
 - **Find Usages** (`Alt+F7`): semantic through a language server, text search as a fallback.
 - **Go to Definition** (`gd` or `Ctrl+B`): through a language server; without one it jumps by name in the
   symbol index and the status line says so.
+- **Code completion** while inserting: the file's language server offers what fits as you type a word or after a character the server lists (`.`, `:`),
+  in a popup at the caret narrowed down as you keep typing (IntelliJ matching: `gBN` finds `getByName`).
+  `Up`/`Down` or `Ctrl+N`/`Ctrl+P` pick, `Enter` or `Tab` accepts (with the import it needs, when the server offers
+  one), `Esc` leaves Insert and the popup; `Ctrl+Space` asks by hand. `.` repeats the completed word.
 - **Status bar**: messages on the left; on the right the branch's state against its upstream (`↑` to push, `↓` to pull,
   `Δ` when diverged), the branch name, the cursor position and the vim mode.
 - **Branch switcher** (``Ctrl+Shift+` ``, click the branch in the status bar, or Find Action → *Switch Branch*): Recent, Local, Remote and
@@ -160,6 +164,7 @@ the projects opened before (Enter opens one in this window) and **Open** picks a
 | `Ctrl+Shift+K` | Push dialog: commits to push, their files and diffs (`Tab` switches list, `Enter` opens the diff, `Ctrl+Enter` pushes) |
 | `Alt+F7` | Find Usages |
 | `gd` / `Ctrl+B` | Go to Definition |
+| `Ctrl+Space` | Code completion at the caret (Insert mode) |
 | `Alt+1` | Toggle project tree |
 | `Alt+Shift+\`` | Scroll the project tree to the open file and select it |
 | `Ctrl+K` | Commit panel: tick files, write a message, **Commit** or **Commit and Push…** (`Amend` folds them into the last commit) |

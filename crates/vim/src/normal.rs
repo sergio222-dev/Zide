@@ -3,7 +3,7 @@ use std::ops::Range;
 use zide_text::Buffer;
 
 use crate::{
-    Key, Mode, Operator, Register, Vim,
+    Key, Mode, Operator, Register, Step, Vim,
     motion::{Motion, first_non_blank, last_line, line_end, motion},
     objects::text_object,
 };
@@ -432,8 +432,11 @@ impl Vim {
             return;
         }
         self.replaying = true;
-        for key in self.last_change.clone() {
-            self.handle(buffer, key);
+        for step in self.last_change.clone() {
+            match step {
+                Step::Key(key) => self.handle(buffer, key),
+                Step::Complete(completed) => self.apply_completed(buffer, &completed),
+            }
         }
         self.replaying = false;
         // the replay rewrote the command log; `.` itself is not a change
