@@ -550,6 +550,18 @@ fn backspace_in_the_indentation_takes_a_whole_level() {
 }
 
 #[test]
+fn backspace_on_a_line_of_only_indentation_removes_the_whole_line() {
+    let (text, cursor) = run("    a", "A<CR><BS>");
+    assert_eq!((text.as_str(), cursor), ("    a", 5));
+    assert_eq!(run("a {", "A<CR><BS>b").0, "a {b");
+    assert_eq!(run_at("  a {}", 5, "i<CR><BS>").0, "  a {\n  }");
+    assert_eq!(run_indented("\t", "\ta", 0, "A<CR><BS>").0, "\ta");
+    assert_eq!(run_at("  a\nb", 0, "o<BS>").0, "  a\nb");
+    // on the first line only the indentation goes
+    assert_eq!(run_at("    ", 4, "a<BS>").0, "");
+}
+
+#[test]
 fn the_indent_level_is_only_a_tab_or_spaces() {
     let mut vim = Vim::default();
     vim.set_indent("");
