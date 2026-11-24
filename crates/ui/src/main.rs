@@ -815,6 +815,13 @@ struct Workspace {
     diagnosed: Option<(String, Revision)>,
     /// Bumped on every symbol indexing; the result of an older one is dropped.
     symbols_generation: u64,
+    /// Set to stop the symbol indexing in progress when a newer one starts: a burst of file
+    /// changes would otherwise run as many full indexings at once, each with its own copy of
+    /// every symbol, and the allocator keeps that peak long after they end.
+    symbols_cancel: Arc<AtomicBool>,
+    /// The last store an indexing finished, whose stubs the next one reuses even while
+    /// `symbols` is `None` (after a rescan, or when a newer indexing cancelled the previous).
+    stub_source: Option<Arc<StubStore>>,
     _watcher: Option<ProjectWatcher>,
     /// `None` until the symbols of the current index are parsed.
     symbols: Option<Arc<StubStore>>,
@@ -948,6 +955,8 @@ impl Workspace {
             diagnostics_tx,
             diagnosed: None,
             symbols_generation: 0,
+            symbols_cancel: Arc::default(),
+            stub_source: None,
             _watcher: None,
             symbols: None,
             action_texts: registry
@@ -985,7 +994,7 @@ impl Workspace {
             let started = Instant::now();
             // scan, then watch the directories of that scan (a new directory means another
             // rescan); adding thousands of watches must not block the UI thread either
-            let (paths, dirs, watcher) = cx
+            let (paths, ignored, dirs, watcher) = cx
                 .background_executor()
                 .spawn(async move {
                     let scan = scan_project(&root, show_ignored).unwrap_or_else(|e| {
@@ -995,7 +1004,7 @@ impl Workspace {
                     let watcher = watch_project(&root, &scan.dirs, move |change| {
                         let _ = changes.send_blocking(change);
                     });
-                    (scan.files, scan.dirs, watcher)
+                    (scan.files, scan.ignored, scan.dirs, watcher)
                 })
                 .await;
             match &watcher {
@@ -1015,7 +1024,7 @@ impl Workspace {
                 if let Some(path) = this.tree_reveal.take() {
                     this.tree.reveal(&path);
                 }
-                this.replace_index(FileIndex::new(paths), cx);
+                this.replace_index(FileIndex::with_ignored(paths, ignored), cx);
                 this._watcher = watcher.ok();
                 // the old store indexes the old file list: keep it only to reuse its stubs
                 let previous = this.symbols.take();
@@ -1035,6 +1044,10 @@ impl Workspace {
         };
         self.symbols_generation += 1;
         let generation = self.symbols_generation;
+        self.symbols_cancel.store(true, Ordering::Relaxed);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.symbols_cancel = cancel.clone();
+        let previous = previous.or_else(|| self.stub_source.clone());
         let root = self.root.clone();
         self.begin_busy("Indexing symbols...", cx);
         cx.spawn(async move |this, cx| {
@@ -1048,14 +1061,19 @@ impl Workspace {
                         Some(previous) => Some(previous.cache()),
                         None => cache_path.as_deref().and_then(StubCache::load),
                     };
-                    let store =
-                        StubStore::build(index, &root, cache.as_ref(), &AtomicBool::new(false))?;
-                    if let Some(path) = cache_path
+                    let store = StubStore::build(index, &root, cache.as_ref(), &cancel)?;
+                    // writing the cache serializes every symbol of the project: only when a
+                    // newer indexing will not, and when it would say something new
+                    let unchanged = cache.as_ref().is_some_and(|c| store.same_stubs_as(c));
+                    if !unchanged
+                        && !cancel.load(Ordering::Relaxed)
+                        && let Some(path) = cache_path
                         && let Err(e) = store.save(&path)
                     {
                         eprintln!("saving the stub cache failed: {e}");
                     }
-                    Some(store)
+                    drop(cache);
+                    (!cancel.load(Ordering::Relaxed)).then_some(store)
                 })
                 .await;
             let Some(symbols) = symbols else {
@@ -1072,7 +1090,9 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 this.end_busy("Indexing symbols...", cx);
                 if this.symbols_generation == generation {
-                    this.symbols = Some(Arc::new(symbols));
+                    let symbols = Arc::new(symbols);
+                    this.stub_source = Some(symbols.clone());
+                    this.symbols = Some(symbols);
                     this.search_again(cx);
                 }
             })

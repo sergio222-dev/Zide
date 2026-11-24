@@ -59,8 +59,11 @@ impl StubStore {
         let built: Vec<(Option<Arc<FileStubs>>, bool)> = files
             .paths()
             .par_iter()
-            .map(|path| {
-                if cancel.load(Ordering::Relaxed) {
+            .enumerate()
+            .map(|(i, path)| {
+                // what git ignores (dependencies, virtualenvs, builds) is browsed, not indexed:
+                // it is most of the files and symbols of a project, and none of its own code
+                if cancel.load(Ordering::Relaxed) || files.is_ignored(i) {
                     return (None, false);
                 }
                 stubs_of_file(
@@ -310,6 +313,23 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    #[test]
+    fn files_git_ignores_have_no_stubs() {
+        let (root, _) = project(
+            "ignored",
+            &[("a.rs", "fn mine() {}\n"), ("b.rs", "fn dep() {}\n")],
+        );
+        let files = Arc::new(FileIndex::with_ignored(
+            vec!["a.rs".into(), "b.rs".into()],
+            vec![false, true],
+        ));
+        let store = build(&files, &root, None);
+        assert_eq!(names(&store, "mine"), ["mine"]);
+        assert!(names(&store, "dep").is_empty());
+        assert!(store.file_stubs(1).is_none());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

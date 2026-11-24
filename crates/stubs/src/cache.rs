@@ -28,9 +28,16 @@ pub struct StubCache {
     pub(crate) files: HashMap<String, Arc<FileStubs>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct OnDisk {
     files: Vec<(String, FileStubs)>,
+}
+
+/// [`OnDisk`] borrowing the store's stubs: the same bytes, without copying every symbol of the
+/// project just to write them out.
+#[derive(Serialize)]
+struct OnDiskRef<'a> {
+    files: Vec<(&'a str, &'a FileStubs)>,
 }
 
 impl StubCache {
@@ -85,15 +92,33 @@ impl StubStore {
         }
     }
 
+    /// True when this store holds the very stubs of `cache` and no others: saving it would
+    /// write what the cache already says. A change in a file without stubs (an image, a lock
+    /// file) keeps it true, which spares rewriting the whole cache for it.
+    pub fn same_stubs_as(&self, cache: &StubCache) -> bool {
+        let mut count = 0;
+        for (path, stubs) in self.files().paths().iter().zip(self.all_stubs()) {
+            let Some(stubs) = stubs else {
+                continue;
+            };
+            count += 1;
+            let kept = cache.files.get(path.as_str());
+            if !kept.is_some_and(|kept| Arc::ptr_eq(kept, stubs)) {
+                return false;
+            }
+        }
+        count == cache.files.len()
+    }
+
     /// Writes the stubs to `path`, replacing it atomically.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let on_disk = OnDisk {
+        let on_disk = OnDiskRef {
             files: self
                 .files()
                 .paths()
                 .iter()
                 .zip(self.all_stubs())
-                .filter_map(|(path, stubs)| Some((path.clone(), stubs.as_deref()?.clone())))
+                .filter_map(|(path, stubs)| Some((path.as_str(), stubs.as_deref()?)))
                 .collect(),
         };
         let mut bytes = MAGIC.to_vec();
@@ -174,6 +199,28 @@ mod tests {
         assert_eq!(again.reused(), 2);
         assert_eq!(again.len(), store.len());
         assert_eq!(again.file_stubs(1), store.file_stubs(1));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn only_a_store_with_other_stubs_differs_from_its_cache() {
+        let (root, files) = project("same");
+        let cache = build(&files, &root, None).cache();
+        assert!(build(&files, &root, Some(&cache)).same_stubs_as(&cache));
+        // a file without stubs changes nothing
+        fs::write(root.join("notes.txt"), "hi").unwrap();
+        let with_notes = Arc::new(FileIndex::new(vec![
+            "a.rs".into(),
+            "b.rs".into(),
+            "notes.txt".into(),
+        ]));
+        assert!(build(&with_notes, &root, Some(&cache)).same_stubs_as(&cache));
+        // a file gone, or edited, does
+        let fewer = Arc::new(FileIndex::new(vec!["a.rs".into()]));
+        assert!(!build(&fewer, &root, Some(&cache)).same_stubs_as(&cache));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(root.join("a.rs"), "struct B;\n").unwrap();
+        assert!(!build(&files, &root, Some(&cache)).same_stubs_as(&cache));
         fs::remove_dir_all(&root).unwrap();
     }
 
