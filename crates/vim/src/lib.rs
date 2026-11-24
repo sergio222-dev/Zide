@@ -261,6 +261,9 @@ impl Vim {
             Key::Char('\t') => self.type_indent(buffer),
             Key::Char(c) => self.type_char(buffer, c),
             Key::Enter => self.new_line(buffer),
+            Key::Backspace if self.cursor > 0 && self.on_blank_line(buffer) => {
+                self.delete_blank_line(buffer);
+            }
             Key::Backspace if self.cursor > 0 => {
                 // between an empty pair both halves go
                 let pair = buffer
@@ -429,6 +432,25 @@ impl Vim {
         }
         self.mode = Mode::Insert;
         self.auto_indented = Some(self.cursor);
+    }
+
+    /// True when the cursor's line holds only indentation and the cursor is past some of it:
+    /// the line Enter or `o` just opened, which Backspace then removes in one go.
+    fn on_blank_line(&self, buffer: &Buffer) -> bool {
+        let line = buffer.position_of(self.cursor).line;
+        is_blank(&self.before_cursor(buffer)) && is_blank(&buffer.line(line))
+    }
+
+    /// Removes the cursor's blank line whole, leaving the cursor at the end of the line
+    /// above, so an indented empty line does not take one Backspace per level to undo.
+    /// On the first line there is no line above: only the indentation goes.
+    fn delete_blank_line(&mut self, buffer: &mut Buffer) {
+        let line = buffer.position_of(self.cursor).line;
+        let start = buffer.line_start(line);
+        let end = motion::line_end(buffer, line);
+        let from = start.saturating_sub(usize::from(line > 0));
+        buffer.delete(from..end);
+        self.cursor = from;
     }
 
     /// Takes back the indentation of the cursor's line when it holds nothing else.
