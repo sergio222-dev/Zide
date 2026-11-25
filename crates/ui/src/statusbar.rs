@@ -7,7 +7,7 @@ use gpui_kit::*;
 use zide_claude::Overall;
 use zide_git::BranchStatus;
 
-use crate::{theme, viewer::ViewerStatus};
+use crate::{ai, theme, viewer::ViewerStatus};
 
 /// The icon of the branch name, shipped with the app: the kit has none.
 pub const BRANCH_ICON: &str = "icons/git-branch.svg";
@@ -41,7 +41,9 @@ pub fn claude_color(overall: Overall) -> u32 {
 }
 
 /// `busy` names the background work in progress, if any. `on_branch` runs when the branch name is clicked; `claude` is `None` when Claude is not
-/// installed, and `on_claude` runs when its indicator is clicked.
+/// installed, and `on_claude` runs when its indicator is clicked. `ai` is the state of the local
+/// model, and `on_ai` turns it on or off.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     status: Option<ViewerStatus>,
     busy: Option<&'static str>,
@@ -49,6 +51,8 @@ pub fn render(
     on_branch: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     claude: Option<Overall>,
     on_claude: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ai: &ai::State,
+    on_ai: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> StatusBar {
     let mut bar = StatusBar::new()
         .bg(rgb(theme::BACKGROUND))
@@ -68,6 +72,17 @@ pub fn render(
                 .child(label),
         );
     }
+    bar = bar.right(
+        div()
+            .id("ai")
+            .flex()
+            .items_center()
+            .gap_1()
+            .cursor_pointer()
+            .on_click(on_ai)
+            .child(div().size_2().rounded_full().bg(rgb(ai.color())))
+            .child(ai.label()),
+    );
     if let Some(overall) = claude {
         bar = bar.right(
             div()

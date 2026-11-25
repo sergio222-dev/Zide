@@ -15,6 +15,7 @@ use std::{
 };
 
 mod agent_settings;
+mod ai;
 mod branches;
 mod changed_files;
 mod chat;
@@ -792,6 +793,8 @@ struct Workspace {
     highlight_requested: Option<(String, HighlightKey)>,
     /// Set to give up on the completion asked last, once typing made it stale.
     completion_asked: Option<Arc<AtomicBool>>,
+    /// The local model that suggests ghost text, and its indicator.
+    ai: ai::Ai,
     /// The same for the signature of the call being typed.
     signature_asked: Option<Arc<AtomicBool>>,
     /// And for the documentation of the selected completion item.
@@ -947,6 +950,7 @@ impl Workspace {
             tree_g: false,
             highlight_requested: None,
             completion_asked: None,
+            ai: ai::Ai::default(),
             signature_asked: None,
             resolve_asked: None,
             tree_scroll: UniformListScrollHandle::new(),
@@ -2471,6 +2475,7 @@ impl Workspace {
         }
         self.signature_as_typed(key, cx);
         self.complete_as_typed(key, cx);
+        self.ghost_as_typed(cx);
         self.resolve_selected(cx);
         if key == zide_vim::Key::Esc && self.find.is_some() {
             self.close_find(window, cx);
@@ -2500,7 +2505,8 @@ impl Workspace {
             return true;
         }
         if viewer.completion_state().is_none() {
-            return false;
+            // with no popup, Tab takes the suggestion of the model, if one is shown
+            return plain && key == "tab" && self.accept_ghost(cx);
         }
         let step = match key {
             "down" if plain => 1,
@@ -4135,6 +4141,8 @@ impl Workspace {
                 cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
                 self.claude_installed.then(|| self.claude_overall(cx)),
                 cx.listener(|this, _, window, cx| this.toggle_claude(window, cx)),
+                &self.ai.state,
+                cx.listener(|this, _, _, cx| this.toggle_ai(cx)),
             ));
         match &self.overlay {
             Overlay::None => {}

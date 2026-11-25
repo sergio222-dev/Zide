@@ -13,6 +13,7 @@ path = "src/main.rs"
 gpui-kit = "=0.11.0"
 similar = "3.2.1"
 zide-acp = { path = "../acp" }
+zide-ai = { path = "../ai" }
 zide-claude = { path = "../claude" }
 zide-core = { path = "../core" }
 zide-matcher = { path = "../matcher" }
