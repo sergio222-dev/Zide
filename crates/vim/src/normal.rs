@@ -3,7 +3,7 @@ use std::ops::Range;
 use zide_text::Buffer;
 
 use crate::{
-    Key, Mode, Operator, Register, Step, Vim,
+    Key, Mode, Operator, Step, Vim,
     motion::{Motion, first_non_blank, last_line, line_end, motion},
     objects::text_object,
 };
@@ -300,13 +300,9 @@ impl Vim {
             }
             return;
         }
-        self.register = Register {
-            text: buffer.slice(start..end),
-            linewise: false,
-        };
+        self.set_register(buffer.slice(start..end), false);
         match op {
             Operator::Yank => {
-                self.note_yank();
                 self.cursor = start;
             }
             Operator::Delete | Operator::Change => {
@@ -342,12 +338,9 @@ impl Vim {
         if !had_break {
             text.push('\n');
         }
-        self.register = Register {
-            text,
-            linewise: true,
-        };
+        self.set_register(text, true);
         match op {
-            Operator::Yank => self.note_yank(),
+            Operator::Yank => {}
             Operator::Change => {
                 buffer.delete(start..line_end(buffer, b));
                 self.cursor = start;
@@ -417,10 +410,7 @@ impl Vim {
     /// Deletes from the cursor to `end` (exclusive) into the register.
     fn delete_to(&mut self, buffer: &mut Buffer, end: usize) {
         if end > self.cursor {
-            self.register = Register {
-                text: buffer.slice(self.cursor..end),
-                linewise: false,
-            };
+            self.set_register(buffer.slice(self.cursor..end), false);
             buffer.delete(self.cursor..end);
             self.clamp(buffer);
         }

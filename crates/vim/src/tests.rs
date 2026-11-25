@@ -449,8 +449,8 @@ fn ctrl_v_in_insert_pastes_the_clipboard_as_typed_text() {
 }
 
 #[test]
-fn yanks_are_taken_for_the_clipboard_and_deletes_are_not() {
-    let mut buffer = Buffer::new("foo bar\nbaz\n");
+fn yanks_and_deletes_are_taken_for_the_clipboard() {
+    let mut buffer = Buffer::new("foo bar\nbaz\nqux\n");
     let mut vim = Vim::default();
     for c in "yw".chars() {
         vim.handle(&mut buffer, Key::Char(c));
@@ -464,23 +464,55 @@ fn yanks_are_taken_for_the_clipboard_and_deletes_are_not() {
     for c in "dd".chars() {
         vim.handle(&mut buffer, Key::Char(c));
     }
-    assert_eq!(vim.take_yank(), None);
-}
-
-#[test]
-fn the_clipboard_zide_yanked_to_does_not_replace_a_later_delete() {
-    let mut buffer = Buffer::new("foo bar");
-    let mut vim = Vim::default();
-    for c in "yw".chars() {
-        vim.handle(&mut buffer, Key::Char(c));
-    }
-    let clipboard = vim.take_yank().unwrap();
+    assert_eq!(vim.take_yank().as_deref(), Some("foo bar\n"));
     for c in "dw".chars() {
         vim.handle(&mut buffer, Key::Char(c));
     }
-    vim.offer_clipboard(&clipboard); // unchanged since the yank
-    vim.handle(&mut buffer, Key::Char('P'));
-    assert_eq!(buffer.text(), "foo bar");
+    assert_eq!(vim.take_yank().as_deref(), Some("baz"));
+    for c in "jD".chars() {
+        vim.handle(&mut buffer, Key::Char(c));
+    }
+    assert_eq!(vim.take_yank().as_deref(), Some("qux"));
+}
+
+/// Issue #163: text copied elsewhere, pasted, then copied again after a delete was pasting the
+/// delete, because the clipboard still held the same text Zide had seen before.
+#[test]
+fn copying_the_same_text_again_after_a_delete_pastes_it() {
+    let mut buffer = Buffer::new("one\ntwo\n");
+    let mut vim = Vim::default();
+    let mut clipboard = String::from("X");
+    let type_keys = |vim: &mut Vim, buffer: &mut Buffer, clipboard: &mut String, keys: &str| {
+        for c in keys.chars() {
+            let key = Key::Char(c);
+            if matches!(c, 'p' | 'P') {
+                vim.offer_clipboard(clipboard);
+            }
+            vim.handle(buffer, key);
+            if let Some(text) = vim.take_yank() {
+                *clipboard = text; // what the UI writes to the system clipboard
+            }
+        }
+    };
+    type_keys(&mut vim, &mut buffer, &mut clipboard, "P");
+    assert_eq!(buffer.text(), "Xone\ntwo\n");
+    type_keys(&mut vim, &mut buffer, &mut clipboard, "dd");
+    clipboard = String::from("X"); // Ctrl+C of the same text in another program
+    type_keys(&mut vim, &mut buffer, &mut clipboard, "P");
+    assert_eq!(buffer.text(), "Xtwo\n");
+}
+
+#[test]
+fn a_line_zide_deleted_to_the_clipboard_pastes_as_a_line() {
+    let mut buffer = Buffer::new("foo\nbar");
+    let mut vim = Vim::default();
+    for c in "dd".chars() {
+        vim.handle(&mut buffer, Key::Char(c));
+    }
+    let clipboard = vim.take_yank().unwrap();
+    vim.offer_clipboard(&clipboard); // unchanged since the delete
+    vim.handle(&mut buffer, Key::Char('p'));
+    assert_eq!(buffer.text(), "bar\nfoo");
 }
 
 #[test]
