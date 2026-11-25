@@ -26,7 +26,7 @@ use zide_syntax::{
     toggle_comment,
 };
 use zide_text::{Buffer, FindQuery, Finder, Position, Revision};
-use zide_vim::{Key, Mode, Vim};
+use zide_vim::{Binding, Key, Mode, Place, Request, Vim};
 
 use crate::{
     completion::{CompletionPick, CompletionPopup, VISIBLE_ROWS},
@@ -333,8 +333,6 @@ pub struct Viewer {
     collapsed: BTreeSet<usize>,
     built_at: Revision,
     scroll: UniformListScrollHandle,
-    /// A `z` was typed and its second key (`t`, `z`, `b`...) is awaited.
-    z_pending: bool,
     /// The completion popup at the caret, while inserting.
     completion: Option<CompletionPopup>,
     /// The signature of the call being typed, and the line it was asked on.
@@ -422,7 +420,6 @@ impl Viewer {
             built_at: buffer.revision(),
             buffer,
             scroll: UniformListScrollHandle::new(),
-            z_pending: false,
             completion: None,
             signature: None,
             anim: None,
@@ -452,6 +449,8 @@ impl Viewer {
             pair: RefCell::new(None),
         };
         viewer.detect_indent();
+        viewer.vim.set_read_only(!editable); // an error message is not a document
+        viewer.vim.set_keymap(settings::keymap());
         viewer.rebuild();
         viewer
     }
@@ -644,7 +643,6 @@ impl Viewer {
         .min(line.chars);
         let offset = self.buffer.line_start(row) + column;
         self.anim = None;
-        self.z_pending = false;
         self.completion = None;
         self.signature = None;
         self.vim.click(&mut self.buffer, offset);
@@ -1152,16 +1150,22 @@ impl Viewer {
 
     /// True when the next key starts a Normal-mode command (nothing half typed).
     pub fn awaits_command(&self) -> bool {
-        self.vim.mode() == Mode::Normal && self.vim.pending().is_empty() && !self.z_pending
+        self.vim.mode() == Mode::Normal && self.vim.pending().is_empty()
     }
 
     /// What is typed so far of an unfinished command, for the status bar.
-    fn pending_keys(&self) -> String {
-        format!(
-            "{}{}",
-            if self.z_pending { "z" } else { "" },
-            self.vim.pending()
-        )
+    pub fn pending_keys(&self) -> String {
+        self.vim.pending()
+    }
+
+    /// See [`zide_vim::Vim::hints`].
+    pub fn hints(&self) -> Option<(&Binding, Vec<&Binding>)> {
+        self.vim.hints()
+    }
+
+    /// See [`zide_vim::Vim::waiting_group`].
+    pub fn waiting_group(&self) -> Option<Vec<Key>> {
+        self.vim.waiting_group().map(<[Key]>::to_vec)
     }
 
     /// True when `key` may paste, so the system clipboard should be offered first: `p`/`P`
@@ -1184,87 +1188,54 @@ impl Viewer {
         self.vim.take_yank()
     }
 
+    /// Runs `key`. Which keys do what is `zide_vim`'s keymap; the commands it hands back
+    /// (scrolling, folds, search, `gd`) run here.
     pub fn handle_key(&mut self, key: Key) -> Effect {
         let gliding_to = self.anim.take().map(|anim| anim.to); // a key press takes over from a glide
-        if self.z_pending {
-            self.z_pending = false;
-            if let Key::Char(command @ ('a' | 'o' | 'c' | 'M' | 'R')) = key {
-                self.fold_command(command);
-                return Effect::None;
-            }
-            let strategy = match key {
-                Key::Char('t') | Key::Enter => Some(ScrollStrategy::Top),
-                Key::Char('z' | '.') => Some(ScrollStrategy::Center),
-                Key::Char('b' | '-') => Some(ScrollStrategy::Bottom),
-                _ => None, // Esc or anything else cancels
-            };
-            if let Some(strategy) = strategy {
-                if matches!(key, Key::Enter | Key::Char('.' | '-')) {
-                    self.vim.handle(&mut self.buffer, Key::Char('^'));
-                }
-                self.place_cursor_line(strategy);
-            }
-            return Effect::None;
-        }
         if key == Key::Ctrl('/') {
             self.toggle_comment();
             return Effect::None;
         }
-        let navigating = matches!(
-            self.vim.mode(),
-            Mode::Normal | Mode::Visual | Mode::VisualLine
-        ) && self.vim.pending().is_empty();
-        if navigating {
-            match key {
-                Key::Char('z') if self.vim.mode() == Mode::Normal => {
-                    self.z_pending = true;
-                    return Effect::None;
-                }
-                Key::Ctrl('d') => {
-                    self.scroll_half_page(true, gliding_to);
-                    return Effect::None;
-                }
-                Key::Ctrl('u') => {
-                    self.scroll_half_page(false, gliding_to);
-                    return Effect::None;
-                }
-                _ => {}
-            }
-        }
-        if self.vim.mode() == Mode::Normal && self.vim.pending() == "g" && key == Key::Char('d') {
-            self.vim.handle(&mut self.buffer, Key::Esc); // the `g` is spent
-            return Effect::GoToDefinition;
-        }
-        if self.vim.mode() == Mode::Normal && self.vim.pending().is_empty() {
-            match key {
-                Key::Char('/') => return Effect::OpenFind,
-                Key::Char('n') if self.find.is_some() => {
-                    self.jump(true, false);
-                    return Effect::None;
-                }
-                Key::Char('N') if self.find.is_some() => {
-                    self.jump(false, false);
-                    return Effect::None;
-                }
-                _ => {}
-            }
-        }
-        if !self.editable
-            && !matches!(
-                key,
-                Key::Char(c) if "hjklwWbeEGg0$^".contains(c)
-            )
-        {
-            return Effect::None; // an error message is not a document
-        }
         let before = self.cursor_line();
-        self.vim.handle(&mut self.buffer, key);
+        let request = self.vim.handle(&mut self.buffer, key);
+        if let Some(request) = request {
+            return self.run_request(request, gliding_to);
+        }
         let ghost_changed = self.follow_ghost();
         if self.buffer.revision() != self.built_at || ghost_changed {
             self.rebuild();
         }
         self.snap_cursor(before);
         self.reveal_cursor();
+        Effect::None
+    }
+
+    /// A command of the keymap that is the editor's to run, not the text's.
+    fn run_request(&mut self, request: Request, gliding_to: Option<f32>) -> Effect {
+        match request {
+            Request::GoToDefinition => return Effect::GoToDefinition,
+            Request::OpenFind => return Effect::OpenFind,
+            Request::FindNext { forward } => {
+                if self.find.is_some() {
+                    self.jump(forward, false);
+                }
+            }
+            Request::Fold(command) => self.fold_command(command),
+            Request::Scroll {
+                place,
+                first_non_blank,
+            } => {
+                if first_non_blank {
+                    self.vim.handle(&mut self.buffer, Key::Char('^'));
+                }
+                self.place_cursor_line(match place {
+                    Place::Top => ScrollStrategy::Top,
+                    Place::Center => ScrollStrategy::Center,
+                    Place::Bottom => ScrollStrategy::Bottom,
+                });
+            }
+            Request::HalfPage { down } => self.scroll_half_page(down, gliding_to),
+        }
         Effect::None
     }
 
@@ -4215,6 +4186,25 @@ mod tests {
         assert!(!viewer.is_dirty());
         viewer.save();
         assert!(!dir.join("nope.txt").exists());
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_error_message_moves_and_scrolls_but_takes_no_edits() {
+        let dir = std::env::temp_dir().join(format!("zide-viewer-{}-message", std::process::id()));
+        let mut viewer = Viewer::open(&dir, "nope.txt");
+        let text = viewer.buffer.text();
+        type_keys(&mut viewer, "ddiwvy");
+        assert_eq!(viewer.buffer.text(), text);
+        assert!(viewer.awaits_command(), "neither Insert nor Visual mode");
+        type_keys(&mut viewer, "z");
+        assert_eq!(
+            viewer.pending_keys(),
+            "z",
+            "the editor's own keys still work"
+        );
+        assert!(viewer.hints().is_some());
+        type_keys(&mut viewer, "z");
+        assert!(viewer.awaits_command());
     }
 
     fn plain(text: &str) -> Line {

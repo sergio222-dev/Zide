@@ -3,14 +3,17 @@
 //! `agent` names the one in use; and `confirm_stop: false` lets Esc stop Claude without asking.
 //! `editor_font` and `ui_font` name the font families Zide draws code and its interface in.
 //! `indent` is the indent level of files that do not show their own: `"tab"` or a number of spaces.
+//! `keymap` rebinds Vim keys over Zide's defaults (see `zide_vim::Keymap::with_overrides`).
 //! Keys Zide does not know are kept when the file is saved.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Map, Value, json};
 use zide_claude::Launcher;
+use zide_vim::Keymap;
 
 /// How Zide talks to an agent: Claude Code's stream-json (the default) or the Agent Client
 /// Protocol (`"protocol": "acp"`), which other agents such as Copilot speak.
@@ -96,6 +99,37 @@ fn indent_in(file: &Value) -> Indent {
             _ => DEFAULT_INDENT,
         },
         None => DEFAULT_INDENT,
+    }
+}
+
+static KEYMAP: std::sync::RwLock<Option<Arc<Keymap>>> = std::sync::RwLock::new(None);
+
+/// What was wrong in the `keymap` setting last applied, not yet shown to the user.
+static KEYMAP_ERRORS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// The Vim keys: Zide's defaults with the `keymap` setting merged over them.
+pub fn keymap() -> Arc<Keymap> {
+    KEYMAP
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(Keymap::builtin)
+}
+
+/// The problems of the `keymap` setting, once: the next call returns none until the settings
+/// are applied again.
+pub fn take_keymap_errors() -> Vec<String> {
+    std::mem::take(&mut *KEYMAP_ERRORS.write().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// The keymap `file` asks for, and what was wrong in it (its bad entries are left out).
+fn keymap_in(file: &Value) -> (Arc<Keymap>, Vec<String>) {
+    match file.get("keymap") {
+        None | Some(Value::Null) => (Keymap::builtin(), Vec::new()),
+        Some(user) => {
+            let (keymap, errors) = Keymap::with_overrides(user);
+            (Arc::new(keymap), errors)
+        }
     }
 }
 
@@ -344,6 +378,12 @@ pub fn use_file(file: &Value) {
     CONFIRM_STOP.store(confirm_stop_in(file), Ordering::Relaxed);
     *FONTS.write().unwrap_or_else(|e| e.into_inner()) = fonts_in(file);
     *INDENT.write().unwrap_or_else(|e| e.into_inner()) = indent_in(file);
+    let (keymap, errors) = keymap_in(file);
+    for error in &errors {
+        eprintln!("settings: {error}");
+    }
+    *KEYMAP.write().unwrap_or_else(|e| e.into_inner()) = Some(keymap);
+    *KEYMAP_ERRORS.write().unwrap_or_else(|e| e.into_inner()) = errors;
 }
 
 /// Reads the settings and makes Claude start as they say; a problem is logged, and Claude then
@@ -376,6 +416,19 @@ mod tests {
 
     fn active_name(file: &Value) -> Option<String> {
         active(file).map(|agent| agent.name)
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_keymap_setting_merges_over_the_defaults_and_reports_bad_entries() {
+        let (keymap, errors) = keymap_in(&json!({}));
+        assert_eq!(keymap, Keymap::builtin());
+        assert!(errors.is_empty());
+        let (keymap, errors) = keymap_in(&json!({
+            "keymap": { "normal": { "keys": { "Q": "editor.find", "x": "visual.yank" } } }
+        }));
+        assert_ne!(keymap, Keymap::builtin());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("normal x"), "{errors:?}");
     }
 
     #[::core::prelude::v1::test]

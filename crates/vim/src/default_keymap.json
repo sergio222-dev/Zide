@@ -1,0 +1,105 @@
+{
+  "lists": {
+    "motions": {
+      "0": "motion.line_start",
+      "b": "motion.word_back",
+      "e": "motion.word_end",
+      "E": "motion.big_word_end",
+      "G": "motion.last_line",
+      "h": "motion.left",
+      "j": "motion.down",
+      "k": "motion.up",
+      "l": "motion.right",
+      "w": "motion.word",
+      "W": "motion.big_word",
+      "$": "motion.line_end",
+      "^": "motion.first_non_blank"
+    },
+    "objects": {
+      "b": "object.paren",
+      "B": "object.brace",
+      "w": "object.word",
+      "\"": "object.double_quote",
+      "'": "object.single_quote",
+      "`": "object.backtick",
+      "(": "object.paren",
+      ")": "object.paren",
+      "<": "object.angle",
+      ">": "object.angle",
+      "[": "object.bracket",
+      "]": "object.bracket",
+      "{": "object.brace",
+      "}": "object.brace"
+    },
+    "targets": {
+      "a": { "code": "object.around", "include": ["objects"] },
+      "g": { "name": "Goto", "keys": { "g": "motion.first_line" } },
+      "i": { "code": "object.inside", "include": ["objects"] }
+    },
+    "ctrl": {
+      "<C-d>": "editor.half_page_down",
+      "<C-u>": "editor.half_page_up",
+      "<C-r>": "redo"
+    }
+  },
+  "normal": {
+    "include": ["motions", "ctrl"],
+    "keys": {
+      "a": "command.append",
+      "A": "command.append_line_end",
+      "c": { "code": "operator.change", "include": ["motions", "targets"], "keys": { "c": "line" } },
+      "d": { "code": "operator.delete", "include": ["motions", "targets"], "keys": { "d": "line" } },
+      "D": "command.delete_line_end",
+      "g": {
+        "name": "Goto",
+        "keys": { "g": "motion.first_line", "d": "editor.go_to_definition" }
+      },
+      "i": "command.insert",
+      "I": "command.insert_line_start",
+      "n": "editor.find_next",
+      "N": "editor.find_previous",
+      "o": "command.open_below",
+      "O": "command.open_above",
+      "p": "command.paste_after",
+      "P": "command.paste_before",
+      "u": "command.undo",
+      "v": "visual.char",
+      "V": "visual.line",
+      "x": "command.delete_char",
+      "y": { "code": "operator.yank", "include": ["motions", "targets"], "keys": { "y": "line" } },
+      "z": {
+        "name": "Fold / Scroll",
+        "keys": {
+          "a": "editor.fold_toggle",
+          "b": "editor.scroll_bottom",
+          "c": "editor.fold_close",
+          "M": "editor.fold_close_all",
+          "o": "editor.fold_open",
+          "R": "editor.fold_open_all",
+          "t": "editor.scroll_top",
+          "z": "editor.scroll_center",
+          "<CR>": "editor.scroll_top_first_non_blank",
+          ".": "editor.scroll_center_first_non_blank",
+          "-": "editor.scroll_bottom_first_non_blank"
+        }
+      },
+      ".": "command.repeat",
+      "/": "editor.find",
+      "<C-a>": "number.increment",
+      "<C-x>": "number.decrement"
+    }
+  },
+  "visual": {
+    "include": ["motions", "targets", "ctrl"],
+    "keys": {
+      "c": "visual.change",
+      "d": "visual.delete",
+      "o": "visual.other_end",
+      "s": "visual.change",
+      "v": "visual.char",
+      "V": "visual.line",
+      "x": "visual.delete",
+      "y": "visual.yank"
+    }
+  }
+}

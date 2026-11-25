@@ -52,6 +52,7 @@ mod tree_ops;
 mod usages;
 mod viewer;
 mod welcome;
+mod which_key;
 
 use git_state::GitState;
 use gpui_kit::assets::IconName;
@@ -747,6 +748,9 @@ struct Workspace {
     show_ignored: bool,
     /// When the last Space was pressed in Normal mode: two in a row open the popup.
     last_space: Option<Instant>,
+    /// The keymap group of the half-typed Vim command the key hints panel is for, and whether
+    /// its delay is over (see [`which_key::DELAY`]).
+    which_key: Option<(Vec<zide_vim::Key>, bool)>,
     /// The diff of a commit panel file is on screen, in a dialog.
     diff_open: bool,
     /// The frame-rate overlay, when started with `ZIDE_FPS=1`.
@@ -927,6 +931,7 @@ impl Workspace {
             minimap: true,
             show_ignored: false,
             last_space: None,
+            which_key: None,
             diff_open: false,
             meter: meter::FrameMeter::from_env(),
             tree: Tree::new(),
@@ -2474,6 +2479,7 @@ impl Workspace {
         if let Some(text) = viewer.take_yank() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+        self.wait_which_key(cx);
         self.signature_as_typed(key, cx);
         // the key that enters Insert mode (`i`, `a`, `o`) is not typed text: no popup for it
         if was_inserting {
@@ -2494,6 +2500,60 @@ impl Workspace {
         }
         cx.stop_propagation();
         cx.notify();
+    }
+
+    /// The keys of the keymap group the editor waits in (`d`, `ci`, `z`), if any.
+    fn waiting_group(&self) -> Option<Vec<zide_vim::Key>> {
+        self.viewer.as_ref()?.waiting_group()
+    }
+
+    /// After a key in the editor: when a command is left half typed, the key hints panel shows
+    /// what can finish it once [`which_key::DELAY`] passes without another key. A key that
+    /// stays in the same group (a count typed after `d`) keeps the panel as it is.
+    fn wait_which_key(&mut self, cx: &mut Context<Self>) {
+        let group = self.waiting_group();
+        if group.is_some() && self.which_key.as_ref().map(|(keys, _)| keys) == group.as_ref() {
+            return;
+        }
+        let Some(group) = group else {
+            self.which_key = None;
+            return;
+        };
+        self.which_key = Some((group.clone(), false));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(which_key::DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                let still = this.waiting_group();
+                if let Some((waiting, shown)) = &mut this.which_key
+                    && *waiting == group
+                    && still.as_ref() == Some(waiting)
+                {
+                    *shown = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The key hints panel, when its delay is over and the editor still waits in the same
+    /// group (a click may have dropped the command since).
+    fn which_key_panel(&self) -> Option<Div> {
+        let (waiting, true) = self.which_key.as_ref()? else {
+            return None;
+        };
+        let viewer = self.viewer.as_ref()?;
+        if viewer.waiting_group().as_ref() != Some(waiting) {
+            return None;
+        }
+        let (group, next) = viewer.hints()?;
+        Some(
+            div()
+                .absolute()
+                .bottom_2()
+                .right_4()
+                .child(which_key::render(group, &next)),
+        )
     }
 
     /// The keys of the completion popup, and Ctrl+Space to open it, ahead of the editor's:
@@ -3012,6 +3072,18 @@ impl Workspace {
                     viewer::SYNTAX_LINE_LIMIT
                 ))
                 .title("Large file"),
+                cx,
+            );
+        }
+        let keymap_errors = settings::take_keymap_errors();
+        if !keymap_errors.is_empty() {
+            // the first file opened is the first time the keys matter
+            self.notify(
+                Notification::warning(format!(
+                    "These entries were left out and the default keys kept:\n{}",
+                    keymap_errors.join("\n")
+                ))
+                .title("Keymap in settings.json"),
                 cx,
             );
         }
@@ -4067,6 +4139,7 @@ impl Workspace {
                         )
                         .child(match &self.viewer {
                             Some(viewer) => div()
+                                .relative()
                                 .flex()
                                 .flex_col()
                                 .flex_1()
@@ -4123,6 +4196,7 @@ impl Workspace {
                                         }
                                     }),
                                 ))
+                                .children(self.which_key_panel())
                                 .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                                     if event.modifiers.control {
                                         this.zoom(event, window, cx);
