@@ -15,6 +15,7 @@ use std::{
 };
 
 mod agent_settings;
+mod ai;
 mod branches;
 mod changed_files;
 mod chat;
@@ -792,6 +793,8 @@ struct Workspace {
     highlight_requested: Option<(String, HighlightKey)>,
     /// Set to give up on the completion asked last, once typing made it stale.
     completion_asked: Option<Arc<AtomicBool>>,
+    /// The local model that suggests ghost text, and its indicator.
+    ai: ai::Ai,
     /// The same for the signature of the call being typed.
     signature_asked: Option<Arc<AtomicBool>>,
     /// And for the documentation of the selected completion item.
@@ -947,6 +950,7 @@ impl Workspace {
             tree_g: false,
             highlight_requested: None,
             completion_asked: None,
+            ai: ai::Ai::default(),
             signature_asked: None,
             resolve_asked: None,
             tree_scroll: UniformListScrollHandle::new(),
@@ -2464,13 +2468,20 @@ impl Workspace {
         {
             viewer.offer_clipboard(&text);
         }
+        let was_inserting = viewer.inserting();
         let effect = viewer.handle_key(key);
         viewer.settle_popups();
         if let Some(text) = viewer.take_yank() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
         self.signature_as_typed(key, cx);
-        self.complete_as_typed(key, cx);
+        // the key that enters Insert mode (`i`, `a`, `o`) is not typed text: no popup for it
+        if was_inserting {
+            self.complete_as_typed(key, cx);
+        } else {
+            self.cancel_completion();
+        }
+        self.ghost_as_typed(cx);
         self.resolve_selected(cx);
         if key == zide_vim::Key::Esc && self.find.is_some() {
             self.close_find(window, cx);
@@ -2486,7 +2497,7 @@ impl Workspace {
     }
 
     /// The keys of the completion popup, and Ctrl+Space to open it, ahead of the editor's:
-    /// Up/Down or Ctrl+N/Ctrl+P move, Enter or Tab accept. True when the key was one of them.
+    /// Up/Down or Ctrl+N/Ctrl+P move, Enter accepts (Tab is for the model's suggestion). True when the key was one of them.
     fn completion_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         let Some(viewer) = &mut self.viewer else {
             return false;
@@ -2500,14 +2511,14 @@ impl Workspace {
             return true;
         }
         if viewer.completion_state().is_none() {
-            return false;
+            return false; // Tab is the `SwitchTab` action, which takes a suggestion
         }
         let step = match key {
             "down" if plain => 1,
             "up" if plain => -1,
             "n" if ctrl => 1,
             "p" if ctrl => -1,
-            "enter" | "tab" if plain => {
+            "enter" if plain => {
                 self.accept_completion(None, cx);
                 return true;
             }
@@ -3971,6 +3982,12 @@ impl Workspace {
                     this.log_tab(window, cx);
                 } else if this.popup.is_some() {
                     this.switch_tab(cx);
+                } else if this.center == Center::Editor
+                    && !this.tree_focused
+                    && this.accept_ghost(cx)
+                {
+                    // the model's suggestion took it: this action runs before the key
+                    // listeners, so they never see Tab
                 } else {
                     this.commit_tab(window, cx);
                 }
@@ -4135,6 +4152,8 @@ impl Workspace {
                 cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
                 self.claude_installed.then(|| self.claude_overall(cx)),
                 cx.listener(|this, _, window, cx| this.toggle_claude(window, cx)),
+                &self.ai,
+                cx.listener(|this, _, _, cx| this.toggle_ai(cx)),
             ));
         match &self.overlay {
             Overlay::None => {}

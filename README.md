@@ -38,12 +38,19 @@ Only Linux x86_64 is published for now.
   symbol index and the status line says so.
 - **Code completion** while inserting: the file's language server offers what fits as you type a word or after a character the server lists (`.`, `:`),
   in a popup at the caret narrowed down as you keep typing (IntelliJ matching: `gBN` finds `getByName`).
-  `Up`/`Down` or `Ctrl+N`/`Ctrl+P` pick, `Enter`, `Tab` or a click accepts (with the import it needs, when the server
+  It opens on what is typed, not on the key that enters Insert mode.
+  `Up`/`Down` or `Ctrl+N`/`Ctrl+P` pick, `Enter` or a click accepts (with the import it needs, when the server
   offers one), `Esc` leaves Insert and the popup; `Ctrl+Space` asks by hand. `.` repeats the completed word.
   The selected item's documentation shows beside the list (Markdown, as the server writes it). An import TypeScript
   only sends once the item is looked at still goes in when the item was accepted before it arrived.
   Without a language server (or when it has nothing for a word) the project's symbols of the file's language and the
   words of the file are offered instead; typing offers them in code files, `Ctrl+Space` in any file.
+- **AI suggestions** (off by default): click `Qwen` in the status bar to use a local `qwen2.5-coder:1.5b-base`
+  through [Ollama](https://ollama.com) (reused when one already runs, otherwise started, and the model downloaded the
+  first time). Once typing pauses with no popup open, what fits at the caret shows dimmed; `Tab` takes it, typing it
+  narrows it, anything else drops it. The dot is gray when off, orange while starting or writing, green when ready,
+  red when it failed. Once a suggestion came, it says where Ollama runs the model: `GPU`, `CPU` (no usable GPU:
+  slow; on Arch Linux install `ollama-cuda`) or the share on the GPU when it did not fit.
 - **Signature help** while typing a call: after `(` or `,` the signature shows over the line, the parameter being
   typed in bold, and follows the cursor until the call is closed.
 - **Status bar**: messages on the left; on the right the branch's state against its upstream (`↑` to push, `↓` to pull,

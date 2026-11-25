@@ -9323,6 +9323,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zide-ai"
+version = "0.1.20"
+dependencies = [
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "zide-claude"
 version = "0.1.20"
 dependencies = [
@@ -9435,6 +9443,7 @@ dependencies = [
  "shlex",
  "similar 3.2.1",
  "zide-acp",
+ "zide-ai",
  "zide-claude",
  "zide-core",
  "zide-git",
