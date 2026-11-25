@@ -31,6 +31,11 @@ const KEEP_ALIVE: &str = "10m";
 const PREFIX_CHARS: usize = 6000;
 const SUFFIX_CHARS: usize = 2000;
 
+/// The text before the caret starts on a multiple of this many chars (then at the next line),
+/// so it stays put while typing: the server keeps what it read of the start of the last prompt
+/// and only reads what changed after it.
+const BLOCK: usize = 2048;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// `ollama` is not installed (not on the PATH).
@@ -190,18 +195,18 @@ impl Server {
         }
     }
 
-    /// What `model` writes between `prefix` and `suffix`, read as it streams so that raising
+    /// What `model` writes at char offset `at` of `text`, read as it streams so that raising
     /// `cancel` stops it (closing the connection stops the generation too): `None` then.
     pub fn complete(
         &self,
         model: &str,
-        prefix: &str,
-        suffix: &str,
+        text: &str,
+        at: usize,
         cancel: &AtomicBool,
     ) -> Result<Option<String>, Error> {
         let body = json!({
             "model": model,
-            "prompt": fim_prompt(prefix, suffix),
+            "prompt": fim_prompt(text, at),
             "raw": true,
             "stream": true,
             "keep_alive": KEEP_ALIVE,
@@ -248,13 +253,30 @@ impl Drop for Server {
     }
 }
 
-/// Qwen2.5-coder's fill-in-the-middle prompt for the text around the caret, keeping the end of
-/// the text before it and the start of the text after it.
-pub fn fim_prompt(prefix: &str, suffix: &str) -> String {
-    let skip = prefix.chars().count().saturating_sub(PREFIX_CHARS);
-    let prefix: String = prefix.chars().skip(skip).collect();
-    let suffix: String = suffix.chars().take(SUFFIX_CHARS).collect();
+/// Qwen2.5-coder's fill-in-the-middle prompt for the caret at char offset `at` of `text`: up
+/// to [`PREFIX_CHARS`] before it, from a start that stays put while typing (see
+/// [`prefix_start`]), and the start of the text after it.
+pub fn fim_prompt(text: &str, at: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let at = at.min(chars.len());
+    let prefix: String = chars[prefix_start(&chars, at)..at].iter().collect();
+    let suffix: String = chars[at..].iter().take(SUFFIX_CHARS).collect();
     format!("<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>")
+}
+
+/// Where the text sent before the caret at `at` starts: the first multiple of [`BLOCK`] at
+/// most [`PREFIX_CHARS`] back, then the start of the line after it. It only moves when the
+/// caret crosses into another block, not at every key.
+fn prefix_start(chars: &[char], at: usize) -> usize {
+    let earliest = at.saturating_sub(PREFIX_CHARS);
+    if earliest == 0 {
+        return 0;
+    }
+    let block = earliest.div_ceil(BLOCK) * BLOCK;
+    match chars[block..at].iter().position(|&c| c == '\n') {
+        Some(newline) => block + newline + 1,
+        None => block,
+    }
 }
 
 #[cfg(test)]
@@ -436,8 +458,8 @@ mod tests {
         let text = server
             .complete(
                 MODEL,
-                "fn add(a: u8, b: u8) -> u8 {\n    ",
-                "\n}\n",
+                "fn add(a: u8, b: u8) -> u8 {\n    \n}\n",
+                33,
                 &AtomicBool::new(false),
             )
             .unwrap();
@@ -466,31 +488,63 @@ mod tests {
         });
         let server = Server::start_with(base, never(), Duration::from_secs(1)).unwrap();
         let cancelled = AtomicBool::new(true);
-        assert_eq!(server.complete(MODEL, "a", "", &cancelled).unwrap(), None);
+        assert_eq!(server.complete(MODEL, "a", 1, &cancelled).unwrap(), None);
         assert_eq!(
             server
-                .complete(MODEL, "broken", "", &AtomicBool::new(false))
+                .complete(MODEL, "broken", 6, &AtomicBool::new(false))
                 .err(),
             Some(Error::Server("model not found".into()))
         );
     }
 
+    /// The text before the caret in the prompt.
+    fn prefix_of(prompt: &str) -> &str {
+        let end = prompt.find("<|fim_suffix|>").unwrap();
+        &prompt["<|fim_prefix|>".len()..end]
+    }
+
     #[test]
-    fn the_prompt_keeps_the_text_nearest_the_caret() {
-        let prefix = "a".repeat(PREFIX_CHARS) + "near";
-        let suffix = "next".to_string() + &"z".repeat(SUFFIX_CHARS);
-        let prompt = fim_prompt(&prefix, &suffix);
-        let middle = prompt.find("<|fim_suffix|>").unwrap();
-        assert!(prompt[..middle].ends_with("near"));
+    fn a_short_text_goes_whole() {
+        let prompt = fim_prompt("ab\ncd", 4);
+        assert_eq!(prompt, "<|fim_prefix|>ab\nc<|fim_suffix|>d<|fim_middle|>");
         assert_eq!(
-            prompt[..middle].len(),
-            "<|fim_prefix|>".len() + PREFIX_CHARS
+            fim_prompt("ab", 9),
+            "<|fim_prefix|>ab<|fim_suffix|><|fim_middle|>"
         );
-        assert!(prompt[middle..].starts_with("<|fim_suffix|>next"));
-        assert_eq!(
-            prompt.len() - middle,
-            "<|fim_suffix|>".len() + SUFFIX_CHARS + "<|fim_middle|>".len()
-        );
+    }
+
+    #[test]
+    fn the_text_before_the_caret_starts_on_a_line_and_stays_put_while_typing() {
+        // lines of 10 chars: `000000000\n111111111\n`...
+        let text: String = (0..2000).map(|i| format!("{:09}\n", i % 10)).collect();
+        let at = 9000;
+        let start = prefix_start(&text.chars().collect::<Vec<_>>(), at);
+        assert!(at - start <= PREFIX_CHARS);
+        assert!(at - start > PREFIX_CHARS - BLOCK - 10);
+        assert_eq!(text.chars().nth(start - 1), Some('\n')); // the start of a line
+        let prefix = prefix_of(&fim_prompt(&text, at)).to_string();
+        assert!(text[..at].ends_with(&prefix));
+        // typing at the caret keeps the start, so the server reuses what it read
+        let mut typed = text.clone();
+        for step in 1..=200 {
+            typed.insert(at + step - 1, 'x');
+            let later = fim_prompt(&typed, at + step);
+            assert!(
+                prefix_of(&later).starts_with(&prefix),
+                "moved after {step} keys"
+            );
+        }
+        // past the block, it moves on once
+        let far = prefix_start(&text.chars().collect::<Vec<_>>(), at + BLOCK);
+        assert!(far > start);
+    }
+
+    #[test]
+    fn only_the_start_of_the_text_after_the_caret_goes() {
+        let text = "a".to_string() + &"z".repeat(SUFFIX_CHARS + 50);
+        let prompt = fim_prompt(&text, 1);
+        let suffix = &prompt[prompt.find("<|fim_suffix|>").unwrap() + "<|fim_suffix|>".len()..];
+        assert_eq!(suffix, "z".repeat(SUFFIX_CHARS) + "<|fim_middle|>");
     }
 
     #[test]
@@ -507,7 +561,7 @@ mod tests {
         };
         assert!(!gone.answers());
         assert_eq!(
-            gone.complete(MODEL, "", "", &AtomicBool::new(false)).err(),
+            gone.complete(MODEL, "", 0, &AtomicBool::new(false)).err(),
             Some(Error::Unreachable)
         );
     }
