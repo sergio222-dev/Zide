@@ -190,9 +190,111 @@ fn pending_shows_what_was_typed() {
     for c in "2d".chars() {
         vim.handle(&mut buffer, Key::Char(c));
     }
-    assert_eq!(vim.pending(), "d");
+    assert_eq!(vim.pending(), "2d");
     vim.handle(&mut buffer, Key::Esc);
     assert_eq!(vim.pending(), "");
+}
+
+/// Types `keys` (plain chars) into a fresh `Vim` over `text`; returns it with the last request.
+fn typed(text: &str, keys: &str) -> (Vim, Option<Request>) {
+    let mut buffer = Buffer::new(text);
+    let mut vim = Vim::default();
+    let mut last = None;
+    for c in keys.chars() {
+        last = vim.handle(&mut buffer, Key::Char(c));
+    }
+    (vim, last)
+}
+
+/// The keys the hints offer, sorted: the panel orders them itself.
+fn hint_keys(vim: &Vim) -> Vec<String> {
+    let mut keys: Vec<String> = vim
+        .hints()
+        .map(|(_, next)| next.iter().map(|b| label(b.key)).collect())
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+#[test]
+fn hints_list_the_children_of_the_group_being_typed() {
+    assert!(typed("abc", "").0.hints().is_none());
+    assert!(
+        typed("abc", "12").0.hints().is_none(),
+        "a count alone is no group"
+    );
+    let (vim, _) = typed("abc", "2c");
+    let (group, next) = vim.hints().unwrap();
+    assert_eq!(group.description, "Change");
+    assert!(next.iter().any(|b| b.key == Key::Char('w')));
+    assert!(
+        next.iter()
+            .any(|b| b.key == Key::Char('c') && b.action == Action::Line)
+    );
+    assert_eq!(vim.hints().unwrap(), typed("abc", "c3").0.hints().unwrap());
+    assert_eq!(
+        typed("abc", "ci").0.hints().unwrap().0.description,
+        "Inside"
+    );
+    assert_eq!(
+        typed("abc", "va").0.hints().unwrap().0.description,
+        "Around"
+    );
+    assert_eq!(hint_keys(&typed("abc", "g").0), ["d", "g"]);
+    assert_eq!(
+        hint_keys(&typed("abc", "dg").0),
+        ["g"],
+        "no `gd` after an operator"
+    );
+    assert!(hint_keys(&typed("abc", "z").0).contains(&"M".to_string()));
+}
+
+#[test]
+fn editor_commands_are_handed_back_and_leave_nothing_pending() {
+    let (vim, request) = typed("abc", "gd");
+    assert_eq!(request, Some(Request::GoToDefinition));
+    assert_eq!(vim.pending(), "");
+    assert_eq!(typed("abc", "za").1, Some(Request::Fold('a')));
+    assert_eq!(
+        typed("abc", "z.").1,
+        Some(Request::Scroll {
+            place: Place::Center,
+            first_non_blank: true
+        })
+    );
+    assert_eq!(typed("abc", "/").1, Some(Request::OpenFind));
+    assert_eq!(
+        typed("abc", "zq").0.pending(),
+        "",
+        "an unbound key drops the command"
+    );
+}
+
+#[test]
+fn counts_go_before_a_command_or_after_an_operator() {
+    assert_eq!(run("a b c d e", "d2w").0, "c d e");
+    assert_eq!(run("a b c d e", "2d2w").0, "e");
+    assert_eq!(run("a\nb\nc\nd\n", "2d1d").0, "c\nd\n");
+    assert_eq!(
+        run("abc", "dcx").0,
+        "bc",
+        "`dc` is no command: it is dropped"
+    );
+}
+
+#[test]
+fn a_read_only_text_only_moves_and_scrolls() {
+    let mut buffer = Buffer::new("abc def");
+    let mut vim = Vim::default();
+    vim.set_read_only(true);
+    for c in "xdwiz".chars() {
+        vim.handle(&mut buffer, Key::Char(c));
+    }
+    assert_eq!(buffer.text(), "abc def");
+    assert_eq!(vim.mode(), Mode::Normal);
+    assert_eq!(vim.pending(), "z");
+    assert!(!hint_keys(&vim).is_empty());
+    assert_eq!(vim.cursor(), 4, "the `w` after the refused `d` still moved");
 }
 
 #[test]

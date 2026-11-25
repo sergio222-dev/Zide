@@ -3,13 +3,16 @@ use std::ops::Range;
 use zide_text::Buffer;
 
 use crate::{
-    Key, Mode, Operator, Step, Vim,
+    Action, Binding, Key, Mode, Operator, Request, Step, Vim, keymap,
     motion::{Motion, first_non_blank, last_line, line_end, motion},
     objects::text_object,
 };
 
 impl Vim {
-    pub(crate) fn normal(&mut self, buffer: &mut Buffer, key: Key) {
+    /// A key outside Insert mode: a digit of a count, or the next key of the mode's
+    /// [`keymap`] tree. A key the tree does not bind there drops the half-typed command.
+    pub(crate) fn normal(&mut self, buffer: &mut Buffer, key: Key) -> Option<Request> {
+        let mut request = None;
         match key {
             Key::Esc => {
                 self.reset_pending();
@@ -18,26 +21,109 @@ impl Vim {
                     self.clamp(buffer);
                 }
             }
-            Key::Ctrl('r') => {
+            Key::Char(c) if self.counts(c) => {
+                self.count = self.count * 10 + c.to_digit(10).unwrap() as usize;
+                self.typed.push(c);
+            }
+            _ => {
+                let keymap = self.keymap.clone(); // the walk below changes `self`
+                let list = match self.group_in(&keymap) {
+                    Some(group) => &group.children[..],
+                    None if self.path.is_empty() => keymap.root(self.mode),
+                    None => &[],
+                };
+                match keymap::find(list, key).filter(|binding| self.allows(binding)) {
+                    Some(binding) if binding.is_group() => self.enter_group(binding),
+                    Some(binding) => request = self.run(buffer, binding.action),
+                    None => self.reset_pending(),
+                }
+            }
+        }
+        if self.mode == Mode::Normal {
+            buffer.commit();
+        }
+        request
+    }
+
+    /// True when `c` is a digit of a count here: before a command or after an operator, and
+    /// `0` only after another digit (alone it is a motion).
+    fn counts(&self, c: char) -> bool {
+        let here = match self.group_in(&self.keymap) {
+            None => self.path.is_empty(),
+            Some(group) => matches!(group.action, Action::Operator(_)),
+        };
+        here && c.is_ascii_digit() && (c != '0' || self.count > 0)
+    }
+
+    /// A group was typed: it waits for one of its children.
+    fn enter_group(&mut self, group: &Binding) {
+        match group.action {
+            Action::Operator(op) => {
+                self.operator = Some((op, self.count.max(1)));
+                self.count = 0;
+            }
+            Action::Object { inner } => self.object = Some(inner),
+            _ => {}
+        }
+        self.path.push(group.key);
+        self.typed += &keymap::label(group.key);
+    }
+
+    /// Runs the action of a leaf, with what the groups before it left pending.
+    fn run(&mut self, buffer: &mut Buffer, action: Action) -> Option<Request> {
+        let count = self.count.max(1);
+        match action {
+            Action::Motion(c) => self.run_motion(buffer, c),
+            // `dd`, `cc`, `yy`: the operator typed twice works on whole lines
+            Action::Line => {
+                if let Some((op, before)) = self.operator {
+                    let lines = before * count;
+                    self.reset_pending();
+                    self.line_operator(buffer, op, lines);
+                }
+            }
+            Action::TextObject(kind) => {
+                let inner = self.object.unwrap_or(true);
+                self.object_command(buffer, inner, kind);
+            }
+            Action::Command(c) => {
+                self.reset_pending();
+                self.command(buffer, c, count);
+            }
+            Action::Redo => {
                 self.reset_pending();
                 if let Some(at) = buffer.redo() {
                     self.set_cursor(buffer, at);
                 }
             }
-            Key::Ctrl(c @ ('a' | 'x')) => {
-                let step = self.count.max(1) as i64 * if c == 'a' { 1 } else { -1 };
-                let plain = self.operator.is_none() && !self.is_visual();
+            Action::AddToNumber(sign) => {
                 self.reset_pending();
-                if plain {
-                    self.add_to_number(buffer, step);
-                }
+                self.add_to_number(buffer, count as i64 * sign);
             }
-            Key::Char(c) => self.normal_char(buffer, c),
-            Key::Ctrl(_) | Key::Enter | Key::Backspace => self.reset_pending(),
+            Action::Visual(target) => {
+                self.reset_pending();
+                if self.mode == target {
+                    self.mode = Mode::Normal;
+                } else if self.is_visual() {
+                    self.mode = target;
+                } else {
+                    self.start_visual(target);
+                }
+                self.want_column = buffer.position_of(self.cursor).column;
+            }
+            Action::SwapEnds => {
+                self.reset_pending();
+                std::mem::swap(&mut self.anchor, &mut self.cursor);
+            }
+            Action::VisualOperator(op) => self.visual_operator(buffer, op),
+            Action::Editor(request) => {
+                self.reset_pending();
+                return Some(request);
+            }
+            Action::Operator(_) | Action::Object { .. } | Action::Prefix => {}
         }
-        if self.mode == Mode::Normal {
-            buffer.commit();
-        }
+        self.reset_pending();
+        None
     }
 
     /// `Ctrl-A` / `Ctrl-X`: adds `step` to the decimal number under or after the cursor on its
@@ -88,98 +174,13 @@ impl Vim {
     pub(crate) fn reset_pending(&mut self) {
         self.count = 0;
         self.operator = None;
-        self.g_prefix = false;
         self.object = None;
-    }
-
-    fn normal_char(&mut self, buffer: &mut Buffer, c: char) {
-        if let Some(inner) = self.object.take() {
-            return self.object_command(buffer, inner, c);
-        }
-        if self.g_prefix {
-            self.g_prefix = false;
-            if c == 'g' {
-                return self.run_motion(buffer, 'g');
-            }
-            return self.reset_pending();
-        }
-        if c.is_ascii_digit() && (c != '0' || self.count > 0) {
-            self.count = self.count * 10 + c.to_digit(10).unwrap() as usize;
-            return;
-        }
-        if self.is_visual() && self.visual_command(buffer, c) {
-            return;
-        }
-        let operator = match c {
-            'd' => Some(Operator::Delete),
-            'c' => Some(Operator::Change),
-            'y' => Some(Operator::Yank),
-            _ => None,
-        };
-        if let Some(operator) = operator.filter(|_| !self.is_visual()) {
-            return match self.operator {
-                None => {
-                    self.operator = Some((operator, self.count.max(1)));
-                    self.count = 0;
-                }
-                // `dd`, `cc`, `yy`: the operator typed twice works on whole lines
-                Some((pending, before)) if pending == operator => {
-                    let lines = before * self.count.max(1);
-                    self.reset_pending();
-                    self.line_operator(buffer, operator, lines);
-                }
-                Some(_) => self.reset_pending(),
-            };
-        }
-        if (c == 'i' || c == 'a') && (self.operator.is_some() || self.is_visual()) {
-            self.object = Some(c == 'i');
-            return;
-        }
-        if c == 'g' {
-            self.g_prefix = true;
-            return;
-        }
-        if "hjklwWbeE0^$G".contains(c) {
-            return self.run_motion(buffer, c);
-        }
-        if self.operator.is_some() || self.is_visual() {
-            return self.reset_pending(); // something that is no motion
-        }
-        let count = self.count.max(1);
-        self.reset_pending();
-        self.command(buffer, c, count);
+        self.path.clear();
+        self.typed.clear();
     }
 
     fn is_visual(&self) -> bool {
         matches!(self.mode, Mode::Visual | Mode::VisualLine)
-    }
-
-    /// Commands that only exist in Visual mode; `false` leaves the key to the motions.
-    fn visual_command(&mut self, buffer: &mut Buffer, c: char) -> bool {
-        match c {
-            'v' | 'V' => {
-                let target = if c == 'v' {
-                    Mode::Visual
-                } else {
-                    Mode::VisualLine
-                };
-                self.mode = if self.mode == target {
-                    Mode::Normal
-                } else {
-                    target
-                };
-                self.reset_pending();
-            }
-            'o' => {
-                std::mem::swap(&mut self.anchor, &mut self.cursor);
-                self.reset_pending();
-            }
-            'd' | 'x' => self.visual_operator(buffer, Operator::Delete),
-            'y' => self.visual_operator(buffer, Operator::Yank),
-            'c' | 's' => self.visual_operator(buffer, Operator::Change),
-            _ => return false,
-        }
-        true
     }
 
     fn visual_operator(&mut self, buffer: &mut Buffer, op: Operator) {
@@ -387,8 +388,6 @@ impl Vim {
             }
             'D' => self.delete_to(buffer, line_end(buffer, position.line)),
             'p' | 'P' => self.paste(buffer, c == 'p', count),
-            'v' => self.start_visual(Mode::Visual),
-            'V' => self.start_visual(Mode::VisualLine),
             '.' => self.repeat(buffer),
             'u' => {
                 if let Some(at) = buffer.undo() {
@@ -424,7 +423,9 @@ impl Vim {
         self.replaying = true;
         for step in self.last_change.clone() {
             match step {
-                Step::Key(key) => self.handle(buffer, key),
+                Step::Key(key) => {
+                    self.handle(buffer, key);
+                }
                 Step::Complete(completed) => self.apply_completed(buffer, &completed),
             }
         }

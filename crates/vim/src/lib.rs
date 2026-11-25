@@ -1,11 +1,14 @@
 //! Vim-style modal editing as a pure state machine over a [`Buffer`]: no UI types, so the UI
 //! only translates its key events to [`Key`]. Offsets are `char` indices.
 
+mod keymap;
 mod motion;
 mod normal;
 mod objects;
 
-use std::ops::Range;
+pub use keymap::{Action, Binding, Keymap, Place, Request, label, opcodes};
+
+use std::{ops::Range, sync::Arc};
 
 use zide_text::{Buffer, Revision};
 
@@ -27,7 +30,7 @@ pub enum Mode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Operator {
+pub enum Operator {
     Delete,
     Change,
     Yank,
@@ -68,10 +71,16 @@ pub struct Vim {
     /// Typed count; 0 when none.
     pub(crate) count: usize,
     pub(crate) operator: Option<(Operator, usize)>,
-    /// A `g` was typed and waits for its second key.
-    pub(crate) g_prefix: bool,
     /// `i` (true) or `a` (false) was typed and waits for the object key.
     pub(crate) object: Option<bool>,
+    /// The keys of the [`keymap`] groups typed so far: where the next key is looked up.
+    pub(crate) path: Vec<Key>,
+    /// Everything typed of the unfinished command, counts included, for [`Vim::pending`].
+    pub(crate) typed: String,
+    /// The text cannot change: commands that edit or enter a mode are refused.
+    read_only: bool,
+    /// Which keys run what in Normal and Visual mode.
+    keymap: Arc<Keymap>,
     /// Where the Visual selection started.
     pub(crate) anchor: usize,
     /// Steps of the command being typed; becomes `last_change` if it edited the text.
@@ -99,8 +108,11 @@ impl Default for Vim {
             want_column: 0,
             count: 0,
             operator: None,
-            g_prefix: false,
             object: None,
+            path: Vec::new(),
+            typed: String::new(),
+            read_only: false,
+            keymap: Keymap::builtin(),
             anchor: 0,
             current: Vec::new(),
             start_revision: Revision::default(),
@@ -138,6 +150,19 @@ impl Vim {
         &self.indent
     }
 
+    /// Marks the text as one to read, not edit (an error message shown in place of a file):
+    /// only motions and the editor's own commands (scrolling, folds, search) work.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+    }
+
+    /// Uses `keymap` from the next key on; a command half typed is dropped, since its keys may
+    /// mean nothing in the new one.
+    pub fn set_keymap(&mut self, keymap: Arc<Keymap>) {
+        self.keymap = keymap;
+        self.reset_pending();
+    }
+
     /// Places the cursor (clamped to the text), e.g. after the file is opened.
     pub fn set_cursor(&mut self, buffer: &Buffer, offset: usize) {
         self.cursor = offset;
@@ -156,10 +181,7 @@ impl Vim {
             return;
         }
         self.mode = Mode::Normal;
-        self.count = 0;
-        self.operator = None;
-        self.g_prefix = false;
-        self.object = None;
+        self.reset_pending();
         self.set_cursor(buffer, offset);
     }
 
@@ -170,27 +192,43 @@ impl Vim {
         self.cursor = buffer.line_start(line) + self.want_column.min(last_column);
     }
 
-    /// What the user has typed of an unfinished command (`2d`, `g`), for a status line.
+    /// What the user has typed of an unfinished command (`2d`, `g`, `ci`), for a status line.
     pub fn pending(&self) -> String {
-        let mut out = String::new();
-        if self.count > 0 {
-            out += &self.count.to_string();
+        self.typed.clone()
+    }
+
+    /// The group being typed (`d`, `ci`, `z`) and the keys that can come next, for the key
+    /// hints panel; `None` when no group waits (nothing typed, or only a count). Keys a
+    /// read-only text refuses are left out.
+    pub fn hints(&self) -> Option<(&Binding, Vec<&Binding>)> {
+        let group = self.group_in(&self.keymap)?;
+        let next = group
+            .children
+            .iter()
+            .filter(|binding| self.allows(binding))
+            .collect();
+        Some((group, next))
+    }
+
+    /// The keys that lead to the group being typed, `None` when no group waits: what tells
+    /// one wait for hints from another.
+    pub fn waiting_group(&self) -> Option<&[Key]> {
+        self.group_in(&self.keymap).map(|_| self.path.as_slice())
+    }
+
+    /// The group of `keymap` the typed keys lead to; `None` at the root of the mode's tree.
+    pub(crate) fn group_in<'k>(&self, keymap: &'k Keymap) -> Option<&'k Binding> {
+        let (first, rest) = self.path.split_first()?;
+        let mut group = keymap::find(keymap.root(self.mode), *first)?;
+        for key in rest {
+            group = group.child(*key)?;
         }
-        match self.operator {
-            Some((Operator::Delete, _)) => out.push('d'),
-            Some((Operator::Change, _)) => out.push('c'),
-            Some((Operator::Yank, _)) => out.push('y'),
-            None => {}
-        }
-        if self.g_prefix {
-            out.push('g');
-        }
-        match self.object {
-            Some(true) => out.push('i'),
-            Some(false) => out.push('a'),
-            None => {}
-        }
-        out
+        Some(group)
+    }
+
+    /// True when `binding` may run here: a read-only text refuses what would edit it.
+    pub(crate) fn allows(&self, binding: &Binding) -> bool {
+        !self.read_only || !binding.action.edits()
     }
 
     /// The selected range while in Visual mode (whole lines in line-wise Visual).
@@ -242,19 +280,24 @@ impl Vim {
     }
 
     fn idle(&self) -> bool {
-        self.count == 0 && self.operator.is_none() && !self.g_prefix && self.object.is_none()
+        self.count == 0 && self.path.is_empty()
     }
 
-    pub fn handle(&mut self, buffer: &mut Buffer, key: Key) {
+    /// Runs `key`. Commands of the editor around the text (`gd`, `zz`, `/`...) are handed back
+    /// for it to run.
+    pub fn handle(&mut self, buffer: &mut Buffer, key: Key) -> Option<Request> {
         if self.mode == Mode::Normal && self.idle() {
             self.current.clear();
             self.start_revision = buffer.revision();
         }
         self.current.push(Step::Key(key));
-        match self.mode {
-            Mode::Insert => self.insert(buffer, key),
+        let request = match self.mode {
+            Mode::Insert => {
+                self.insert(buffer, key);
+                None
+            }
             _ => self.normal(buffer, key),
-        }
+        };
         if self.mode == Mode::Normal && self.idle() && !self.replaying {
             // undo, redo and `.` itself are not changes to repeat
             let history = matches!(
@@ -267,6 +310,7 @@ impl Vim {
                 self.current.clear();
             }
         }
+        request
     }
 
     fn insert(&mut self, buffer: &mut Buffer, key: Key) {
