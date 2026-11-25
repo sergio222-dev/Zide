@@ -10,7 +10,7 @@ use std::sync::{
 use std::time::Duration;
 
 use gpui_kit::*;
-use zide_ai::{Error, MODEL, Server};
+use zide_ai::{Error, MODEL, Processor, Server};
 
 use crate::{Workspace, cancel, theme};
 
@@ -58,6 +58,32 @@ impl State {
     }
 }
 
+impl Ai {
+    pub fn color(&self) -> u32 {
+        self.state.color()
+    }
+
+    /// The state, and once a suggestion came, where the model runs: `Qwen · GPU`, `Qwen · CPU`
+    /// (slow: no usable GPU) or `Qwen · 52% GPU` (it did not fit).
+    pub fn label(&self) -> String {
+        let label = self.state.label();
+        match (&self.state, self.processor) {
+            (State::Ready | State::Working, Some(processor)) => {
+                format!("{label} · {}", processor_label(processor))
+            }
+            _ => label,
+        }
+    }
+}
+
+fn processor_label(processor: Processor) -> String {
+    match processor {
+        Processor::Gpu => "GPU".into(),
+        Processor::Cpu => "CPU".into(),
+        Processor::Split(gpu) => format!("{gpu}% GPU"),
+    }
+}
+
 #[derive(Default)]
 pub struct Ai {
     pub state: State,
@@ -67,6 +93,8 @@ pub struct Ai {
     epoch: u64,
     /// Set to give up on the suggestion asked last.
     asked: Option<Arc<AtomicBool>>,
+    /// Where the server ran the model at the last suggestion.
+    processor: Option<Processor>,
     /// Stops the server this instance started when the app quits.
     _quit: Option<Subscription>,
 }
@@ -86,6 +114,7 @@ impl Workspace {
         self.ai.epoch += 1;
         cancel(&mut self.ai.asked);
         self.ai.server = None; // stops the server if this instance started it
+        self.ai.processor = None;
         self.ai.state = State::Off;
         if let Some(viewer) = &mut self.viewer {
             viewer.clear_ghost();
@@ -98,6 +127,7 @@ impl Workspace {
         self.ai.epoch += 1;
         let epoch = self.ai.epoch;
         self.ai.server = None;
+        self.ai.processor = None;
         self.ai.state = State::Starting;
         if self.ai._quit.is_none() {
             self.ai._quit = Some(cx.on_app_quit(|this, _| {
@@ -190,11 +220,19 @@ impl Workspace {
                 }
             })
             .ok();
-            let outcome = cx
+            let (outcome, processor) = cx
                 .background_executor()
                 .spawn({
                     let (asked, server) = (asked.clone(), server.clone());
-                    async move { server.complete(MODEL, &text, at, &asked) }
+                    async move {
+                        let outcome = server.complete(MODEL, &text, at, &asked);
+                        // loaded by now: where it went (a quick local question)
+                        let processor = match outcome {
+                            Ok(_) => server.processor(MODEL).ok().flatten(),
+                            Err(_) => None,
+                        };
+                        (outcome, processor)
+                    }
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -209,6 +247,9 @@ impl Workspace {
                 }
                 if this.ai.state == State::Working {
                     this.ai.state = State::Ready;
+                }
+                if processor.is_some() {
+                    this.ai.processor = processor;
                 }
                 match outcome {
                     Ok(Some(text)) if !asked.load(Ordering::Relaxed) => {
@@ -260,6 +301,22 @@ mod tests {
         let failed = State::Failed("ollama is not installed".into());
         assert_eq!(failed.color(), theme::ERROR);
         assert_eq!(failed.label(), "Qwen: ollama is not installed");
+        let ai = |state, processor| Ai {
+            state,
+            processor,
+            ..Ai::default()
+        };
+        assert_eq!(ai(State::Ready, None).label(), "Qwen");
+        assert_eq!(ai(State::Ready, Some(Processor::Gpu)).label(), "Qwen · GPU");
+        assert_eq!(
+            ai(State::Working, Some(Processor::Cpu)).label(),
+            "Qwen · CPU"
+        );
+        assert_eq!(
+            ai(State::Ready, Some(Processor::Split(52))).label(),
+            "Qwen · 52% GPU"
+        );
+        assert_eq!(ai(State::Off, Some(Processor::Gpu)).label(), "Qwen off");
         // clicking a failed indicator tries again
         assert!(!failed.on());
         assert!(!State::Off.on());

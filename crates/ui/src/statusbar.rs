@@ -51,7 +51,7 @@ pub fn render(
     on_branch: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     claude: Option<Overall>,
     on_claude: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ai: &ai::State,
+    ai: &ai::Ai,
     on_ai: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> StatusBar {
     let mut bar = StatusBar::new()

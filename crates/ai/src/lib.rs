@@ -58,6 +58,30 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Where the server holds a loaded model: Ollama puts it on the GPU when it fits, splits it
+/// between GPU and system memory when it does not, and keeps it all in system memory without
+/// a usable GPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Processor {
+    Gpu,
+    /// The share on the GPU, in percent.
+    Split(u8),
+    Cpu,
+}
+
+impl Processor {
+    /// From the size of the loaded model and how much of it is in GPU memory.
+    fn of(size: u64, size_vram: u64) -> Self {
+        if size_vram == 0 {
+            Processor::Cpu
+        } else if size_vram >= size {
+            Processor::Gpu
+        } else {
+            Processor::Split((size_vram * 100 / size.max(1)) as u8)
+        }
+    }
+}
+
 fn failed(error: ureq::Error) -> Error {
     match error {
         ureq::Error::StatusCode(code) => Error::Server(format!("ollama answered {code}")),
@@ -157,6 +181,32 @@ impl Server {
             .get(format!("{}/api/version", self.base))
             .call()
             .is_ok()
+    }
+
+    /// Where `model` is loaded, or `None` when it is not (it loads on the first question and
+    /// unloads after [`KEEP_ALIVE`] without one).
+    pub fn processor(&self, model: &str) -> Result<Option<Processor>, Error> {
+        let text = self
+            .agent
+            .get(format!("{}/api/ps", self.base))
+            .call()
+            .map_err(failed)?
+            .body_mut()
+            .read_to_string()
+            .map_err(failed)?;
+        let running: Value =
+            serde_json::from_str(&text).map_err(|e| Error::Server(e.to_string()))?;
+        let found = running["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|m| m["name"].as_str() == Some(model));
+        Ok(found.map(|m| {
+            Processor::of(
+                m["size"].as_u64().unwrap_or(0),
+                m["size_vram"].as_u64().unwrap_or(0),
+            )
+        }))
     }
 
     /// Whether the server has `model` downloaded.
@@ -403,6 +453,24 @@ mod tests {
         let error = Server::start_with(base, serve, Duration::from_millis(300)).err();
         assert_eq!(error, Some(Error::Unreachable));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn where_the_model_runs_comes_from_its_share_in_gpu_memory() {
+        let (listener, base) = listener();
+        fake(listener, |_, path, _| match path {
+            "/api/ps" => concat!(
+                r#"{"models":[{"name":"llama3:latest","size":100,"size_vram":100},"#,
+                r#"{"name":"qwen2.5-coder:1.5b-base","size":1000,"size_vram":520}]}"#
+            )
+            .into(),
+            _ => "{}".into(),
+        });
+        let server = Server::start_with(base, never(), Duration::from_secs(1)).unwrap();
+        assert_eq!(server.processor(MODEL).unwrap(), Some(Processor::Split(52)));
+        assert_eq!(server.processor("other").unwrap(), None); // not loaded
+        assert_eq!(Processor::of(1000, 1000), Processor::Gpu);
+        assert_eq!(Processor::of(1000, 0), Processor::Cpu);
     }
 
     #[test]

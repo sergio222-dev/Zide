@@ -4152,7 +4152,7 @@ impl Workspace {
                 cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
                 self.claude_installed.then(|| self.claude_overall(cx)),
                 cx.listener(|this, _, window, cx| this.toggle_claude(window, cx)),
-                &self.ai.state,
+                &self.ai,
                 cx.listener(|this, _, _, cx| this.toggle_ai(cx)),
             ));
         match &self.overlay {
