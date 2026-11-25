@@ -240,6 +240,31 @@ fn project_path(current: &str, url: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
+/// Markdown that renders as `text` itself, for plain text shown in a `TextView` only so it can
+/// be selected and copied (a commit message, an email). Every ASCII punctuation character is
+/// backslash-escaped, so `*`, `#`, `<`, `` ` ``, `$` or `[` never turn into markup; each line
+/// break is a hard break, so lines are not joined into one; and leading whitespace is dropped,
+/// as an indented line after a blank one would otherwise become a code block.
+pub fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 8);
+    let mut lines = text.lines().map(str::trim_start).peekable();
+    while let Some(line) = lines.next() {
+        for c in line.chars() {
+            if c.is_ascii_punctuation() {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        match lines.peek() {
+            None => {}
+            // a blank line already ends the paragraph; a hard break before it would add a line
+            Some(next) if line.is_empty() || next.is_empty() => out.push('\n'),
+            Some(_) => out.push_str("\\\n"),
+        }
+    }
+    out
+}
+
 fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -408,5 +433,22 @@ mod tests {
             None
         );
         assert_eq!(image_row("<table></table>"), None);
+    }
+
+    #[test]
+    fn plain_text_escapes_every_markup_character() {
+        assert_eq!(plain("fix: *a* <b> `c` #1"), r"fix\: \*a\* \<b\> \`c\` \#1");
+        assert_eq!(plain("$5 and $10"), r"\$5 and \$10");
+        assert_eq!(plain("ends in \\"), r"ends in \\");
+        assert_eq!(plain("ñandú — ok"), "ñandú — ok");
+    }
+
+    #[test]
+    fn plain_text_keeps_its_lines_and_paragraphs() {
+        assert_eq!(plain("a\nb"), "a\\\nb");
+        assert_eq!(plain("a\n\nb\nc"), "a\n\nb\\\nc");
+        assert_eq!(plain("a\n   \nb"), "a\n\nb");
+        assert_eq!(plain("a\n\n    not code\n"), "a\n\nnot code");
+        assert_eq!(plain("- item\n  - nested"), "\\- item\\\n\\- nested");
     }
 }

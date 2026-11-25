@@ -25,6 +25,7 @@ use menu::{ContextMenu, MenuAction};
 
 use crate::branches::{Kind, Model, Row};
 use crate::changed_files::{self, Picks};
+use crate::markdown::{self, TextView};
 use crate::{Center, Workspace, file_icon, statusbar, theme};
 
 const ROW_HEIGHT: f32 = 24.;
@@ -1463,6 +1464,11 @@ fn graph_cell(row: &GraphRow, width: f32) -> Stateful<Div> {
 }
 
 fn ref_chip(label: &RefLabel) -> Div {
+    chip_frame(label).child(label.name.clone())
+}
+
+/// The border and colors of [`ref_chip`], without its name.
+fn chip_frame(label: &RefLabel) -> Div {
     let color = match label.kind {
         RefKind::Local | RefKind::Head => theme::ICON_DATA,
         RefKind::Remote => theme::ICON_CODE,
@@ -1480,7 +1486,6 @@ fn ref_chip(label: &RefLabel) -> Div {
         .text_xs()
         .text_color(rgb(color))
         .when(label.current, |d| d.font_weight(FontWeight::BOLD))
-        .child(label.name.clone())
 }
 
 fn commits_pane(panel: &LogPanel, entity: &Entity<LogPanel>) -> Div {
@@ -1653,13 +1658,13 @@ fn details(panel: &LogPanel) -> Stateful<Div> {
             div()
                 .font_weight(FontWeight::BOLD)
                 .text_color(rgb(theme::STRONG))
-                .child(commit.subject.clone()),
+                .child(copyable("log-details-subject", &commit.subject)),
         )
         .children((!commit.body.is_empty()).then(|| {
             div()
                 .text_sm()
                 .text_color(rgb(theme::MUTED))
-                .child(commit.body.clone())
+                .child(copyable("log-details-body", &commit.body))
         }))
         .child(
             div()
@@ -1668,29 +1673,43 @@ fn details(panel: &LogPanel) -> Stateful<Div> {
                 .gap_1()
                 .text_sm()
                 .text_color(rgb(theme::MUTED))
-                .child(format!("{} {}", commit.short_hash(), commit.author))
-                .child(
-                    div()
-                        .text_color(rgb(theme::ICON_CODE))
-                        .child(format!("<{}>", commit.email)),
-                )
-                .child(format!("on {date} at {clock}")),
+                .child(copyable(
+                    "log-details-who",
+                    &format!("{} {}", commit.short_hash(), commit.author),
+                ))
+                .child(div().text_color(rgb(theme::ICON_CODE)).child(copyable(
+                    "log-details-email",
+                    &format!("<{}>", commit.email),
+                )))
+                .child(copyable(
+                    "log-details-when",
+                    &format!("on {date} at {clock}"),
+                )),
         )
         .children((!entry.refs.is_empty()).then(|| {
             div()
                 .flex()
                 .flex_wrap()
                 .gap_1()
-                .children(entry.refs.iter().map(ref_chip))
+                .children(entry.refs.iter().enumerate().map(|(i, label)| {
+                    chip_frame(label).child(copyable(("log-details-ref", i), &label.name))
+                }))
         }))
         .children(panel.in_branches.as_ref().map(|branches| {
             let count = changed_files::plural(branches.len(), "branch");
-            div()
-                .text_xs()
-                .text_color(rgb(theme::DIM))
-                .child(format!("In {count}: {}", branches.join(", ")))
+            div().text_xs().text_color(rgb(theme::DIM)).child(copyable(
+                "log-details-branches",
+                &format!("In {count}: {}", branches.join(", ")),
+            ))
         }));
     frame.child(content)
+}
+
+/// `text` as it is, but selectable with the mouse and copied with Ctrl+C: the details are what
+/// gets pasted elsewhere (a hash into a terminal, a message into a PR). Its color and size are
+/// the ones of the element around it.
+fn copyable(id: impl Into<ElementId>, text: &str) -> TextView {
+    TextView::markdown(id, markdown::plain(text)).selectable(true)
 }
 
 #[cfg(test)]
