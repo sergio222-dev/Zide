@@ -1632,7 +1632,7 @@ impl Viewer {
                 .flex()
                 .items_start()
                 .gap_2()
-                .child(popup.view(row_height, on_pick))
+                .child(popup.view(row_height, self.cell_width.unwrap_or(8.), on_pick))
                 .children(popup.docs_view(VISIBLE_ROWS as f32 * row_height + 10.)),
         )
     }

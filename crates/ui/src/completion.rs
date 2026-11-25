@@ -21,6 +21,10 @@ const DOCS_WIDTH: f32 = 420.;
 /// A click on a row of the completion popup, by its index among the rows shown.
 pub type CompletionPick = Rc<dyn Fn(usize, &mut App)>;
 
+/// Width of the kind column, in editor cells: the longest tag (`variant`, `method`) and a space,
+/// so a tag never runs into the label after it.
+const KIND_CELLS: f32 = 8.;
+
 /// How many rows the popup shows at once; the selection scrolls the rest into view.
 pub const VISIBLE_ROWS: usize = 10;
 
@@ -177,7 +181,7 @@ impl CompletionPopup {
 
     /// The popup's box, to be placed at the caret: one row per item with its kind, label,
     /// signature and detail, the selected one highlighted.
-    pub fn view(&self, row_height: f32, on_pick: CompletionPick) -> Div {
+    pub fn view(&self, row_height: f32, cell_width: f32, on_pick: CompletionPick) -> Div {
         let window = self.window();
         let rows = self.shown[window.clone()]
             .iter()
@@ -202,7 +206,7 @@ impl CompletionPopup {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .w(px(row_height * 2.))
+                            .w(px(KIND_CELLS * cell_width))
                             .text_color(rgb(theme::SYMBOL))
                             .child(kind_label(item.kind)),
                     )
@@ -525,6 +529,12 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn kinds_have_short_tags() {
+        // every tag fits its column with a space to spare, whatever the kind
+        for kind in 1..=25 {
+            let kind: CompletionItemKind = serde_json::from_value(serde_json::json!(kind)).unwrap();
+            let tag = kind_label(Some(kind));
+            assert!((tag.chars().count() as f32) < KIND_CELLS, "{tag}");
+        }
         assert_eq!(kind_label(Some(CompletionItemKind::METHOD)), "method");
         assert_eq!(kind_label(Some(CompletionItemKind::CONSTRUCTOR)), "fn");
         assert_eq!(kind_label(None), "");
