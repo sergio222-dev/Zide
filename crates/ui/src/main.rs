@@ -2462,7 +2462,7 @@ impl Workspace {
         let (Some(viewer), Some(key)) = (&mut self.viewer, vim_key(event)) else {
             return;
         };
-        // the system clipboard is the register: pastes read it, yanks write it
+        // the system clipboard is the register: pastes read it, yanks and deletes write it
         if viewer.may_paste(key)
             && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
         {

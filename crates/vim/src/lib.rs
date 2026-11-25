@@ -80,7 +80,7 @@ pub struct Vim {
     last_change: Vec<Step>,
     pub(crate) replaying: bool,
     pub(crate) register: Register,
-    /// Text yanked and not yet taken for the system clipboard.
+    /// Text yanked or deleted and not yet taken for the system clipboard.
     yanked: Option<String>,
     /// The system clipboard as Zide last saw it, to tell text copied elsewhere from its own.
     clipboard: String,
@@ -210,7 +210,7 @@ impl Vim {
         self.set_cursor(buffer, range.end - 1);
     }
 
-    /// Text yanked since the last call, for the system clipboard.
+    /// Text yanked or deleted since the last call, for the system clipboard.
     pub fn take_yank(&mut self) -> Option<String> {
         let text = self.yanked.take()?;
         self.clipboard.clone_from(&text);
@@ -219,7 +219,7 @@ impl Vim {
 
     /// Offers the system clipboard before a paste. Text copied elsewhere since Zide last saw
     /// the clipboard becomes the register, linewise when it ends with a line break; otherwise
-    /// the register keeps what Zide put there, such as deleted text.
+    /// the register keeps what Zide put there, with its own linewise flag.
     pub fn offer_clipboard(&mut self, text: &str) {
         if text.is_empty() || text == self.clipboard {
             return;
@@ -232,9 +232,13 @@ impl Vim {
         };
     }
 
-    /// Keeps the register's text as yanked, for [`Vim::take_yank`].
-    pub(crate) fn note_yank(&mut self) {
-        self.yanked = Some(self.register.text.clone());
+    /// Puts yanked or deleted text in the register and keeps it for [`Vim::take_yank`]. Deletes
+    /// reach the system clipboard too: were they kept from it, copying elsewhere the same text
+    /// Zide last saw there would not change it, and a paste would bring back the delete
+    /// instead of what was just copied (#163).
+    pub(crate) fn set_register(&mut self, text: String, linewise: bool) {
+        self.yanked = Some(text.clone());
+        self.register = Register { text, linewise };
     }
 
     fn idle(&self) -> bool {
