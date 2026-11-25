@@ -1441,6 +1441,13 @@ impl Viewer {
     }
 
     /// Whether a popup is open, and whether its list is complete.
+    /// Whether an item of the open popup was picked on purpose (see [`CompletionPopup`]).
+    pub fn completion_chosen(&self) -> bool {
+        self.completion
+            .as_ref()
+            .is_some_and(CompletionPopup::chosen)
+    }
+
     pub fn completion_state(&self) -> Option<bool> {
         self.completion.as_ref().map(|popup| !popup.incomplete)
     }

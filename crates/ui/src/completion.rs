@@ -40,6 +40,9 @@ pub struct CompletionPopup {
     shown: Vec<usize>,
     /// Index into `shown`.
     selected: usize,
+    /// Whether an item was picked on purpose (moved to or clicked): only then Enter takes it,
+    /// otherwise Enter is a new line.
+    chosen: bool,
     /// The first of the rows on screen, as an index into `shown`.
     first: usize,
     /// Items (indices into `items`) the server already filled in, or had nothing more for.
@@ -56,6 +59,7 @@ impl CompletionPopup {
             start,
             shown: Vec::new(),
             selected: 0,
+            chosen: false,
             first: 0,
             resolved: HashSet::new(),
         };
@@ -64,6 +68,10 @@ impl CompletionPopup {
 
     /// Narrows the items down to what matches `typed` now, keeping the selected item selected
     /// when it still matches. False when nothing does.
+    pub fn chosen(&self) -> bool {
+        self.chosen
+    }
+
     pub fn refilter(&mut self, typed: &str) -> bool {
         let kept = self.shown.get(self.selected).copied();
         self.shown = rank(&self.items, typed);
@@ -80,6 +88,7 @@ impl CompletionPopup {
         let len = self.shown.len() as isize;
         if len > 0 {
             self.selected = (self.selected as isize + step).rem_euclid(len) as usize;
+            self.chosen = true;
         }
         self.keep_visible();
     }
@@ -97,6 +106,7 @@ impl CompletionPopup {
     pub fn select(&mut self, index: usize) {
         if index < self.shown.len() {
             self.selected = index;
+            self.chosen = true;
             self.keep_visible();
         }
     }
@@ -414,6 +424,20 @@ mod tests {
         assert_eq!(popup.selected().unwrap().label, "last");
         assert!(!popup.refilter("zz"));
         assert!(popup.selected().is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_item_is_chosen_only_once_moved_to_or_clicked() {
+        let answer = || answer(&["a1", "a2", "a3"], false);
+        let mut popup = CompletionPopup::new(answer(), 0, "").unwrap();
+        assert!(!popup.chosen()); // the first is selected, not chosen
+        assert!(popup.refilter("a"));
+        assert!(!popup.chosen());
+        popup.move_selection(1);
+        assert!(popup.chosen());
+        let mut popup = CompletionPopup::new(answer(), 0, "").unwrap();
+        popup.select(2);
+        assert!(popup.chosen());
     }
 
     #[::core::prelude::v1::test]
