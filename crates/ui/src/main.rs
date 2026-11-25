@@ -2491,7 +2491,7 @@ impl Workspace {
     }
 
     /// The keys of the completion popup, and Ctrl+Space to open it, ahead of the editor's:
-    /// Up/Down or Ctrl+N/Ctrl+P move, Enter or Tab accept. True when the key was one of them.
+    /// Up/Down or Ctrl+N/Ctrl+P move, Tab accepts, and Enter too once an item was picked. True when the key was one of them.
     fn completion_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         let Some(viewer) = &mut self.viewer else {
             return false;
@@ -2512,6 +2512,8 @@ impl Workspace {
             "up" if plain => -1,
             "n" if ctrl => 1,
             "p" if ctrl => -1,
+            // Enter takes an item only once one was picked on purpose: else it is a new line
+            "enter" if plain && !viewer.completion_chosen() => return false,
             "enter" | "tab" if plain => {
                 self.accept_completion(None, cx);
                 return true;

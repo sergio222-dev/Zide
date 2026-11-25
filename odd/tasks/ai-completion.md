@@ -25,3 +25,5 @@ L4 Verification: `cargo test --workspace` green (zide-ai 11, zide-ui 288), clipp
 L5 Known limits: an instance killed hard (SIGKILL) leaves its `ollama serve` running; the next instance reuses it. Ghost asked only when no popup is open (the LSP/local popup opens on most word characters), so suggestions mostly come after spaces, punctuation and new lines.
 L6 (2026-11-25) user: "hice la prueba, como puedo ejecutar el autocompletado? veo el texto fantasma pero no se como autocompletarlo"
 L7 Cause: Tab is bound to the `SwitchTab` action (Workspace context); gpui runs actions before key listeners, so `completion_key` never saw Tab and `commit_tab` ran. Fix: the SwitchTab handler accepts the ghost (or the open completion popup) first while the editor has the keys.
+L8 (2026-11-25) user: "tengo una situacion, cuando entro en insert mode el auto suggest me muestra el popup, pero si quiero hacer una new line me toma el suggest, como resuelvo esto?"
+L9 Fix: the completion popup takes Enter only after an item was picked on purpose (arrows, Ctrl+N/P, click); otherwise Enter is a new line and the popup closes. Tab always accepts.
