@@ -2,7 +2,7 @@
 
 A fast, keyboard-driven code editor with Vim motions and an IntelliJ-style keymap, written in Rust.
 
-![Zide editing a Rust file](docs/screenshot.png)
+![Zide editing a TypeScript test with inlay hints, git blame and the project tree](docs/screenshot.png)
 
 <p>
   <img src="docs/search-files.png" alt="Search Everywhere, Files tab" width="49%">
