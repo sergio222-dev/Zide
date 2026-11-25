@@ -2505,8 +2505,7 @@ impl Workspace {
             return true;
         }
         if viewer.completion_state().is_none() {
-            // with no popup, Tab takes the suggestion of the model, if one is shown
-            return plain && key == "tab" && self.accept_ghost(cx);
+            return false; // Tab is the `SwitchTab` action, which takes a suggestion
         }
         let step = match key {
             "down" if plain => 1,
@@ -3977,6 +3976,12 @@ impl Workspace {
                     this.log_tab(window, cx);
                 } else if this.popup.is_some() {
                     this.switch_tab(cx);
+                } else if this.center == Center::Editor
+                    && !this.tree_focused
+                    && (this.accept_ghost(cx) || this.accept_completion(None, cx))
+                {
+                    // the editor's suggestion or completion popup took it: this action runs
+                    // before the key listeners, so they never see Tab
                 } else {
                     this.commit_tab(window, cx);
                 }
