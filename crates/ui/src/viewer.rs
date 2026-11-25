@@ -61,8 +61,19 @@ pub type HoverMove = Rc<dyn Fn(Option<(usize, Point<Pixels>)>, &mut App)>;
 /// Called with the line and window position of a click on the text.
 pub type TextClick = Rc<dyn Fn(usize, Point<Pixels>, &mut App)>;
 
-/// Per line, the parameter name hints to show: the column they go before and their text.
-type LineHints = HashMap<usize, Vec<(usize, String)>>;
+/// Per line, the text shown that is not in the buffer (parameter name hints, the first line of
+/// the ghost text): the column it goes before, the text as shown and how it is painted.
+type LineHints = HashMap<usize, Vec<(usize, String, Tint)>>;
+
+/// A suggestion shown at the caret, not yet in the text: it holds while the text is as of
+/// `revision` and the cursor at `at`.
+struct Ghost {
+    at: usize,
+    revision: Revision,
+    /// The length of the text then, to tell typing at the caret from an edit elsewhere.
+    len: usize,
+    text: String,
+}
 
 /// Parameter names a language server gave for the text as of `revision`, as char offsets.
 struct HintSet {
@@ -91,9 +102,9 @@ struct Line {
     /// Display byte of each `char` of the line (and of its end), when that is not the identity
     /// (tabs, multi-byte characters).
     cols: Option<Vec<usize>>,
-    /// Parameter name hints shown in the line: where each was put (a display byte of the line
-    /// without hints) and how many bytes it takes, in order.
-    inserts: Vec<(usize, usize)>,
+    /// Parameter name hints and ghost text shown in the line: where each was put (a display
+    /// byte of the line without them), how many bytes it takes and what it is, in order.
+    inserts: Vec<(usize, usize, Tint)>,
     /// How many indent bands the line has, each `step` columns wide.
     level: usize,
     step: usize,
@@ -106,6 +117,8 @@ enum Tint {
     Syntax(Class),
     /// The chip of a parameter name hint.
     Hint,
+    /// A suggestion not yet accepted.
+    Ghost,
 }
 
 impl Tint {
@@ -115,6 +128,11 @@ impl Tint {
             Tint::Hint => HighlightStyle {
                 color: Some(rgb(theme::HINT_TEXT).into()),
                 background_color: Some(rgb(theme::HINT_BG).into()),
+                ..Default::default()
+            },
+            Tint::Ghost => HighlightStyle {
+                color: Some(rgb(theme::DIM).into()),
+                font_style: Some(FontStyle::Italic),
                 ..Default::default()
             },
         }
@@ -130,13 +148,13 @@ impl Line {
             .collect()
     }
 
-    /// Where the display byte `without_hints` of the line without hints is once they are in.
+    /// Where the display byte `without_hints` of the line without hints is once they are in:
+    /// after the hints put there, before the ghost text (the caret stays ahead of it).
     fn with_hints(&self, without_hints: usize) -> usize {
-        let before = self
-            .inserts
-            .iter()
-            .take_while(|(at, _)| *at <= without_hints);
-        without_hints + before.map(|(_, size)| size).sum::<usize>()
+        let before = self.inserts.iter().filter(|(at, _, tint)| {
+            *at < without_hints || (*at == without_hints && *tint != Tint::Ghost)
+        });
+        without_hints + before.map(|(_, size, _)| size).sum::<usize>()
     }
 
     fn display_byte(&self, column: usize) -> usize {
@@ -352,6 +370,8 @@ pub struct Viewer {
     hover: Option<Hover>,
     /// The parameter names shown before arguments.
     hints: Option<HintSet>,
+    /// The suggestion shown at the caret.
+    ghost: Option<Ghost>,
     /// Where the editor was drawn last, to turn a mouse position into a line and column.
     editor_bounds: Rc<Cell<Bounds<Pixels>>>,
     minimap_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -424,6 +444,7 @@ impl Viewer {
             squiggles: Arc::default(),
             hover: None,
             hints: None,
+            ghost: None,
             editor_bounds: Rc::default(),
             minimap_bounds: Rc::default(),
             minimap_shown: true,
@@ -498,6 +519,17 @@ impl Viewer {
     /// (as one edit: what was typed between the text they were given for and now).
     fn hints_by_line(&self) -> LineHints {
         let mut by_line = LineHints::new();
+        if let Some(ghost) = self.ghost_shown() {
+            let first = ghost.text.split('\n').next().unwrap_or_default();
+            if !first.is_empty() {
+                let position = self.buffer.position_of(ghost.at);
+                by_line.entry(position.line).or_default().push((
+                    position.column,
+                    first.replace('\t', "    "),
+                    Tint::Ghost,
+                ));
+            }
+        }
         let Some(set) = &self.hints else {
             return by_line;
         };
@@ -510,10 +542,11 @@ impl Viewer {
         };
         for (at, label) in hints {
             let position = self.buffer.position_of(*at);
-            by_line
-                .entry(position.line)
-                .or_default()
-                .push((position.column, label.clone()));
+            by_line.entry(position.line).or_default().push((
+                position.column,
+                format!("{label} "), // a space that is not part of the chip
+                Tint::Hint,
+            ));
         }
         by_line
     }
@@ -615,6 +648,9 @@ impl Viewer {
         self.completion = None;
         self.signature = None;
         self.vim.click(&mut self.buffer, offset);
+        if self.follow_ghost() {
+            self.rebuild();
+        }
         true
     }
 
@@ -1223,7 +1259,8 @@ impl Viewer {
         }
         let before = self.cursor_line();
         self.vim.handle(&mut self.buffer, key);
-        if self.buffer.revision() != self.built_at {
+        let ghost_changed = self.follow_ghost();
+        if self.buffer.revision() != self.built_at || ghost_changed {
             self.rebuild();
         }
         self.snap_cursor(before);
@@ -1269,7 +1306,114 @@ impl Viewer {
     pub fn show_completion(&mut self, completion: Completion, start: usize) -> bool {
         let typed = self.typed_since(start).filter(|_| self.inserting());
         self.completion = typed.and_then(|typed| CompletionPopup::new(completion, start, &typed));
+        // the popup goes first: its items are what the language server knows fits
+        if self.completion.is_some() && self.ghost.take().is_some() {
+            self.rebuild();
+        }
         self.completion.is_some()
+    }
+
+    /// The ghost text, while the text and the cursor are as it was given for, Insert mode
+    /// lasts and no popup is open.
+    fn ghost_shown(&self) -> Option<&Ghost> {
+        self.ghost.as_ref().filter(|ghost| {
+            ghost.revision == self.buffer.revision()
+                && ghost.at == self.vim.cursor()
+                && self.completion.is_none()
+                && self.inserting()
+        })
+    }
+
+    /// Where a suggestion would go now, and the revision of the text it would be for: the
+    /// cursor, while inserting with no popup open.
+    pub fn ghost_point(&self) -> Option<(usize, Revision)> {
+        (self.inserting() && self.completion.is_none())
+            .then(|| (self.vim.cursor(), self.buffer.revision()))
+    }
+
+    pub fn ghost_text(&self) -> Option<&str> {
+        self.ghost_shown().map(|ghost| ghost.text.as_str())
+    }
+
+    /// Shows `text` dimmed at the caret, as a suggestion asked when the cursor was at `at` and
+    /// the text as of `revision`. False when typing moved on since, a popup is open, or the
+    /// suggestion is blank.
+    pub fn show_ghost(&mut self, text: &str, at: usize, revision: Revision) -> bool {
+        let text = text.trim_end();
+        let here = revision == self.buffer.revision()
+            && at == self.vim.cursor()
+            && self.inserting()
+            && self.completion.is_none();
+        if !here || text.is_empty() {
+            return false;
+        }
+        self.ghost = Some(Ghost {
+            at,
+            revision,
+            len: self.buffer.len(),
+            text: text.to_string(),
+        });
+        self.rebuild();
+        true
+    }
+
+    /// Drops the suggestion. True when one was there (the lines are drawn again without it).
+    pub fn clear_ghost(&mut self) -> bool {
+        if self.ghost.take().is_none() {
+            return false;
+        }
+        self.rebuild();
+        true
+    }
+
+    /// Puts the suggestion in at the caret, the cursor after it. False when none is shown.
+    pub fn accept_ghost(&mut self) -> bool {
+        if self.ghost_shown().is_none() {
+            return false;
+        }
+        let Some(ghost) = self.ghost.take() else {
+            return false;
+        };
+        let before = self.cursor_line();
+        let caret = ghost.text.chars().count();
+        self.vim.complete(
+            &mut self.buffer,
+            ghost.at..ghost.at,
+            &ghost.text,
+            caret,
+            &[],
+        );
+        self.rebuild();
+        self.snap_cursor(before);
+        self.reveal_cursor();
+        true
+    }
+
+    /// After a key: the suggestion loses what was typed of it, and goes when anything else
+    /// happened (a different character, an edit elsewhere, the cursor moved, Insert mode left).
+    /// True when it changed, so the lines have to be drawn again.
+    fn follow_ghost(&mut self) -> bool {
+        let Some(ghost) = &self.ghost else {
+            return false;
+        };
+        let cursor = self.vim.cursor();
+        if ghost.revision == self.buffer.revision() && ghost.at == cursor && self.inserting() {
+            return false;
+        }
+        let typed_here = self.inserting()
+            && cursor > ghost.at
+            && self.buffer.len() == ghost.len + (cursor - ghost.at);
+        let rest = typed_here
+            .then(|| self.buffer.slice(ghost.at..cursor))
+            .and_then(|typed| ghost.text.strip_prefix(typed.as_str()).map(str::to_string))
+            .filter(|rest| !rest.trim_end().is_empty());
+        self.ghost = rest.map(|text| Ghost {
+            at: cursor,
+            revision: self.buffer.revision(),
+            len: self.buffer.len(),
+            text,
+        });
+        true
     }
 
     /// After a key: narrows the popup to the word as typed now, or closes it when the cursor
@@ -1428,6 +1572,38 @@ impl Viewer {
                         .text_color(rgb(theme::DIM))
                         .child(format!("+{} overloads", hint.count - 1))
                 })),
+        )
+    }
+
+    /// The lines of the suggestion after its first (which is in the caret's line), under the
+    /// caret's line and over the text there.
+    fn ghost_view(&self) -> Option<Div> {
+        let ghost = self.ghost_shown()?;
+        let rest: Vec<String> = ghost
+            .text
+            .split('\n')
+            .skip(1)
+            .map(|line| line.replace('\t', "    "))
+            .collect();
+        if rest.is_empty() {
+            return None;
+        }
+        let (_, caret_y) = self.caret_xy()?;
+        let row_height = self.row_height();
+        let offset = self.scroll.0.borrow().base_handle.offset();
+        Some(
+            div()
+                .absolute()
+                .left(px(self.gutter_width() + f32::from(offset.x)))
+                .right_0()
+                .top(px(caret_y + row_height))
+                .bg(rgb(theme::BACKGROUND))
+                .text_color(rgb(theme::DIM))
+                .italic()
+                .children(
+                    rest.into_iter()
+                        .map(|line| div().h(px(row_height)).child(line)),
+                ),
         )
     }
 
@@ -2590,6 +2766,7 @@ impl Viewer {
                             .child(Scrollbar::new(&self.scroll))
                             .children(sticky)
                             .children(popup)
+                            .children(self.ghost_view())
                             .children(self.signature_view())
                             .children(self.completion_view(on_pick)),
                     )
@@ -2713,7 +2890,7 @@ struct Injected {
     text: String,
     colors: Vec<(Range<usize>, Tint)>,
     cols: Vec<usize>,
-    inserts: Vec<(usize, usize)>,
+    inserts: Vec<(usize, usize, Tint)>,
 }
 
 /// The line `text` with each hint put before the character at its column, with the same
@@ -2725,24 +2902,23 @@ fn inject_hints(
     map: &[usize],
     text: String,
     colors: Vec<(Range<usize>, Tint)>,
-    hints: &[(usize, String)],
+    hints: &[(usize, String, Tint)],
 ) -> Injected {
-    // the name, then a space that is not part of the chip
-    let inserts: Vec<(usize, String)> = hints
+    let inserts: Vec<(usize, &str, Tint)> = hints
         .iter()
-        .map(|(column, label)| {
+        .map(|(column, shown, tint)| {
             let byte = raw
                 .char_indices()
                 .nth(*column)
                 .map_or(raw.len(), |(b, _)| b);
-            (map[byte], format!("{label} "))
+            (map[byte], shown.as_str(), *tint)
         })
         .collect();
     let total = |below: &dyn Fn(usize) -> bool| -> usize {
         inserts
             .iter()
-            .filter(|(at, _)| below(*at))
-            .map(|(_, shown)| shown.len())
+            .filter(|(at, ..)| below(*at))
+            .map(|(_, shown, _)| shown.len())
             .sum()
     };
     // a character at a hint is after it, an end at a hint is before it
@@ -2751,7 +2927,7 @@ fn inject_hints(
 
     let mut shown = String::with_capacity(text.len() + total(&|_| true));
     let mut copied = 0;
-    for (at, hint) in &inserts {
+    for (at, hint, _) in &inserts {
         shown.push_str(&text[copied..*at]);
         shown.push_str(hint);
         copied = *at;
@@ -2763,7 +2939,7 @@ fn inject_hints(
         let mut from = span.start;
         let inside: BTreeSet<usize> = inserts
             .iter()
-            .map(|(at, _)| *at)
+            .map(|(at, ..)| *at)
             .filter(|at| *at > span.start && *at < span.end)
             .collect();
         for at in inside {
@@ -2775,9 +2951,15 @@ fn inject_hints(
         }
     }
     let mut put = 0;
-    for (at, hint) in &inserts {
+    for (at, hint, tint) in &inserts {
         let start = at + put;
-        moved.push((start..start + hint.len() - 1, Tint::Hint)); // not the space after it
+        let painted = hint.trim_end_matches(' ').len(); // not the space after a chip
+        let painted = if *tint == Tint::Ghost {
+            hint.len()
+        } else {
+            painted
+        };
+        moved.push((start..start + painted, *tint));
         put += hint.len();
     }
     moved.sort_by_key(|(span, _)| span.start);
@@ -2787,7 +2969,10 @@ fn inject_hints(
         .map(|(byte, _)| start_of(map[byte]))
         .chain(std::iter::once(start_of(map[raw.len()])))
         .collect();
-    let sizes = inserts.iter().map(|(at, hint)| (*at, hint.len())).collect();
+    let sizes = inserts
+        .iter()
+        .map(|(at, hint, tint)| (*at, hint.len(), *tint))
+        .collect();
     Injected {
         text: shown,
         colors: moved,
@@ -3665,6 +3850,97 @@ mod tests {
             position: zide_lsp::Position::new(line, character),
             label: label.into(),
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_suggestion_shows_after_the_caret_and_moves_the_rest_of_the_line() {
+        let (dir, file) = temp_file("ghost", "let x = ;\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "$i");
+        let (at, revision) = (viewer.vim.cursor(), viewer.revision());
+        assert!(viewer.show_ghost("a + b\n", at, revision));
+        assert_eq!(viewer.ghost_text(), Some("a + b")); // trailing blank dropped
+        assert_eq!(viewer.lines[0].text, "let x = a + b;");
+        let painted: Vec<_> = viewer.lines[0]
+            .colors
+            .iter()
+            .filter(|(_, tint)| *tint == Tint::Ghost)
+            .map(|(r, _)| r.clone())
+            .collect();
+        assert_eq!(painted, vec![8..13]);
+        // the caret stays before it, the `;` is after it
+        assert_eq!(viewer.cursor_cell().1.start, 8);
+        assert_eq!(viewer.lines[0].display_byte(8), 13);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_suggestion_for_older_text_or_another_place_is_not_shown() {
+        let (dir, file) = temp_file("ghost-stale", "ab\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        let (at, revision) = (viewer.vim.cursor(), viewer.revision());
+        assert!(!viewer.show_ghost("x", at, revision)); // not inserting
+        type_keys(&mut viewer, "A");
+        let (at, revision) = (viewer.vim.cursor(), viewer.revision());
+        type_keys(&mut viewer, "c");
+        assert!(!viewer.show_ghost("x", at, revision));
+        let (at, revision) = (viewer.vim.cursor(), viewer.revision());
+        assert!(!viewer.show_ghost("  \n", at, revision)); // blank
+        assert_eq!(viewer.ghost_text(), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn typing_the_suggestion_narrows_it_and_anything_else_drops_it() {
+        let (dir, file) = temp_file("ghost-typing", "\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "i");
+        let (at, revision) = (viewer.vim.cursor(), viewer.revision());
+        assert!(viewer.show_ghost("print(1)", at, revision));
+        type_keys(&mut viewer, "pri");
+        assert_eq!(viewer.ghost_text(), Some("nt(1)"));
+        assert_eq!(viewer.lines[0].text, "print(1)");
+        type_keys(&mut viewer, "x");
+        assert_eq!(viewer.ghost_text(), None);
+        assert_eq!(viewer.lines[0].text, "prix"); // drawn again without it
+        // leaving Insert mode drops it too
+        let (at, revision) = (viewer.vim.cursor(), viewer.revision());
+        assert!(viewer.show_ghost("y", at, revision));
+        viewer.handle_key(Key::Esc);
+        assert_eq!(viewer.ghost_text(), None);
+        assert_eq!(viewer.lines[0].text, "prix");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_accepted_suggestion_goes_in_whole_and_the_cursor_after_it() {
+        let (dir, file) = temp_file_as("ghost-accept", "a.rs", "fn a() {\n}\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "A");
+        let (at, revision) = (viewer.vim.cursor(), viewer.revision());
+        assert!(viewer.show_ghost("\n    1\n", at, revision));
+        assert_eq!(viewer.lines[0].text, "fn a() {"); // its first line is empty
+        assert!(viewer.accept_ghost());
+        assert!(!viewer.accept_ghost()); // gone
+        assert_eq!(viewer.text(), "fn a() {\n    1\n}\n");
+        type_keys(&mut viewer, "2");
+        assert_eq!(viewer.text(), "fn a() {\n    12\n}\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_open_popup_takes_the_place_of_the_suggestion() {
+        let (dir, file) = temp_file("ghost-popup", "x.\n");
+        let mut viewer = Viewer::open(&dir, &file);
+        type_keys(&mut viewer, "Ale");
+        let (at, revision) = (viewer.vim.cursor(), viewer.revision());
+        assert!(viewer.show_ghost("n()", at, revision));
+        let start = viewer.completion_point().unwrap().start;
+        assert!(viewer.show_completion(completion(serde_json::json!([{"label": "len"}])), start));
+        assert_eq!(viewer.ghost_text(), None);
+        assert_eq!(viewer.lines[0].text, "x.le");
+        assert!(!viewer.show_ghost("n()", at, revision)); // not while it is open
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[::core::prelude::v1::test]
