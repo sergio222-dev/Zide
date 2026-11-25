@@ -194,11 +194,7 @@ impl Workspace {
                 .background_executor()
                 .spawn({
                     let (asked, server) = (asked.clone(), server.clone());
-                    async move {
-                        let prefix: String = text.chars().take(at).collect();
-                        let suffix: String = text.chars().skip(at).collect();
-                        server.complete(MODEL, &prefix, &suffix, &asked)
-                    }
+                    async move { server.complete(MODEL, &text, at, &asked) }
                 })
                 .await;
             this.update(cx, |this, cx| {
