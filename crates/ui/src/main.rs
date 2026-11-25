@@ -2468,13 +2468,19 @@ impl Workspace {
         {
             viewer.offer_clipboard(&text);
         }
+        let was_inserting = viewer.inserting();
         let effect = viewer.handle_key(key);
         viewer.settle_popups();
         if let Some(text) = viewer.take_yank() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
         self.signature_as_typed(key, cx);
-        self.complete_as_typed(key, cx);
+        // the key that enters Insert mode (`i`, `a`, `o`) is not typed text: no popup for it
+        if was_inserting {
+            self.complete_as_typed(key, cx);
+        } else {
+            self.cancel_completion();
+        }
         self.ghost_as_typed(cx);
         self.resolve_selected(cx);
         if key == zide_vim::Key::Esc && self.find.is_some() {
@@ -2491,7 +2497,7 @@ impl Workspace {
     }
 
     /// The keys of the completion popup, and Ctrl+Space to open it, ahead of the editor's:
-    /// Up/Down or Ctrl+N/Ctrl+P move, Tab accepts, and Enter too once an item was picked. True when the key was one of them.
+    /// Up/Down or Ctrl+N/Ctrl+P move, Enter accepts (Tab is for the model's suggestion). True when the key was one of them.
     fn completion_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         let Some(viewer) = &mut self.viewer else {
             return false;
@@ -2512,9 +2518,7 @@ impl Workspace {
             "up" if plain => -1,
             "n" if ctrl => 1,
             "p" if ctrl => -1,
-            // Enter takes an item only once one was picked on purpose: else it is a new line
-            "enter" if plain && !viewer.completion_chosen() => return false,
-            "enter" | "tab" if plain => {
+            "enter" if plain => {
                 self.accept_completion(None, cx);
                 return true;
             }
@@ -3980,10 +3984,10 @@ impl Workspace {
                     this.switch_tab(cx);
                 } else if this.center == Center::Editor
                     && !this.tree_focused
-                    && (this.accept_ghost(cx) || this.accept_completion(None, cx))
+                    && this.accept_ghost(cx)
                 {
-                    // the editor's suggestion or completion popup took it: this action runs
-                    // before the key listeners, so they never see Tab
+                    // the model's suggestion took it: this action runs before the key
+                    // listeners, so they never see Tab
                 } else {
                     this.commit_tab(window, cx);
                 }

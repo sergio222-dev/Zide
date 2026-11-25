@@ -38,9 +38,9 @@ Only Linux x86_64 is published for now.
   symbol index and the status line says so.
 - **Code completion** while inserting: the file's language server offers what fits as you type a word or after a character the server lists (`.`, `:`),
   in a popup at the caret narrowed down as you keep typing (IntelliJ matching: `gBN` finds `getByName`).
-  `Up`/`Down` or `Ctrl+N`/`Ctrl+P` pick, `Tab` or a click accepts (with the import it needs, when the server
-  offers one), and `Enter` too once an item was picked (otherwise `Enter` is a new line and the popup closes);
-  `Esc` leaves Insert and the popup; `Ctrl+Space` asks by hand. `.` repeats the completed word.
+  It opens on what is typed, not on the key that enters Insert mode.
+  `Up`/`Down` or `Ctrl+N`/`Ctrl+P` pick, `Enter` or a click accepts (with the import it needs, when the server
+  offers one), `Esc` leaves Insert and the popup; `Ctrl+Space` asks by hand. `.` repeats the completed word.
   The selected item's documentation shows beside the list (Markdown, as the server writes it). An import TypeScript
   only sends once the item is looked at still goes in when the item was accepted before it arrived.
   Without a language server (or when it has nothing for a word) the project's symbols of the file's language and the
