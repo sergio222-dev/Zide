@@ -10,8 +10,8 @@ publish = false
 
 # Synchronized horizontal scroll for split diffs, until gpui-kit releases it.
 [patch.crates-io]
-gpui-base = { git = "https://github.com/sergio222-dev/gpui-kit", branch = "feat/diff-split-scroll" }
-gpui-component = { git = "https://github.com/sergio222-dev/gpui-kit", branch = "feat/diff-split-scroll" }
-gpui-component-macros = { git = "https://github.com/sergio222-dev/gpui-kit", branch = "feat/diff-split-scroll" }
-gpui-kit = { git = "https://github.com/sergio222-dev/gpui-kit", branch = "feat/diff-split-scroll" }
-gpui-kit-assets = { git = "https://github.com/sergio222-dev/gpui-kit", branch = "feat/diff-split-scroll" }
+gpui-base = { git = "https://github.com/sergio222-dev/gpui-kit", branch = "feat/diff-split-scroll-v0.11" }
+gpui-component = { git = "https://github.com/sergio222-dev/gpui-kit", branch = "feat/diff-split-scroll-v0.11" }
+gpui-component-macros = { git = "https://github.com/sergio222-dev/gpui-kit", branch = "feat/diff-split-scroll-v0.11" }
+gpui-kit = { git = "https://github.com/sergio222-dev/gpui-kit", branch = "feat/diff-split-scroll-v0.11" }
+gpui-kit-assets = { git = "https://github.com/sergio222-dev/gpui-kit", branch = "feat/diff-split-scroll-v0.11" }
