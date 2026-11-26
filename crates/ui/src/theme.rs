@@ -1,7 +1,10 @@
 //! Colors of Zide. Every view reads the theme in use through `current()` while it renders, so
 //! switching themes (`set`) repaints with the new colors on the next frame.
 
-use std::sync::RwLock;
+use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
+
+use serde_json::Value;
 
 /// A color scheme. Colors are `0xRRGGBB`, except those documented as `0xRRGGBBAA`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,11 +181,12 @@ pub fn set(theme: &'static Theme) {
     *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Some(theme);
 }
 
-/// Every theme to pick from: the built-in ones, then the user's. The first is the default.
+/// Every theme to pick from: the built-in ones (the default first), then the user's from
+/// `~/.config/zide/themes/*.json`, sorted by name. A user theme named like a built-in one takes its
+/// place. The files are read once, on the first call.
 #[allow(dead_code)] // the theme selector calls it
 pub fn all() -> &'static [&'static Theme] {
-    static ALL: std::sync::OnceLock<Vec<&'static Theme>> = std::sync::OnceLock::new();
-    ALL.get_or_init(|| vec![Box::leak(Box::new(dark()))])
+    &loaded().0
 }
 
 /// The theme called `name`, if there is one.
@@ -194,5 +198,360 @@ pub fn find(name: &str) -> Option<&'static Theme> {
 /// What was wrong in the theme files read by `all`, one line each, to report once.
 #[allow(dead_code)] // the theme selector calls it
 pub fn problems() -> Vec<String> {
-    Vec::new()
+    loaded().1.clone()
+}
+
+fn loaded() -> &'static (Vec<&'static Theme>, Vec<String>) {
+    static LOADED: OnceLock<(Vec<&'static Theme>, Vec<String>)> = OnceLock::new();
+    LOADED.get_or_init(|| {
+        let dir = crate::settings::path().and_then(|path| Some(path.parent()?.join("themes")));
+        let (themes, problems) = load(BUILT_IN, dir.as_deref());
+        let themes = themes
+            .into_iter()
+            .map(|t| &*Box::leak(Box::new(t)))
+            .collect();
+        (themes, problems)
+    })
+}
+
+/// The themes shipped with Zide, as (file name, text). The first is the default.
+const BUILT_IN: &[(&str, &str)] = &[
+    ("zide-dark.json", include_str!("../themes/zide-dark.json")),
+    ("zide-light.json", include_str!("../themes/zide-light.json")),
+    ("zide-ember.json", include_str!("../themes/zide-ember.json")),
+    ("zide-fjord.json", include_str!("../themes/zide-fjord.json")),
+    (
+        "zide-high-contrast.json",
+        include_str!("../themes/zide-high-contrast.json"),
+    ),
+];
+
+/// The built-in themes, then the `.json` files of `user_dir` (if any) sorted by theme name; a user
+/// theme with a built-in's name replaces it. Files that cannot be read or parsed are left out.
+/// Every problem found comes back as a line that starts with the file's name.
+fn load(built_in: &[(&str, &str)], user_dir: Option<&Path>) -> (Vec<Theme>, Vec<String>) {
+    let mut problems = Vec::new();
+    let read = |file: &str, text: &str, out: &mut Vec<Theme>, problems: &mut Vec<String>| {
+        match parse(text) {
+            Ok((theme, found)) => {
+                problems.extend(found.into_iter().map(|p| format!("{file}: {p}")));
+                out.push(theme);
+            }
+            Err(e) => problems.push(format!("{file}: {e}")),
+        }
+    };
+    let mut themes = Vec::new();
+    for (file, text) in built_in {
+        read(file, text, &mut themes, &mut problems);
+    }
+    let mut user = Vec::new();
+    let mut files: Vec<PathBuf> = user_dir
+        .and_then(|dir| std::fs::read_dir(dir).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    files.sort();
+    for path in files {
+        let file = path.display().to_string();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => read(&file, &text, &mut user, &mut problems),
+            Err(e) => problems.push(format!("{file}: {e}")),
+        }
+    }
+    user.sort_by(|a, b| a.name.cmp(&b.name));
+    for theme in user {
+        match themes.iter_mut().find(|t| t.name == theme.name) {
+            Some(slot) => *slot = theme,
+            None => themes.push(theme),
+        }
+    }
+    (themes, problems)
+}
+
+/// Reads a theme file: `{"name": "...", "light": false, "colors": {"background": "#1c1d20", ...}}`.
+/// Colors the file leaves out are the ones of `dark()`. Entries that are wrong (an unknown key, a
+/// bad color) are skipped and described in the returned list; only a file that is not a JSON
+/// object or has no name is an error.
+fn parse(text: &str) -> Result<(Theme, Vec<String>), String> {
+    let value: Value = serde_json::from_str(text).map_err(|e| format!("not valid JSON: {e}"))?;
+    let Value::Object(file) = value else {
+        return Err("a theme must be a JSON object".into());
+    };
+    let mut theme = dark();
+    let mut problems = Vec::new();
+    match file.get("name").and_then(Value::as_str).map(str::trim) {
+        Some(name) if !name.is_empty() => theme.name = name.to_string(),
+        _ => return Err("\"name\" must be a non-empty string".into()),
+    }
+    match file.get("light") {
+        None => theme.light = false,
+        Some(Value::Bool(light)) => theme.light = *light,
+        Some(_) => problems.push("\"light\" must be true or false".into()),
+    }
+    for key in file.keys() {
+        if !matches!(key.as_str(), "name" | "light" | "colors") {
+            problems.push(format!("unknown key \"{key}\""));
+        }
+    }
+    match file.get("colors") {
+        None => {}
+        Some(Value::Object(colors)) => {
+            for (key, value) in colors {
+                if let Err(e) = set_color(&mut theme, key, value) {
+                    problems.push(format!("colors.{key}: {e}"));
+                }
+            }
+        }
+        Some(_) => problems.push("\"colors\" must be an object".into()),
+    }
+    Ok((theme, problems))
+}
+
+/// Sets the color `key` of `theme` from a JSON value, leaving it as it was when the value is wrong.
+fn set_color(theme: &mut Theme, key: &str, value: &Value) -> Result<(), String> {
+    if key == "indent_bands" {
+        let bands = value
+            .as_array()
+            .filter(|bands| bands.len() == theme.indent_bands.len())
+            .ok_or("must be a list of 4 colors")?;
+        let mut parsed = [0; 4];
+        for (slot, band) in parsed.iter_mut().zip(bands) {
+            *slot = color(band, true)?;
+        }
+        theme.indent_bands = parsed;
+        return Ok(());
+    }
+    let (slot, alpha) = color_slot(theme, key).ok_or("unknown color")?;
+    *slot = color(value, alpha)?;
+    Ok(())
+}
+
+/// A color written as "#rrggbb", or also "#rrggbbaa" where `alpha` (an opaque "#rrggbb" then gets
+/// alpha ff).
+fn color(value: &Value, alpha: bool) -> Result<u32, String> {
+    let text = value.as_str().ok_or("must be a string like \"#rrggbb\"")?;
+    let hex = text
+        .strip_prefix('#')
+        .filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()));
+    let bad = || {
+        if alpha {
+            format!("\"{text}\" is not a color like \"#rrggbb\" or \"#rrggbbaa\"")
+        } else {
+            format!("\"{text}\" is not a color like \"#rrggbb\"")
+        }
+    };
+    let hex = hex.ok_or_else(bad)?;
+    let n = u32::from_str_radix(hex, 16).map_err(|_| bad())?;
+    match hex.len() {
+        6 if alpha => Ok(n << 8 | 0xff),
+        6 => Ok(n),
+        8 if alpha => Ok(n),
+        _ => Err(bad()),
+    }
+}
+
+/// Lists every single color of `Theme` once: its key in a theme file, and whether it has alpha.
+macro_rules! color_keys {
+    ($($field:ident $(: $alpha:ident)?),* $(,)?) => {
+        /// Every key of `colors` in a theme file.
+        #[cfg(test)]
+        const COLOR_KEYS: &[&str] = &["indent_bands", $(stringify!($field)),*];
+
+        /// The color `key` of `theme`, and whether it is RGBA.
+        fn color_slot<'a>(theme: &'a mut Theme, key: &str) -> Option<(&'a mut u32, bool)> {
+            match key {
+                $(stringify!($field) => Some((&mut theme.$field, color_keys!(@alpha $($alpha)?))),)*
+                _ => None,
+            }
+        }
+    };
+    (@alpha rgba) => { true };
+    (@alpha) => { false };
+}
+
+color_keys! {
+    background, text, dim, muted, strong, border, symbol,
+    selection, word, bracket, find_match, find_current, caret_bar, caret_block: rgba,
+    tree_selected, tree_focused,
+    popup, control_border, active_bg, active_border, error,
+    whitespace: rgba,
+    change_added, change_modified, change_removed,
+    diff_added, diff_removed, diff_changed, diff_conflict, tint_added: rgba, tint_removed: rgba,
+    minimap_cursor, minimap_view: rgba,
+    hint_bg, hint_text,
+    icon_folder, icon_code, icon_data, icon_media,
+    ok, working, needs_user,
+    syntax_keyword, syntax_string, syntax_number, syntax_comment, syntax_function, syntax_type,
+    syntax_property, syntax_variable, syntax_operator, syntax_emphasis, syntax_link,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(themes: &[Theme]) -> Vec<&str> {
+        themes.iter().map(|t| t.name.as_str()).collect()
+    }
+
+    /// A fresh empty directory under the system temp dir.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("zide-themes-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn every_built_in_theme_parses_without_problems_and_gives_every_color() {
+        for (file, text) in BUILT_IN {
+            let (_, problems) = parse(text).unwrap();
+            assert!(problems.is_empty(), "{file}: {problems:?}");
+            let file_keys: Value = serde_json::from_str(text).unwrap();
+            let colors = file_keys["colors"].as_object().unwrap();
+            for key in COLOR_KEYS {
+                assert!(colors.contains_key(*key), "{file} lacks {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn zide_dark_file_is_the_rust_default() {
+        let (theme, _) = parse(BUILT_IN[0].1).unwrap();
+        assert_eq!(theme, dark());
+    }
+
+    #[test]
+    fn built_ins_come_first_with_the_default_first() {
+        let (themes, problems) = load(BUILT_IN, None);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            names(&themes),
+            [
+                "Zide Dark",
+                "Zide Light",
+                "Zide Ember",
+                "Zide Fjord",
+                "Zide High Contrast"
+            ]
+        );
+        assert!(themes[1].light);
+    }
+
+    #[test]
+    fn a_partial_file_falls_back_to_the_default_colors() {
+        let (theme, problems) =
+            parse(r##"{"name": "Mine", "colors": {"background": "#102030"}}"##).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(theme.background, 0x102030);
+        assert_eq!(theme.text, dark().text);
+        assert_eq!(theme.indent_bands, dark().indent_bands);
+        assert!(!theme.light);
+    }
+
+    #[test]
+    fn colors_take_alpha_only_where_documented() {
+        let (theme, problems) = parse(
+            r##"{"name": "A", "colors": {"caret_block": "#11223344", "whitespace": "#112233",
+                "indent_bands": ["#01020304", "#05060708", "#090a0b0c", "#0d0e0f"]}}"##,
+        )
+        .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(theme.caret_block, 0x11223344);
+        assert_eq!(theme.whitespace, 0x112233ff);
+        assert_eq!(
+            theme.indent_bands,
+            [0x01020304, 0x05060708, 0x090a0b0c, 0x0d0e0fff]
+        );
+    }
+
+    #[test]
+    fn wrong_entries_are_reported_and_skipped() {
+        let (theme, problems) = parse(
+            r##"{"name": "Bad", "light": "yes", "extra": 1, "colors": {
+                "background": "#zzzzzz", "text": "#11223344", "bogus": "#000000",
+                "dim": 5, "indent_bands": ["#000000"], "muted": "#123456"}}"##,
+        )
+        .unwrap();
+        let base = dark();
+        assert_eq!(theme.background, base.background);
+        assert_eq!(theme.text, base.text);
+        assert_eq!(theme.dim, base.dim);
+        assert_eq!(theme.indent_bands, base.indent_bands);
+        assert_eq!(theme.muted, 0x123456);
+        assert!(!theme.light);
+        let all = problems.join("\n");
+        for expected in [
+            "\"light\" must be true or false",
+            "unknown key \"extra\"",
+            "colors.background: \"#zzzzzz\" is not a color like \"#rrggbb\"",
+            "colors.text: \"#11223344\" is not a color like \"#rrggbb\"",
+            "colors.bogus: unknown color",
+            "colors.dim: must be a string",
+            "colors.indent_bands: must be a list of 4 colors",
+        ] {
+            assert!(all.contains(expected), "missing {expected:?} in:\n{all}");
+        }
+        assert_eq!(problems.len(), 7, "{all}");
+    }
+
+    #[test]
+    fn unreadable_files_are_skipped_and_reported() {
+        assert!(
+            parse("{not json")
+                .unwrap_err()
+                .starts_with("not valid JSON")
+        );
+        assert!(parse("[1]").is_err());
+        assert!(parse(r#"{"colors": {}}"#).unwrap_err().contains("\"name\""));
+
+        let dir = scratch("broken");
+        std::fs::write(dir.join("broken.json"), "{oops").unwrap();
+        std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
+        let (themes, problems) = load(BUILT_IN, Some(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(themes.len(), BUILT_IN.len());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("broken.json: not valid JSON"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn user_themes_follow_sorted_by_name_and_replace_a_built_in_with_their_name() {
+        let dir = scratch("user");
+        std::fs::write(dir.join("a.json"), r#"{"name": "Zeta"}"#).unwrap();
+        std::fs::write(dir.join("b.json"), r#"{"name": "Alpha"}"#).unwrap();
+        std::fs::write(
+            dir.join("c.json"),
+            r##"{"name": "Zide Light", "colors": {"background": "#ababab"}}"##,
+        )
+        .unwrap();
+        let (themes, problems) = load(BUILT_IN, Some(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            names(&themes),
+            [
+                "Zide Dark",
+                "Zide Light",
+                "Zide Ember",
+                "Zide Fjord",
+                "Zide High Contrast",
+                "Alpha",
+                "Zeta"
+            ]
+        );
+        assert_eq!(themes[1].background, 0xababab);
+        assert!(!themes[1].light);
+    }
+
+    #[test]
+    fn a_missing_user_folder_is_not_a_problem() {
+        let (themes, problems) = load(BUILT_IN, Some(Path::new("/nonexistent/zide/themes")));
+        assert_eq!(themes.len(), BUILT_IN.len());
+        assert!(problems.is_empty());
+    }
 }
