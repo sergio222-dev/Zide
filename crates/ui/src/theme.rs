@@ -220,6 +220,24 @@ const BUILT_IN: &[(&str, &str)] = &[
         "zide-high-contrast.json",
         include_str!("../themes/zide-high-contrast.json"),
     ),
+    (
+        "catppuccin-mocha.json",
+        include_str!("../themes/catppuccin-mocha.json"),
+    ),
+    (
+        "gruvbox-dark.json",
+        include_str!("../themes/gruvbox-dark.json"),
+    ),
+    (
+        "tokyo-night.json",
+        include_str!("../themes/tokyo-night.json"),
+    ),
+    ("nord.json", include_str!("../themes/nord.json")),
+    ("dracula.json", include_str!("../themes/dracula.json")),
+    (
+        "solarized-light.json",
+        include_str!("../themes/solarized-light.json"),
+    ),
 ];
 
 /// The built-in themes, then the `.json` files of `user_dir` (if any) sorted by theme name; a user
@@ -429,7 +447,13 @@ mod tests {
                 "Zide Light",
                 "Zide Ember",
                 "Zide Fjord",
-                "Zide High Contrast"
+                "Zide High Contrast",
+                "Catppuccin Mocha",
+                "Gruvbox Dark",
+                "Tokyo Night",
+                "Nord",
+                "Dracula",
+                "Solarized Light"
             ]
         );
         assert!(themes[1].light);
@@ -536,6 +560,12 @@ mod tests {
                 "Zide Ember",
                 "Zide Fjord",
                 "Zide High Contrast",
+                "Catppuccin Mocha",
+                "Gruvbox Dark",
+                "Tokyo Night",
+                "Nord",
+                "Dracula",
+                "Solarized Light",
                 "Alpha",
                 "Zeta"
             ]
