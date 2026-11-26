@@ -156,11 +156,11 @@ impl Chats {
                 .py_1()
                 .cursor_pointer()
                 .truncate()
-                .text_color(rgb(theme::TEXT))
+                .text_color(rgb(theme::current().text))
                 .bg(rgb(if index == selected {
-                    theme::TREE_SELECTED
+                    theme::current().tree_selected
                 } else {
-                    theme::POPUP
+                    theme::current().popup
                 }))
                 .child(entry.label)
                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -175,8 +175,8 @@ impl Chats {
                 .flex_col()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(theme::CONTROL_BORDER))
-                .bg(rgb(theme::POPUP))
+                .border_color(rgb(theme::current().control_border))
+                .bg(rgb(theme::current().popup))
                 .py_1()
                 .children(rows),
         )

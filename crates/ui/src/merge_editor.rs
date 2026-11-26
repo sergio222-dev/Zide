@@ -279,13 +279,13 @@ fn tint(change: &Change, side: Which) -> Option<u32> {
         Which::Theirs => change.theirs.len(),
     };
     Some(if change.kind == Kind::Conflict {
-        theme::DIFF_CONFLICT
+        theme::current().diff_conflict
     } else if change.base.is_empty() {
-        theme::DIFF_ADDED
+        theme::current().diff_added
     } else if lines == 0 {
-        theme::DIFF_REMOVED
+        theme::current().diff_removed
     } else {
-        theme::DIFF_CHANGED
+        theme::current().diff_changed
     })
 }
 
@@ -326,12 +326,12 @@ fn build_rows(merge: &Merge) -> (Vec<Row>, Vec<usize>) {
                     || change.handling(Which::Theirs) == Handling::Applied
                     || merge.is_edited(index);
                 let mid_tint = if !change.resolved() && change.kind == Kind::Conflict {
-                    Some(theme::DIFF_CONFLICT)
+                    Some(theme::current().diff_conflict)
                 } else if touched {
                     Some(if change.base.is_empty() {
-                        theme::DIFF_ADDED
+                        theme::current().diff_added
                     } else {
-                        theme::DIFF_CHANGED
+                        theme::current().diff_changed
                     })
                 } else {
                     None
@@ -860,10 +860,10 @@ impl Workspace {
                 .items_center()
                 .rounded_sm()
                 .cursor_pointer()
-                .text_color(rgb(theme::MUTED))
+                .text_color(rgb(theme::current().muted))
                 .hover(|d| {
-                    d.bg(rgb(theme::TREE_SELECTED))
-                        .text_color(rgb(theme::STRONG))
+                    d.bg(rgb(theme::current().tree_selected))
+                        .text_color(rgb(theme::current().strong))
                 })
                 .child(glyph)
         };
@@ -875,7 +875,7 @@ impl Workspace {
             .px_2()
             .flex_shrink_0()
             .border_b_1()
-            .border_color(rgb(theme::BORDER))
+            .border_color(rgb(theme::current().border))
             .child(tool("merge-prev", "↑").on_click({
                 let workspace = workspace.clone();
                 move |_, _, cx| edit(&workspace, cx, |editor| editor.step(-1))
@@ -888,7 +888,7 @@ impl Workspace {
                 div()
                     .ml_2()
                     .text_sm()
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::current().muted))
                     .child("Apply non-conflicting changes:"),
             )
             .child(tool("merge-all-yours", "»").on_click({
@@ -915,14 +915,14 @@ impl Workspace {
                 div()
                     .ml_auto()
                     .text_sm()
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::current().muted))
                     .child(editor.summary()),
             );
 
         let name = |text: &str| {
             div()
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(theme::STRONG))
+                .text_color(rgb(theme::current().strong))
                 .child(text.to_string())
         };
         let heading = |side: &str, who: &str| {
@@ -932,7 +932,11 @@ impl Workspace {
                 .gap_1()
                 .px_2()
                 .whitespace_nowrap()
-                .child(div().text_color(rgb(theme::MUTED)).child(side.to_string()))
+                .child(
+                    div()
+                        .text_color(rgb(theme::current().muted))
+                        .child(side.to_string()),
+                )
                 .child(name(who))
         };
         let headings = div()
@@ -950,7 +954,7 @@ impl Workspace {
                     .child(name("Result"))
                     .child(
                         div()
-                            .text_color(rgb(theme::DIM))
+                            .text_color(rgb(theme::current().dim))
                             .child(file_name.to_string()),
                     ),
             )
@@ -998,10 +1002,10 @@ impl Workspace {
                     .size_full()
                     .flex()
                     .flex_col()
-                    .bg(rgb(theme::POPUP))
-                    .text_color(rgb(theme::TEXT))
+                    .bg(rgb(theme::current().popup))
+                    .text_color(rgb(theme::current().text))
                     .border_1()
-                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .border_color(rgb(theme::current().control_border))
                     .rounded_md()
                     .overflow_hidden()
                     .child(toolbar)
@@ -1011,7 +1015,7 @@ impl Workspace {
                             .relative()
                             .flex_1()
                             .min_h_0()
-                            .bg(rgb(theme::BACKGROUND))
+                            .bg(rgb(theme::current().background))
                             .child(list)
                             .child(
                                 // over the list, so the wheel and Shift+wheel reach it anywhere
@@ -1032,7 +1036,7 @@ impl Workspace {
                             .px_3()
                             .flex_shrink_0()
                             .border_t_1()
-                            .border_color(rgb(theme::BORDER))
+                            .border_color(rgb(theme::current().border))
                             .child(
                                 Button::new("merge-accept-left")
                                     .label("Accept Left")
@@ -1129,7 +1133,11 @@ fn row_view(
             .items_center()
             .overflow_hidden()
             .whitespace_nowrap()
-            .text_color(rgb(if cell.dim { theme::DIM } else { theme::TEXT }))
+            .text_color(rgb(if cell.dim {
+                theme::current().dim
+            } else {
+                theme::current().text
+            }))
             .child(
                 div()
                     .flex_shrink_0()
@@ -1145,7 +1153,7 @@ fn row_view(
             .flex()
             .justify_end()
             .px_1()
-            .text_color(rgb(theme::DIM))
+            .text_color(rgb(theme::current().dim))
             .children(cell.number.map(|n| n.to_string()))
     };
     let control = |id: &'static str, glyph: &'static str, side: Which, discard: bool, segment| {
@@ -1156,8 +1164,8 @@ fn row_view(
             .flex()
             .justify_center()
             .cursor_pointer()
-            .text_color(rgb(theme::MUTED))
-            .hover(|d| d.text_color(rgb(theme::STRONG)))
+            .text_color(rgb(theme::current().muted))
+            .hover(|d| d.text_color(rgb(theme::current().strong)))
             .child(glyph)
             .on_click(move |_, _, cx| {
                 workspace.update(cx, |this, cx| {
@@ -1244,7 +1252,7 @@ fn row_view(
             pane(row.mid.tint)
                 .border_l_1()
                 .border_r_1()
-                .border_color(rgb(theme::BORDER))
+                .border_color(rgb(theme::current().border))
                 .when(row.mid_at.is_some(), |d| d.cursor_text())
                 .child(number(&row.mid, NUMBER))
                 .child(
@@ -1269,7 +1277,7 @@ fn row_view(
                                     .top_0()
                                     .h_full()
                                     .w(px(2.))
-                                    .bg(rgb(theme::CARET_BAR)),
+                                    .bg(rgb(theme::current().caret_bar)),
                             )
                         }),
                 )
@@ -1324,8 +1332,8 @@ mod tests {
         assert_eq!(texts(&editor), [("C".into(), "A".into(), "B".into())]);
         let row = &editor.rows[0];
         assert_eq!(row.start_of, Some((0, true, true)));
-        assert_eq!(row.left.tint, Some(theme::DIFF_CONFLICT));
-        assert_eq!(row.mid.tint, Some(theme::DIFF_CONFLICT));
+        assert_eq!(row.left.tint, Some(theme::current().diff_conflict));
+        assert_eq!(row.mid.tint, Some(theme::current().diff_conflict));
         assert_eq!(editor.summary(), "No changes. 1 conflict.");
         assert!(!editor.can_apply());
     }
@@ -1368,10 +1376,13 @@ mod tests {
             .iter()
             .map(|r| (r.left.tint, r.right.tint))
             .collect();
-        assert_eq!(tints[1], (Some(theme::DIFF_ADDED), None));
-        assert_eq!(tints[3], (None, Some(theme::DIFF_REMOVED)));
+        assert_eq!(tints[1], (Some(theme::current().diff_added), None));
+        assert_eq!(tints[3], (None, Some(theme::current().diff_removed)));
         let editor = self::editor("a\nb\n", "a\nB\n", "a\nb\n");
-        assert_eq!(editor.rows[1].left.tint, Some(theme::DIFF_CHANGED));
+        assert_eq!(
+            editor.rows[1].left.tint,
+            Some(theme::current().diff_changed)
+        );
     }
 
     #[::core::prelude::v1::test]
@@ -1450,12 +1461,15 @@ mod tests {
         // still a conflict: red, with the arrows of both sides
         assert!(!editor.can_apply());
         assert_eq!(editor.rows[1].mid.text, "my own A");
-        assert_eq!(editor.rows[1].mid.tint, Some(theme::DIFF_CONFLICT));
+        assert_eq!(
+            editor.rows[1].mid.tint,
+            Some(theme::current().diff_conflict)
+        );
         assert_eq!(editor.rows[1].start_of, Some((1, true, true)));
         editor.discard(1, Which::Yours);
         editor.discard(1, Which::Theirs);
         assert!(editor.can_apply());
-        assert_eq!(editor.rows[1].mid.tint, Some(theme::DIFF_CHANGED));
+        assert_eq!(editor.rows[1].mid.tint, Some(theme::current().diff_changed));
         // two keys typed in a row are one step
         editor.undo();
         editor.undo();

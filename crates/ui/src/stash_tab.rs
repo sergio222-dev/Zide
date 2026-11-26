@@ -294,9 +294,9 @@ impl Workspace {
         let none = stashes.is_empty();
         let drop_label = if tab.drop_armed { "Sure?" } else { "Drop" };
         let highlight = if focused {
-            theme::TREE_FOCUSED
+            theme::current().tree_focused
         } else {
-            theme::TREE_SELECTED
+            theme::current().tree_selected
         };
 
         let list = div()
@@ -329,13 +329,18 @@ impl Workspace {
                             div()
                                 .flex_shrink_0()
                                 .text_xs()
-                                .text_color(rgb(theme::DIM))
+                                .text_color(rgb(theme::current().dim))
                                 .child(format!("⎇ {}", stash.branch)),
                         )
                     })
             }))
             .when(none, |d| {
-                d.child(div().p_2().text_color(rgb(theme::DIM)).child("No stashes"))
+                d.child(
+                    div()
+                        .p_2()
+                        .text_color(rgb(theme::current().dim))
+                        .child("No stashes"),
+                )
             });
 
         let files = uniform_list("stash-files", rows.len(), {
@@ -415,12 +420,12 @@ impl Workspace {
                                     .flex_shrink_0()
                                     .text_color(rgb(match row.kind {
                                         RowKind::File(kind) => kind_color(kind),
-                                        _ => theme::TEXT,
+                                        _ => theme::current().text,
                                     }))
                                     .child(name),
                             )
                             .when(foldable, |d| {
-                                d.child(div().text_color(rgb(theme::DIM)).child(format!(
+                                d.child(div().text_color(rgb(theme::current().dim)).child(format!(
                                     "{} file{}",
                                     row.count,
                                     if row.count == 1 { "" } else { "s" }
@@ -443,9 +448,9 @@ impl Workspace {
             .w(px(340.))
             .h_full()
             .border_r_1()
-            .border_color(rgb(theme::BORDER))
-            .bg(rgb(theme::BACKGROUND))
-            .text_color(rgb(theme::TEXT))
+            .border_color(rgb(theme::current().border))
+            .bg(rgb(theme::current().background))
+            .text_color(rgb(theme::current().text))
             .child(panel_tabs(&workspace, PanelTab::Stash))
             .child(list)
             .child(
@@ -454,7 +459,7 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .border_t_1()
-                    .border_color(rgb(theme::BORDER))
+                    .border_color(rgb(theme::current().border))
                     .child(files)
                     .child(Scrollbar::new(&files_scroll)),
             )
@@ -464,7 +469,7 @@ impl Workspace {
                     .gap_2()
                     .p_2()
                     .border_t_1()
-                    .border_color(rgb(theme::BORDER))
+                    .border_color(rgb(theme::current().border))
                     .child(
                         Button::new("stash-apply")
                             .primary()
@@ -506,7 +511,7 @@ impl Workspace {
                 div()
                     .px_2()
                     .text_xs()
-                    .text_color(rgb(theme::DIM))
+                    .text_color(rgb(theme::current().dim))
                     .child("j/k: stash · a: apply · p: pop · Esc: editor"),
             )
     }

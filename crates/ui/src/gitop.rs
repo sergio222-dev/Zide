@@ -502,13 +502,13 @@ impl Workspace {
             .flex_shrink_0()
             .rounded_md()
             .border_1()
-            .border_color(rgb(theme::CONTROL_BORDER))
-            .text_color(rgb(theme::MUTED))
+            .border_color(rgb(theme::current().control_border))
+            .text_color(rgb(theme::current().muted))
             .child(op.command());
         let body = match &dialog.targets {
             Targets::Loading => note("Reading the branches", true).into_any_element(),
             Targets::Failed(why) => note(why.clone(), false)
-                .text_color(rgb(theme::ERROR))
+                .text_color(rgb(theme::current().error))
                 .into_any_element(),
             _ => {
                 let mut rows = div().flex().flex_col().gap_2();
@@ -534,7 +534,7 @@ impl Workspace {
                                     .w(px(110.))
                                     .flex_shrink_0()
                                     .text_sm()
-                                    .text_color(rgb(theme::MUTED))
+                                    .text_color(rgb(theme::current().muted))
                                     .child("Branch to rebase"),
                             )
                             .child(div().flex_1().child(field(
@@ -559,8 +559,8 @@ impl Workspace {
                 .px_3()
                 .h(px(28.))
                 .rounded_full()
-                .bg(rgb(theme::SELECTION))
-                .text_color(rgb(theme::STRONG))
+                .bg(rgb(theme::current().selection))
+                .text_color(rgb(theme::current().strong))
                 .child(if chosen.flag.is_empty() {
                     "another branch"
                 } else {
@@ -570,8 +570,8 @@ impl Workspace {
                     div()
                         .id(SharedString::from(format!("op-chip-{id}")))
                         .cursor_pointer()
-                        .text_color(rgb(theme::MUTED))
-                        .hover(|d| d.text_color(rgb(theme::STRONG)))
+                        .text_color(rgb(theme::current().muted))
+                        .hover(|d| d.text_color(rgb(theme::current().strong)))
                         .child("×")
                         .on_click(move |_, window, cx| {
                             workspace.update(cx, |this, cx| this.toggle_git_option(id, window, cx))
@@ -612,10 +612,10 @@ impl Workspace {
                     .self_start()
                     .gap_3()
                     .p_3()
-                    .bg(rgb(theme::POPUP))
-                    .text_color(rgb(theme::TEXT))
+                    .bg(rgb(theme::current().popup))
+                    .text_color(rgb(theme::current().text))
                     .border_1()
-                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .border_color(rgb(theme::current().control_border))
                     .rounded_md()
                     .child(body)
                     .when(!dialog.chosen.is_empty(), |d| {
@@ -632,7 +632,7 @@ impl Workspace {
                                         .w(px(110.))
                                         .flex_shrink_0()
                                         .text_sm()
-                                        .text_color(rgb(theme::MUTED))
+                                        .text_color(rgb(theme::current().muted))
                                         .child(flag),
                                 )
                                 .child(div().flex_1().child(Input::new(&input))),
@@ -654,7 +654,7 @@ impl Workspace {
                                                 cx.stop_propagation()
                                             })
                                             .text_sm()
-                                            .text_color(rgb(theme::ICON_CODE))
+                                            .text_color(rgb(theme::current().icon_code))
                                             .child("Modify options ⌄")
                                             .on_click(move |_, _, cx| {
                                                 menu_toggle.update(cx, |this, cx| {
@@ -717,11 +717,17 @@ fn options_menu(
             .px_3()
             .h(px(ROW_HEIGHT))
             .text_sm()
-            .text_color(rgb(if dimmed { theme::DIM } else { theme::TEXT }))
-            .when(row == highlighted, |d| d.bg(rgb(theme::ACTIVE_BG)))
+            .text_color(rgb(if dimmed {
+                theme::current().dim
+            } else {
+                theme::current().text
+            }))
+            .when(row == highlighted, |d| {
+                d.bg(rgb(theme::current().active_bg))
+            })
             .when(!dimmed, |d| {
                 d.cursor_pointer()
-                    .hover(|d| d.bg(rgb(theme::SELECTION)))
+                    .hover(|d| d.bg(rgb(theme::current().selection)))
                     .on_click(move |_, window, cx| {
                         workspace.update(cx, |this, cx| this.toggle_git_option(id, window, cx))
                     })
@@ -733,7 +739,11 @@ fn options_menu(
                     .child(if chosen { "✓" } else { "" }),
             )
             .child(div().flex_1().whitespace_nowrap().child(option.help))
-            .child(div().text_color(rgb(theme::DIM)).child(option.flag))
+            .child(
+                div()
+                    .text_color(rgb(theme::current().dim))
+                    .child(option.flag),
+            )
     });
     div()
         .id("git-op-menu")
@@ -746,9 +756,9 @@ fn options_menu(
         .py_1()
         .flex()
         .flex_col()
-        .bg(rgb(theme::POPUP))
+        .bg(rgb(theme::current().popup))
         .border_1()
-        .border_color(rgb(theme::CONTROL_BORDER))
+        .border_color(rgb(theme::current().control_border))
         .rounded_md()
         .child(
             div()
@@ -757,7 +767,7 @@ fn options_menu(
                 .items_center()
                 .justify_center()
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(theme::STRONG))
+                .text_color(rgb(theme::current().strong))
                 .child(format!("Add {} Options", dialog.op.title())),
         )
         .children(rows)
@@ -770,8 +780,12 @@ fn note(text: impl Into<SharedString>, loading: bool) -> Div {
         .items_center()
         .gap_2()
         .text_sm()
-        .text_color(rgb(theme::MUTED))
-        .children(loading.then(|| Spinner::new().small().color(rgb(theme::MUTED).into())))
+        .text_color(rgb(theme::current().muted))
+        .children(loading.then(|| {
+            Spinner::new()
+                .small()
+                .color(rgb(theme::current().muted).into())
+        }))
         .child(text.into())
 }
 
@@ -801,11 +815,11 @@ fn field(dialog: &OpDialog, which: Field, width: f32, workspace: &Entity<Workspa
                 .rounded_md()
                 .border_1()
                 .border_color(rgb(if focused {
-                    theme::ACTIVE_BORDER
+                    theme::current().active_border
                 } else {
-                    theme::CONTROL_BORDER
+                    theme::current().control_border
                 }))
-                .text_color(rgb(theme::STRONG))
+                .text_color(rgb(theme::current().strong))
                 .child(
                     div()
                         .truncate()
@@ -815,7 +829,7 @@ fn field(dialog: &OpDialog, which: Field, width: f32, workspace: &Entity<Workspa
                             dialog.value(which).to_string()
                         }),
                 )
-                .child(div().text_color(rgb(theme::DIM)).child("⌄"))
+                .child(div().text_color(rgb(theme::current().dim)).child("⌄"))
                 .on_click(move |_, _, cx| {
                     toggle.update(cx, |this, cx| {
                         if let Some(dialog) = this.overlay.git_op_mut() {
@@ -837,8 +851,10 @@ fn field(dialog: &OpDialog, which: Field, width: f32, workspace: &Entity<Workspa
                     .flex_shrink_0()
                     .cursor_pointer()
                     .whitespace_nowrap()
-                    .when(row == highlighted, |d| d.bg(rgb(theme::ACTIVE_BG)))
-                    .hover(|d| d.bg(rgb(theme::SELECTION)))
+                    .when(row == highlighted, |d| {
+                        d.bg(rgb(theme::current().active_bg))
+                    })
+                    .hover(|d| d.bg(rgb(theme::current().selection)))
                     .child(item.clone())
                     .on_click(move |_, _, cx| {
                         pick.update(cx, |this, cx| {
@@ -865,9 +881,9 @@ fn field(dialog: &OpDialog, which: Field, width: f32, workspace: &Entity<Workspa
                     .w_full()
                     .max_h(px(ROW_HEIGHT * LIST_ROWS))
                     .overflow_y_scroll()
-                    .bg(rgb(theme::POPUP))
+                    .bg(rgb(theme::current().popup))
                     .border_1()
-                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .border_color(rgb(theme::current().control_border))
                     .rounded_md()
                     .children(rows),
             ))

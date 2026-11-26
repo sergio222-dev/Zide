@@ -160,6 +160,8 @@ enum Tab {
     Recent,
     /// Projects opened before, from the Actions tab; not part of the Tab cycle.
     Projects,
+    /// The color themes, from the Actions tab (the Theme command); not part of the Tab cycle.
+    Themes,
 }
 
 impl Tab {
@@ -168,7 +170,7 @@ impl Tab {
             Tab::Files => Tab::Symbols,
             Tab::Symbols => Tab::Text,
             Tab::Text => Tab::Actions,
-            Tab::Actions | Tab::Recent | Tab::Projects => Tab::Files,
+            Tab::Actions | Tab::Recent | Tab::Projects | Tab::Themes => Tab::Files,
         }
     }
 }
@@ -580,6 +582,23 @@ fn action_registry() -> Vec<ActionDef> {
             run: |ws, _, cx| ws.show_tab(Tab::Projects, cx),
         },
         ActionDef {
+            name: "Theme",
+            synonyms: &[
+                "color scheme",
+                "colors",
+                "colour",
+                "dark",
+                "light",
+                "appearance",
+                "themes",
+            ],
+            action: None,
+            closes_popup: false,
+            only_when_conflicted: false,
+            state: None,
+            run: |ws, _, cx| ws.show_tab(Tab::Themes, cx),
+        },
+        ActionDef {
             name: "Close Project",
             synonyms: &[
                 "close folder",
@@ -631,6 +650,17 @@ fn action_registry() -> Vec<ActionDef> {
     ]
 }
 
+/// What Find Action searches: the name and synonyms of each command of `registry`.
+fn action_texts(registry: &[ActionDef]) -> Vec<ActionText> {
+    registry
+        .iter()
+        .map(|def| ActionText {
+            name: def.name.to_string(),
+            synonyms: def.synonyms.iter().map(|s| s.to_string()).collect(),
+        })
+        .collect()
+}
+
 /// The find / replace bar of the editor (not a popup: it lives in the window layout).
 struct FindPanel {
     find: Entity<InputState>,
@@ -658,6 +688,10 @@ struct Popup {
     actions: Arc<Vec<ActionHit>>,
     /// The Projects rows: the projects opened before that match the query.
     projects: Arc<Vec<PathBuf>>,
+    /// The Themes rows: the themes whose name matches the query.
+    themes: Arc<Vec<&'static theme::Theme>>,
+    /// While the Themes tab shows the selected theme: the one to go back to.
+    preview: ThemePreview,
     /// Draws the Actions rows; the query, matching and selection stay Zide's.
     commands: Entity<CommandState>,
     symbols: Arc<Vec<SymbolHit>>,
@@ -678,6 +712,7 @@ impl Popup {
             Tab::Actions => self.actions.len(),
             Tab::Recent => self.files.len(),
             Tab::Projects => self.projects.len(),
+            Tab::Themes => self.themes.len(),
         }
     }
 
@@ -978,13 +1013,7 @@ impl Workspace {
             stub_source: None,
             _watcher: None,
             symbols: None,
-            action_texts: registry
-                .iter()
-                .map(|def| ActionText {
-                    name: def.name.to_string(),
-                    synonyms: def.synonyms.iter().map(|s| s.to_string()).collect(),
-                })
-                .collect(),
+            action_texts: action_texts(&registry),
             registry: std::rc::Rc::new(registry),
             window: window.window_handle(),
             busy: Vec::new(),
@@ -1221,6 +1250,7 @@ impl Workspace {
     }
 
     fn open_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_theme_preview(cx);
         self.autosave(cx);
         self.refresh_commit(cx); // what git says now, for the actions that depend on it
         self.overlay.clear();
@@ -1263,6 +1293,8 @@ impl Workspace {
             note: String::new(),
             actions: Arc::default(),
             projects: Arc::default(),
+            themes: Arc::default(),
+            preview: ThemePreview::default(),
             commands,
             symbols: Arc::default(),
             options: TextOptions::default(),
@@ -2304,8 +2336,8 @@ impl Workspace {
                     let row = &rows[index];
                     let workspace = workspace.clone();
                     let background = match (selected == Some(index), focused) {
-                        (true, true) => Some(theme::TREE_FOCUSED),
-                        (true, false) => Some(theme::TREE_SELECTED),
+                        (true, true) => Some(theme::current().tree_focused),
+                        (true, false) => Some(theme::current().tree_selected),
                         _ => None,
                     };
                     let line = div()
@@ -2366,10 +2398,10 @@ impl Workspace {
                 .id(id)
                 .p_1()
                 .rounded(px(3.))
-                .text_color(rgb(theme::MUTED))
+                .text_color(rgb(theme::current().muted))
                 .hover(|d| {
-                    d.bg(rgb(theme::TREE_SELECTED))
-                        .text_color(rgb(theme::STRONG))
+                    d.bg(rgb(theme::current().tree_selected))
+                        .text_color(rgb(theme::current().strong))
                 })
                 .child(Icon::new(icon).size_4())
         };
@@ -2381,9 +2413,9 @@ impl Workspace {
             .w(px(TREE_WIDTH))
             .h_full()
             .border_r_1()
-            .border_color(rgb(theme::BORDER))
-            .bg(rgb(theme::BACKGROUND))
-            .text_color(rgb(theme::TEXT))
+            .border_color(rgb(theme::current().border))
+            .bg(rgb(theme::current().background))
+            .text_color(rgb(theme::current().text))
             .child(
                 div()
                     .flex()
@@ -2918,11 +2950,52 @@ impl Workspace {
     }
 
     fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        if tab != Tab::Themes {
+            self.end_theme_preview(cx);
+        }
         if let Some(popup) = &mut self.popup {
+            if tab == Tab::Themes {
+                popup.preview.begin(theme::current());
+            }
             popup.tab = tab;
             popup.selected = 0;
         }
         self.search_again(cx);
+    }
+
+    /// Shows the theme of the selected Themes row, at once.
+    fn preview_theme(&mut self, cx: &mut Context<Self>) {
+        let Some(popup) = self.popup.as_ref().filter(|p| p.tab == Tab::Themes) else {
+            return;
+        };
+        if let Some(&chosen) = popup.themes.get(popup.selected)
+            && !std::ptr::eq(chosen, theme::current())
+        {
+            apply_theme(chosen, cx);
+        }
+    }
+
+    /// Goes back to the theme in use before the Themes tab showed others (Esc, or the popup
+    /// closing or leaving the tab without Enter).
+    fn end_theme_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(before) = self.popup.as_mut().and_then(|p| p.preview.cancel()) {
+            apply_theme(before, cx);
+        }
+    }
+
+    /// Enter on the Themes tab: keeps the theme shown and saves it in the settings.
+    fn keep_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview_theme(cx);
+        if let Some(popup) = &mut self.popup {
+            popup.preview.keep();
+        }
+        self.close_popup(window, cx);
+        if let Err(why) = settings::set_theme(&theme::current().name) {
+            self.notify(
+                Notification::warning(why).title("Could not save the theme"),
+                cx,
+            );
+        }
     }
 
     /// Flips a text option from the Actions tab: shows the Text tab and clears the query typed
@@ -2938,6 +3011,9 @@ impl Workspace {
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.as_ref().is_some_and(|p| p.tab == Tab::Actions) {
             return self.run_selected_action(window, cx);
+        }
+        if self.popup.as_ref().is_some_and(|p| p.tab == Tab::Themes) {
+            return self.keep_theme(window, cx);
         }
         if let Some(popup) = self.popup.as_ref().filter(|p| p.tab == Tab::Projects) {
             if let Some(project) = popup.projects.get(popup.selected).cloned() {
@@ -2962,7 +3038,7 @@ impl Workspace {
                 let symbol = self.symbols.as_ref()?.symbol(hit.entry);
                 Some((symbol.file, Some(symbol.node.line)))
             }),
-            Tab::Actions | Tab::Projects => None,
+            Tab::Actions | Tab::Projects | Tab::Themes => None,
         };
         if let Some((file, line)) = target {
             let path = index.paths()[file].clone();
@@ -3178,6 +3254,7 @@ impl Workspace {
         if self.overlay.merging() {
             return;
         }
+        self.end_theme_preview(cx);
         self.popup = None;
         self.cancel_running_search();
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search for branches"));
@@ -3610,6 +3687,7 @@ impl Workspace {
     }
 
     fn close_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_theme_preview(cx);
         self.cancel_running_search();
         self.popup = None;
         self.focus.focus(window, cx);
@@ -3632,6 +3710,13 @@ impl Workspace {
             // a short list read from disk: matched here, and it does not wait for the index
             popup.projects = Arc::new(matching_projects(&self.root, &popup.query));
             popup.select(0);
+            return cx.notify();
+        }
+        if let Some(popup) = self.popup.as_mut().filter(|p| p.tab == Tab::Themes) {
+            // the theme shown stays selected while it matches what is typed
+            popup.themes = Arc::new(matching_themes(theme::all(), &popup.query));
+            popup.select(theme_row(&popup.themes, theme::current()));
+            self.preview_theme(cx);
             return cx.notify();
         }
         let (Some(popup), Some(index)) = (&mut self.popup, self.index.clone()) else {
@@ -3708,7 +3793,7 @@ impl Workspace {
                     self.search_symbols(query, symbols, generation, cancel, cx);
                 }
             }
-            Tab::Projects => {}
+            Tab::Projects | Tab::Themes => {}
             Tab::Actions => {
                 let conflicted = self.git.has_conflicts();
                 let hits = search_actions(&self.action_texts, &query, usize::MAX);
@@ -3898,6 +3983,7 @@ impl Workspace {
             (_, Tab::Actions) => format!("{} actions", popup.actions.len()),
             (_, Tab::Recent) => format!("{} recent files", popup.files.len()),
             (_, Tab::Projects) => format!("{} recent projects", popup.projects.len()),
+            (_, Tab::Themes) => format!("{} themes", popup.themes.len()),
             (None, _) => format!("Indexing {}…", self.root.display()),
             (Some(_), Tab::Symbols) => match &self.symbols {
                 None => "Indexing symbols…".into(),
@@ -3929,7 +4015,7 @@ impl Render for Workspace {
                 .rounded_sm()
                 .bg(rgba(0x000000b0))
                 .text_xs()
-                .text_color(rgb(theme::STRONG))
+                .text_color(rgb(theme::current().strong))
                 .child(meter.label()),
         )
     }
@@ -3949,7 +4035,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(theme::BACKGROUND))
+            .bg(rgb(theme::current().background))
             .key_context("Workspace")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| {
@@ -4128,6 +4214,7 @@ impl Workspace {
                     "enter" => this.open_selected(window, cx),
                     _ => return,
                 }
+                this.preview_theme(cx);
                 cx.stop_propagation();
                 cx.notify();
             }))
@@ -4158,7 +4245,7 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .h_full()
-                                .text_color(rgb(theme::TEXT))
+                                .text_color(rgb(theme::current().text))
                                 .children(self.find_panel(cx))
                                 .child(viewer.render(
                                     std::rc::Rc::new({
@@ -4215,7 +4302,7 @@ impl Workspace {
                                         this.zoom(event, window, cx);
                                     }
                                 })),
-                            None => div().flex_1().p_4().text_color(rgb(theme::DIM)).child(
+                            None => div().flex_1().p_4().text_color(rgb(theme::current().dim)).child(
                                 "Press Space twice to open the popup. Alt+1 shows the project tree.",
                             ),
                         })
@@ -4226,7 +4313,7 @@ impl Workspace {
                                 .h_full()
                                 .p_4()
                                 .border_l_1()
-                                .border_color(rgb(theme::BORDER))
+                                .border_color(rgb(theme::current().border))
                                 .child(view)
                         }))
                         .into_any_element()
@@ -4302,6 +4389,7 @@ impl Workspace {
         let selected = popup.selected;
         let rows = match (popup.tab, &self.index) {
             (Tab::Projects, _) => Some(project_items(&popup.projects)),
+            (Tab::Themes, _) => Some(theme_items(&popup.themes)),
             (Tab::Actions, _) => Some(action_items(&popup.actions, &self.registry, self)),
             (Tab::Files | Tab::Recent, Some(index)) => Some(file_items(index, &popup.files)),
             (Tab::Text, Some(index)) => Some(text_items(index, &popup.text)),
@@ -4357,7 +4445,7 @@ impl Workspace {
                 .px_3()
                 .py_1()
                 .border_b_1()
-                .border_color(rgb(theme::CONTROL_BORDER))
+                .border_color(rgb(theme::current().control_border))
                 .child(
                     div()
                         .flex()
@@ -4367,7 +4455,11 @@ impl Workspace {
                         .child(
                             div()
                                 .min_w(px(90.))
-                                .text_color(rgb(if failed { theme::ERROR } else { theme::MUTED }))
+                                .text_color(rgb(if failed {
+                                    theme::current().error
+                                } else {
+                                    theme::current().muted
+                                }))
                                 .child(summary),
                         )
                         .child(
@@ -4429,13 +4521,13 @@ fn small_button(id: &'static str, label: &'static str, on: bool) -> Stateful<Div
         .px_2()
         .rounded_sm()
         .border_1()
-        .border_color(rgb(theme::CONTROL_BORDER))
+        .border_color(rgb(theme::current().control_border))
         .cursor_pointer()
         .child(label);
     if on {
         button
-            .bg(rgb(theme::ACTIVE_BG))
-            .border_color(rgb(theme::ACTIVE_BORDER))
+            .bg(rgb(theme::current().active_bg))
+            .border_color(rgb(theme::current().active_border))
     } else {
         button
     }
@@ -4538,13 +4630,19 @@ fn command_list(
         .searchable(false)
         .bordered(false)
         .max_h(px(320.))
-        .empty(|_, _, _| div().p_3().text_color(rgb(theme::DIM)).child("No results"))
+        .empty(|_, _, _| {
+            div()
+                .p_3()
+                .text_color(rgb(theme::current().dim))
+                .child("No results")
+        })
         .on_select(move |path, _, cx| {
             hovered.update(cx, |this, cx| {
                 if let Some(popup) = this.popup.as_mut().filter(|p| p.tab == tab)
                     && popup.selected != path.row
                 {
                     popup.selected = path.row;
+                    this.preview_theme(cx);
                     cx.notify();
                 }
             });
@@ -4584,7 +4682,7 @@ fn action_items(
                     .child(
                         div()
                             .ml_auto()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::current().muted))
                             .child(shortcut),
                     )
                     .children(on.map(|on| {
@@ -4627,12 +4725,73 @@ fn project_items(projects: &[PathBuf]) -> Vec<CommandItem> {
                 div().flex().flex_1().gap_2().child(title.clone()).child(
                     div()
                         .ml_auto()
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::current().muted))
                         .child(location.clone()),
                 )
             })
         })
         .collect()
+}
+
+/// The themes whose name holds every word of `query`, in the order `all` gives them.
+fn matching_themes(all: &[&'static theme::Theme], query: &str) -> Vec<&'static theme::Theme> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    all.iter()
+        .copied()
+        .filter(|theme| {
+            let name = theme.name.to_lowercase();
+            words.iter().all(|word| name.contains(word))
+        })
+        .collect()
+}
+
+/// The row of `shown` among `themes`; the first when it is not there.
+fn theme_row(themes: &[&'static theme::Theme], shown: &theme::Theme) -> usize {
+    themes
+        .iter()
+        .position(|theme| std::ptr::eq(*theme, shown) || theme.name == shown.name)
+        .unwrap_or(0)
+}
+
+fn theme_items(themes: &[&'static theme::Theme]) -> Vec<CommandItem> {
+    themes
+        .iter()
+        .map(|theme| {
+            let name = theme.name.clone();
+            let kind = if theme.light { "Light" } else { "Dark" };
+            CommandItem::new().child(move |_, _| {
+                div().flex().flex_1().gap_2().child(name.clone()).child(
+                    div()
+                        .ml_auto()
+                        .text_color(rgb(theme::current().muted))
+                        .child(kind),
+                )
+            })
+        })
+        .collect()
+}
+
+/// The theme to go back to while the Themes tab previews others. Escape (or the popup closing)
+/// takes it back; Enter forgets it, keeping the theme shown.
+#[derive(Default)]
+struct ThemePreview {
+    before: Option<&'static theme::Theme>,
+}
+
+impl ThemePreview {
+    /// The Themes tab opens with `current` in use; showing it again keeps the first one.
+    fn begin(&mut self, current: &'static theme::Theme) {
+        self.before.get_or_insert(current);
+    }
+
+    /// The theme to restore, once; none after `keep` or without a preview.
+    fn cancel(&mut self) -> Option<&'static theme::Theme> {
+        self.before.take()
+    }
+
+    fn keep(&mut self) {
+        self.before = None;
+    }
 }
 
 fn file_items(index: &FileIndex, hits: &[FileHit]) -> Vec<CommandItem> {
@@ -4669,14 +4828,14 @@ fn symbol_items(index: &FileIndex, symbols: &StubStore, hits: &[SymbolHit]) -> V
                         div()
                             .flex_shrink_0()
                             .w(px(64.))
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::current().muted))
                             .child(kind),
                     )
                     .child(highlighted(name.clone(), ranges.clone()))
                     .child(
                         div()
                             .ml_auto()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::current().muted))
                             .child(place.clone()),
                     )
             })
@@ -4729,7 +4888,7 @@ fn text_items(index: &FileIndex, hits: &[TextHit]) -> Vec<CommandItem> {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::current().muted))
                             .child(place.clone()),
                     )
                     .child(highlighted_bytes(text.clone(), ranges.clone()))
@@ -4739,7 +4898,7 @@ fn text_items(index: &FileIndex, hits: &[TextHit]) -> Vec<CommandItem> {
 }
 
 const HIGHLIGHT: fn() -> HighlightStyle = || HighlightStyle {
-    color: Some(rgb(theme::ACTIVE_BORDER).into()),
+    color: Some(rgb(theme::current().active_border).into()),
     font_weight: Some(FontWeight::BOLD),
     ..Default::default()
 };
@@ -4778,12 +4937,12 @@ fn chip(
         .px_1()
         .rounded_sm()
         .border_1()
-        .border_color(rgb(theme::CONTROL_BORDER))
+        .border_color(rgb(theme::current().control_border))
         .cursor_pointer()
         .child(label);
     let chip = if on {
-        chip.bg(rgb(theme::ACTIVE_BG))
-            .border_color(rgb(theme::ACTIVE_BORDER))
+        chip.bg(rgb(theme::current().active_bg))
+            .border_color(rgb(theme::current().active_border))
     } else {
         chip
     };
@@ -4800,7 +4959,8 @@ fn popup_frame(
     let tab_label = |label: &'static str, this: Tab| {
         let item = div().px_2().rounded_sm().child(label);
         if tab == this {
-            item.bg(rgb(theme::ACTIVE_BG)).font_weight(FontWeight::BOLD)
+            item.bg(rgb(theme::current().active_bg))
+                .font_weight(FontWeight::BOLD)
         } else {
             item
         }
@@ -4815,9 +4975,9 @@ fn popup_frame(
         .gap_2()
         .flex()
         .flex_col()
-        .bg(rgb(theme::POPUP))
+        .bg(rgb(theme::current().popup))
         .border_1()
-        .border_color(rgb(theme::CONTROL_BORDER))
+        .border_color(rgb(theme::current().control_border))
         .rounded_md()
         .child(
             div()
@@ -4827,6 +4987,7 @@ fn popup_frame(
                 .children(
                     (tab == Tab::Projects).then(|| tab_label("Recent projects", Tab::Projects)),
                 )
+                .children((tab == Tab::Themes).then(|| tab_label("Themes", Tab::Themes)))
                 .child(tab_label("Files", Tab::Files))
                 .child(tab_label("Symbols", Tab::Symbols))
                 .child(tab_label("Text", Tab::Text))
@@ -4835,7 +4996,12 @@ fn popup_frame(
         )
         .child(Input::new(input))
         .children(filters)
-        .child(div().text_xs().text_color(rgb(theme::MUTED)).child(status))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::current().muted))
+                .child(status),
+        )
 }
 
 /// The window's content: the welcome screen until a project is opened, then its workspace.
@@ -5187,26 +5353,68 @@ impl Render for Shell {
 /// The bar at the bottom of the window: one `text_xs` line, its padding and its border.
 const STATUS_BAR_HEIGHT: Pixels = px(26.);
 
+/// Makes `theme` the one in use, in Zide's views and in gpui-kit's components, and repaints.
+fn apply_theme(theme: &'static theme::Theme, cx: &mut App) {
+    theme::set(theme);
+    apply_palette(cx);
+}
+
 fn apply_palette(cx: &mut App) {
+    use gpui_kit::component::{Theme as Kit, ThemeMode};
+    let mode = if theme::current().light {
+        ThemeMode::Light
+    } else {
+        ThemeMode::Dark
+    };
+    // `change` reloads the kit's own colors for the mode, and with them its fonts: the UI font
+    // Zide picked (fonts::apply) is put back over them
+    let font_family = cx
+        .has_global::<Kit>()
+        .then(|| cx.global::<Kit>().font_family.clone());
+    Kit::change(mode, None, cx);
     // `update` (not `global_mut`) keeps the theme's tokens in step: the dialogs paint their
     // surface from them
-    gpui_kit::component::Theme::update(cx, |theme| {
+    Kit::update(cx, |theme| {
+        if let Some(font_family) = font_family {
+            theme.font_family = font_family;
+        }
         // toasts stack from the bottom right: keep them above the status bar
         theme.notification.margins.bottom = STATUS_BAR_HEIGHT + px(16.);
         let colors = &mut theme.colors;
         // background and text
-        colors.popover = rgb(theme::POPUP).into();
-        colors.popover_foreground = rgb(theme::TEXT).into();
+        colors.popover = rgb(theme::current().popup).into();
+        colors.popover_foreground = rgb(theme::current().text).into();
         // the selected row, like the active tab chip
-        colors.accent = rgb(theme::ACTIVE_BG).into();
-        colors.accent_foreground = rgb(theme::STRONG).into();
+        colors.accent = rgb(theme::current().active_bg).into();
+        colors.accent_foreground = rgb(theme::current().strong).into();
         // the diff dialog: the editor's background, with Zide's green and red for what changed
-        colors.background = rgb(theme::BACKGROUND).into();
-        colors.success = rgb(theme::OK).into();
-        colors.danger = rgb(theme::ERROR).into();
+        colors.background = rgb(theme::current().background).into();
+        colors.success = rgb(theme::current().ok).into();
+        colors.danger = rgb(theme::current().error).into();
         // shortcuts, paths, hints
-        colors.muted_foreground = rgb(theme::MUTED).into();
+        colors.muted_foreground = rgb(theme::current().muted).into();
+        // text and lines of the dialogs, the selects and the notifications, over the surfaces
+        // above: the kit's own would not match a theme's background
+        colors.foreground = rgb(theme::current().text).into();
+        colors.border = rgb(theme::current().border).into();
+        colors.input = rgb(theme::current().control_border).into();
+        colors.caret = rgb(theme::current().caret_bar).into();
     });
+}
+
+/// Makes the theme saved as `saved` the one in use. Returns what to tell the user: a saved name
+/// no theme has (the default is kept) and what was wrong in the theme files.
+fn use_saved_theme(saved: Option<&str>) -> Vec<String> {
+    let mut problems = theme::problems();
+    if let Some(name) = saved {
+        match theme::find(name) {
+            Some(chosen) => theme::set(chosen),
+            None => problems.push(format!(
+                "No theme is called \"{name}\" (settings.json); the default is used."
+            )),
+        }
+    }
+    problems
 }
 
 fn main() {
@@ -5224,9 +5432,9 @@ fn main() {
     let app = gpui_kit::application().with_assets(file_icon::AppAssets);
     app.run(move |cx| {
         gpui_kit::init(cx);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
-        apply_palette(cx);
         settings::apply();
+        let theme_problems = use_saved_theme(settings::theme().as_deref());
+        apply_palette(cx);
         fonts::apply(cx);
         // Root binds Tab to focus-next; a deeper context wins over it.
         cx.bind_keys([
@@ -5288,6 +5496,15 @@ fn main() {
             cx,
             move |window, cx| {
                 let shell = cx.new(|cx| Shell::new(window, cx));
+                if !theme_problems.is_empty() {
+                    // once the window's root is there to show it
+                    window.defer(cx, move |window, cx| {
+                        let note = Notification::warning(theme_problems.join("\n"))
+                            .title("Themes")
+                            .placement(Anchor::BottomRight);
+                        window.push_notification(note, cx);
+                    });
+                }
                 if let Some(root) = root {
                     shell.update(cx, |this, cx| this.show_workspace(root, window, cx));
                 }
@@ -5302,4 +5519,105 @@ fn main() {
         .expect("failed to open window");
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn named(name: &str, light: bool) -> &'static theme::Theme {
+        Box::leak(Box::new(theme::Theme {
+            name: name.into(),
+            light,
+            ..theme::dark()
+        }))
+    }
+
+    fn found(query: &str) -> Vec<&'static str> {
+        let registry = action_registry();
+        search_actions(&action_texts(&registry), query, usize::MAX)
+            .into_iter()
+            .map(|hit| registry[hit.index].name)
+            .collect()
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_theme_command_is_found_by_its_name_and_synonyms() {
+        for query in [
+            "theme",
+            "color scheme",
+            "colors",
+            "dark",
+            "light",
+            "appearance",
+        ] {
+            assert!(found(query).contains(&"Theme"), "{query}");
+        }
+        let registry = action_registry();
+        let def = registry.iter().find(|def| def.name == "Theme").unwrap();
+        assert!(!def.closes_popup, "it opens a tab of the popup");
+        assert!(def.state.is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn find_action_still_finds_the_other_commands() {
+        assert_eq!(found("recent projects").first(), Some(&"Recent Projects"));
+        assert_eq!(found("minimap").first(), Some(&"Show Minimap"));
+        assert_eq!(found("quit").first(), Some(&"Quit"));
+        let registry = action_registry();
+        let mut names: Vec<_> = registry.iter().map(|def| def.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), registry.len(), "names are unique");
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_popup_only_tabs_go_back_to_files() {
+        assert!(Tab::Projects.next() == Tab::Files);
+        assert!(Tab::Themes.next() == Tab::Files);
+        assert!(Tab::Actions.next() == Tab::Files);
+        assert!(Tab::Files.next() == Tab::Symbols);
+    }
+
+    #[::core::prelude::v1::test]
+    fn themes_are_filtered_by_name_and_the_one_shown_is_selected() {
+        let (dark, light, solar) = (
+            named("Zide Dark", false),
+            named("Zide Light", true),
+            named("Solarized Light", true),
+        );
+        let all = [dark, light, solar];
+        assert_eq!(matching_themes(&all, "").len(), 3);
+        assert_eq!(matching_themes(&all, "LIGHT"), vec![light, solar]);
+        assert_eq!(matching_themes(&all, "light sol"), vec![solar]);
+        assert!(matching_themes(&all, "nord").is_empty());
+        assert_eq!(theme_row(&all, solar), 2);
+        assert_eq!(theme_row(&[light, solar], dark), 0, "not listed: the first");
+    }
+
+    #[::core::prelude::v1::test]
+    fn escape_after_a_preview_restores_the_theme_in_use_when_the_list_opened() {
+        let (before, other) = (named("Before", false), named("Other", true));
+        let mut preview = ThemePreview::default();
+        preview.begin(before);
+        // moving through the list, or opening the tab again, does not forget the first theme
+        preview.begin(other);
+        assert!(std::ptr::eq(preview.cancel().unwrap(), before));
+        assert!(preview.cancel().is_none(), "restored once");
+    }
+
+    #[::core::prelude::v1::test]
+    fn enter_keeps_the_theme_shown() {
+        let mut preview = ThemePreview::default();
+        preview.begin(named("Before", false));
+        preview.keep();
+        assert!(
+            preview.cancel().is_none(),
+            "closing after Enter restores nothing"
+        );
+        assert!(
+            ThemePreview::default().cancel().is_none(),
+            "nothing previewed"
+        );
+    }
 }

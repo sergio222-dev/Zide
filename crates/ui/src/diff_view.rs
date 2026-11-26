@@ -25,9 +25,9 @@ impl Block {
     /// The color of its lines: blue when it replaces lines, else green (added) or gray (removed).
     fn color(&self) -> u32 {
         match (self.old, self.new) {
-            (Some(_), Some(_)) => theme::DIFF_CHANGED,
-            (None, _) => theme::DIFF_ADDED,
-            (_, None) => theme::DIFF_REMOVED,
+            (Some(_), Some(_)) => theme::current().diff_changed,
+            (None, _) => theme::current().diff_added,
+            (_, None) => theme::current().diff_removed,
         }
     }
 }
@@ -259,7 +259,7 @@ mod tests {
     fn a_new_file_is_all_additions() {
         let patch = "diff --git a/t.js b/t.js\nnew file mode 100644\n--- /dev/null\n+++ b/t.js\n@@ -0,0 +1,3 @@\n+a\n+b\n+c\n";
         assert_eq!(blocks(patch), [block(None, Some((1, 3)))]);
-        assert_eq!(blocks(patch)[0].color(), theme::DIFF_ADDED);
+        assert_eq!(blocks(patch)[0].color(), theme::current().diff_added);
     }
 
     #[::core::prelude::v1::test]
@@ -270,8 +270,8 @@ mod tests {
             found,
             [block(Some((2, 2)), None), block(Some((4, 5)), Some((3, 3)))]
         );
-        assert_eq!(found[0].color(), theme::DIFF_REMOVED);
-        assert_eq!(found[1].color(), theme::DIFF_CHANGED);
+        assert_eq!(found[0].color(), theme::current().diff_removed);
+        assert_eq!(found[1].color(), theme::current().diff_changed);
     }
 
     #[::core::prelude::v1::test]

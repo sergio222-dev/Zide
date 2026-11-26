@@ -11,11 +11,11 @@ use crate::theme;
 /// The bar and text colour for a share of 0 to 1 already spent.
 pub(super) fn color(used: f64) -> u32 {
     if used >= 0.9 {
-        theme::ERROR
+        theme::current().error
     } else if used >= 0.7 {
-        theme::WORKING
+        theme::current().working
     } else {
-        theme::OK
+        theme::current().ok
     }
 }
 
@@ -71,7 +71,11 @@ fn bar(id: &'static str, label: &str, right: String, used: f64) -> Div {
             div()
                 .flex()
                 .justify_between()
-                .child(div().text_color(rgb(theme::TEXT)).child(label.to_owned()))
+                .child(
+                    div()
+                        .text_color(rgb(theme::current().text))
+                        .child(label.to_owned()),
+                )
                 .child(div().text_color(rgb(color(used))).child(right)),
         )
         .child(
@@ -149,7 +153,7 @@ pub(super) fn report(
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(theme::DIM))
+                        .text_color(rgb(theme::current().dim))
                         .child(format!("Resets {}", resets_in(left))),
                 ),
         )
@@ -172,9 +176,9 @@ mod tests {
 
     #[test]
     fn colors_warn_as_the_share_grows() {
-        assert_eq!(color(0.2), theme::OK);
-        assert_eq!(color(0.7), theme::WORKING);
-        assert_eq!(color(0.95), theme::ERROR);
+        assert_eq!(color(0.2), theme::current().ok);
+        assert_eq!(color(0.7), theme::current().working);
+        assert_eq!(color(0.95), theme::current().error);
     }
 
     #[test]
@@ -193,15 +197,15 @@ mod tests {
         assert_eq!(warning(Some(&limits(window(0.69, 500), None)), 100), None);
         assert_eq!(
             warning(Some(&limits(window(0.7, 500), window(0.4, 500))), 100),
-            Some((theme::WORKING, "Session 70%".to_owned()))
+            Some((theme::current().working, "Session 70%".to_owned()))
         );
         assert_eq!(
             warning(Some(&limits(window(0.75, 500), window(0.93, 500))), 100),
-            Some((theme::ERROR, "Weekly 93%".to_owned()))
+            Some((theme::current().error, "Weekly 93%".to_owned()))
         );
         assert_eq!(
             warning(Some(&limits(window(1.0, 500), None)), 100),
-            Some((theme::ERROR, "Session limit reached".to_owned()))
+            Some((theme::current().error, "Session limit reached".to_owned()))
         );
         // its window started over since: the number is old
         assert_eq!(warning(Some(&limits(window(0.95, 50), None)), 100), None);

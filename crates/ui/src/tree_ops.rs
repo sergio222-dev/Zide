@@ -76,14 +76,15 @@ impl Render for PathDialog {
             .children(self.from.is_none().then(|| {
                 div()
                     .text_xs()
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::current().muted))
                     .child("A name ending with / creates a folder; any other creates a file.")
             }))
-            .children(
-                self.error
-                    .clone()
-                    .map(|error| div().text_xs().text_color(rgb(theme::ERROR)).child(error)),
-            )
+            .children(self.error.clone().map(|error| {
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::current().error))
+                    .child(error)
+            }))
     }
 }
 

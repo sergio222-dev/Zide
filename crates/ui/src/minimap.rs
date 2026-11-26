@@ -105,7 +105,7 @@ impl Minimap {
             .h_full()
             .flex_shrink_0()
             .border_l_1()
-            .border_color(rgb(theme::BORDER))
+            .border_color(rgb(theme::current().border))
             .on_mouse_down(MouseButton::Left, move |event, window, _| {
                 jump(&scroll, &bounds, rows, event.position.y, window);
             })
@@ -179,14 +179,13 @@ impl Minimap {
         let first = -f32::from(self.scroll.0.borrow().base_handle.offset().y) / self.row_height;
         let shown = (seen * pitch).max(8.);
         let at = (first * pitch).clamp(0., (used - shown).max(0.));
-        let light: Hsla = rgb(0xffffff).into();
         quad(
             window,
             f32::from(bounds.origin.x),
             top + at,
             WIDTH,
             shown,
-            Hsla { a: 0.1, ..light },
+            rgba(theme::current().minimap_view).into(),
         );
     }
 }

@@ -56,25 +56,25 @@ pub fn for_row(name: &str, dir: bool, expanded: bool) -> (IconName, u32) {
         } else {
             IconName::Folder
         };
-        return (icon, theme::ICON_FOLDER);
+        return (icon, theme::current().icon_folder);
     }
     // a dotfile such as `.gitignore` has no extension: the part after the dot is its kind
     let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match extension.as_str() {
         "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "go" | "py" | "java" | "c" | "h"
         | "cpp" | "hpp" | "cs" | "rb" | "php" | "sh" | "html" | "css" | "scss" | "vue"
-        | "svelte" => (IconName::FileCode, theme::ICON_CODE),
-        "json" => (IconName::FileBraces, theme::ICON_DATA),
+        | "svelte" => (IconName::FileCode, theme::current().icon_code),
+        "json" => (IconName::FileBraces, theme::current().icon_data),
         "toml" | "yaml" | "yml" | "ini" | "env" | "gitignore" => {
-            (IconName::FileCog, theme::ICON_DATA)
+            (IconName::FileCog, theme::current().icon_data)
         }
-        "lock" => (IconName::FileLock, theme::ICON_DATA),
-        "md" | "txt" => (IconName::FileText, theme::MUTED),
+        "lock" => (IconName::FileLock, theme::current().icon_data),
+        "md" | "txt" => (IconName::FileText, theme::current().muted),
         "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" => {
-            (IconName::FileImage, theme::ICON_MEDIA)
+            (IconName::FileImage, theme::current().icon_media)
         }
-        "zip" | "tar" | "gz" | "xz" => (IconName::FileArchive, theme::MUTED),
-        _ => (IconName::File, theme::MUTED),
+        "zip" | "tar" | "gz" | "xz" => (IconName::FileArchive, theme::current().muted),
+        _ => (IconName::File, theme::current().muted),
     }
 }
 

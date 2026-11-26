@@ -1278,61 +1278,65 @@ impl Chats {
                 .iter()
                 .any(|chat| chat.transcript.session_id() == Some(agent.session_id.as_str()))
         };
-        let rows =
-            chats
-                .list
-                .iter()
-                .enumerate()
-                .map(|(index, chat)| {
-                    let status = chats.status_of(chat);
-                    let (color, label) = status_style(status);
-                    let id = chat.id;
-                    div()
-                        .id(SharedString::from(format!("chat-row-{id}")))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .py_2()
-                        .cursor_pointer()
-                        .bg(rgb(if index == chats.active {
-                            theme::TREE_SELECTED
-                        } else {
-                            theme::BACKGROUND
-                        }))
-                        .hover(|row| row.bg(rgb(theme::TREE_SELECTED)))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.claude_activate(index, window, cx)
-                        }))
-                        .child(div().flex_none().size_2().rounded_full().bg(rgb(color)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().truncate().text_color(rgb(theme::STRONG)).child(
-                                    chat.title.clone().unwrap_or_else(|| "New chat".to_owned()),
-                                ))
-                                .child(div().text_xs().text_color(rgb(color)).child(label)),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("chat-close-{id}")))
-                                .flex_none()
-                                .px_1()
-                                .text_color(rgb(theme::DIM))
-                                .hover(|close| close.text_color(rgb(theme::STRONG)))
-                                .child("×")
-                                // on mouse down so the row under it never sees a click
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.claude_close(id, window, cx)
-                                    }),
-                                ),
-                        )
-                })
-                .collect::<Vec<_>>();
+        let rows = chats
+            .list
+            .iter()
+            .enumerate()
+            .map(|(index, chat)| {
+                let status = chats.status_of(chat);
+                let (color, label) = status_style(status);
+                let id = chat.id;
+                div()
+                    .id(SharedString::from(format!("chat-row-{id}")))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .cursor_pointer()
+                    .bg(rgb(if index == chats.active {
+                        theme::current().tree_selected
+                    } else {
+                        theme::current().background
+                    }))
+                    .hover(|row| row.bg(rgb(theme::current().tree_selected)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.claude_activate(index, window, cx)
+                    }))
+                    .child(div().flex_none().size_2().rounded_full().bg(rgb(color)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_color(rgb(theme::current().strong))
+                                    .child(
+                                        chat.title.clone().unwrap_or_else(|| "New chat".to_owned()),
+                                    ),
+                            )
+                            .child(div().text_xs().text_color(rgb(color)).child(label)),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("chat-close-{id}")))
+                            .flex_none()
+                            .px_1()
+                            .text_color(rgb(theme::current().dim))
+                            .hover(|close| close.text_color(rgb(theme::current().strong)))
+                            .child("×")
+                            // on mouse down so the row under it never sees a click
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.claude_close(id, window, cx)
+                                }),
+                            ),
+                    )
+            })
+            .collect::<Vec<_>>();
         let agent_row = |index: usize, agent: &Agent, cx: &mut Context<Self>| {
             let background = agent.kind == Kind::Background;
             let (color, label) = agent_style(agent);
@@ -1351,11 +1355,11 @@ impl Chats {
                 .when(!background, |row| {
                     row.cursor_pointer()
                         .bg(rgb(if shown {
-                            theme::TREE_SELECTED
+                            theme::current().tree_selected
                         } else {
-                            theme::BACKGROUND
+                            theme::current().background
                         }))
-                        .hover(|row| row.bg(rgb(theme::TREE_SELECTED)))
+                        .hover(|row| row.bg(rgb(theme::current().tree_selected)))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.claude_open_agent(index, window, cx)
                         }))
@@ -1368,7 +1372,7 @@ impl Chats {
                         .child(
                             div()
                                 .truncate()
-                                .text_color(rgb(theme::STRONG))
+                                .text_color(rgb(theme::current().strong))
                                 .child(chats.name_of(agent)),
                         )
                         .child(div().text_xs().text_color(rgb(color)).child(label)),
@@ -1378,8 +1382,8 @@ impl Chats {
                         .id(SharedString::from(format!("agent-rm-{}", agent.id)))
                         .flex_none()
                         .px_1()
-                        .text_color(rgb(theme::DIM))
-                        .hover(|close| close.text_color(rgb(theme::STRONG)))
+                        .text_color(rgb(theme::current().dim))
+                        .hover(|close| close.text_color(rgb(theme::current().strong)))
                         .child("×")
                         // on mouse down so the row under it never sees a click
                         .on_mouse_down(
@@ -1421,8 +1425,8 @@ impl Chats {
                         .py_2()
                         .border_t_1()
                         .border_b_1()
-                        .border_color(rgb(theme::BORDER))
-                        .text_color(rgb(theme::MUTED))
+                        .border_color(rgb(theme::current().border))
+                        .text_color(rgb(theme::current().muted))
                         .child(format!("Background ({background_count})")),
                 )
                 .children(backgrounds)
@@ -1442,9 +1446,9 @@ impl Chats {
                     .as_ref()
                     .is_some_and(|(chat, tool)| *chat == chat_id && *tool == worker.tool_use_id);
                 let color = if worker.finished {
-                    theme::DIM
+                    theme::current().dim
                 } else {
-                    theme::WORKING
+                    theme::current().working
                 };
                 let detail = match &worker.activity {
                     Some(activity) => format!("{} · {activity}", worker.kind),
@@ -1463,11 +1467,11 @@ impl Chats {
                     .py_2()
                     .cursor_pointer()
                     .bg(rgb(if viewed {
-                        theme::TREE_SELECTED
+                        theme::current().tree_selected
                     } else {
-                        theme::BACKGROUND
+                        theme::current().background
                     }))
-                    .hover(|row| row.bg(rgb(theme::TREE_SELECTED)))
+                    .hover(|row| row.bg(rgb(theme::current().tree_selected)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.claude_open_worker(chat_id, tool_use_id.clone(), window, cx)
                     }))
@@ -1479,14 +1483,14 @@ impl Chats {
                             .child(
                                 div()
                                     .truncate()
-                                    .text_color(rgb(theme::STRONG))
+                                    .text_color(rgb(theme::current().strong))
                                     .child(worker.description.clone()),
                             )
                             .child(
                                 div()
                                     .truncate()
                                     .text_xs()
-                                    .text_color(rgb(theme::MUTED))
+                                    .text_color(rgb(theme::current().muted))
                                     .child(detail),
                             ),
                     )
@@ -1502,8 +1506,8 @@ impl Chats {
                         .py_2()
                         .border_t_1()
                         .border_b_1()
-                        .border_color(rgb(theme::BORDER))
-                        .text_color(rgb(theme::MUTED))
+                        .border_color(rgb(theme::current().border))
+                        .text_color(rgb(theme::current().muted))
                         .child(format!("Workers ({})", worker_rows.len())),
                 )
                 .children(worker_rows)
@@ -1515,7 +1519,7 @@ impl Chats {
             .w(px(240.))
             .min_h_0()
             .border_r_1()
-            .border_color(rgb(theme::BORDER))
+            .border_color(rgb(theme::current().border))
             .child(
                 div()
                     .flex()
@@ -1524,8 +1528,8 @@ impl Chats {
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(theme::BORDER))
-                    .child(div().text_color(rgb(theme::MUTED)).child("Chats"))
+                    .border_color(rgb(theme::current().border))
+                    .child(div().text_color(rgb(theme::current().muted)).child("Chats"))
                     .child(
                         Button::new("claude-new")
                             .ghost()
@@ -1566,9 +1570,9 @@ impl Chats {
             })
             .collect::<Vec<_>>();
         let (color, state) = if worker.finished {
-            (theme::DIM, "Finished")
+            (theme::current().dim, "Finished")
         } else {
-            (theme::WORKING, "Working")
+            (theme::current().working, "Working")
         };
         div()
             .flex()
@@ -1584,7 +1588,7 @@ impl Chats {
                     .px_4()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(theme::BORDER))
+                    .border_color(rgb(theme::current().border))
                     .child(Button::new("worker-back").ghost().label("← Back").on_click(
                         cx.listener(|this, _, window, cx| {
                             this.claude_leave_worker(window, cx);
@@ -1595,13 +1599,13 @@ impl Chats {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_color(rgb(theme::STRONG))
+                            .text_color(rgb(theme::current().strong))
                             .child(worker.description.clone()),
                     )
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::current().muted))
                             .child(worker.kind.clone()),
                     )
                     .child(div().text_sm().text_color(rgb(color)).child(state)),
@@ -1626,7 +1630,7 @@ impl Chats {
                                 |activity| {
                                     div()
                                         .text_sm()
-                                        .text_color(rgb(theme::WORKING))
+                                        .text_color(rgb(theme::current().working))
                                         .child(activity.clone())
                                 },
                             )),
@@ -1654,7 +1658,7 @@ impl Chats {
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
-                .text_color(rgb(theme::TEXT))
+                .text_color(rgb(theme::current().text))
                 .child(panel)
                 .child(
                     view.relative()
@@ -1706,13 +1710,13 @@ impl Chats {
                     .px_4()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(theme::BORDER))
+                    .border_color(rgb(theme::current().border))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_color(rgb(theme::STRONG))
+                            .text_color(rgb(theme::current().strong))
                             .child(chat.title.clone().unwrap_or_else(|| "New chat".to_owned())),
                     )
                     .child(
@@ -1754,12 +1758,14 @@ impl Chats {
                                     .then(|| thinking(shown, chat.transcript.compacting())),
                             )
                             .children(chat.notice.iter().map(|notice| {
-                                div().text_color(rgb(theme::ERROR)).child(notice.clone())
+                                div()
+                                    .text_color(rgb(theme::current().error))
+                                    .child(notice.clone())
                             }))
                             .children(ended.then(|| {
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(theme::DIM))
+                                    .text_color(rgb(theme::current().dim))
                                     .child("Not running. Send a message to start it again.")
                             })),
                     ),
@@ -1767,7 +1773,7 @@ impl Chats {
             .child(
                 div()
                     .border_t_1()
-                    .border_color(rgb(theme::BORDER))
+                    .border_color(rgb(theme::current().border))
                     .p_2()
                     .child(self.composer(
                         chat,
@@ -1787,7 +1793,7 @@ impl Chats {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .text_color(rgb(theme::TEXT))
+            .text_color(rgb(theme::current().text))
             .child(panel)
             .child(main)
     }
@@ -1805,7 +1811,7 @@ impl Chats {
                 .flex_col()
                 .gap_2()
                 .rounded_md()
-                .bg(rgb(theme::POPUP))
+                .bg(rgb(theme::current().popup))
                 .px_3()
                 .py_2()
                 .children((!text.is_empty()).then(|| text.clone()))
@@ -1825,11 +1831,11 @@ impl Chats {
             Block::Question(ask) => self.ask_card(chat, ask, cx),
             Block::Interrupted => div()
                 .text_sm()
-                .text_color(rgb(theme::DIM))
+                .text_color(rgb(theme::current().dim))
                 .child("Interrupted")
                 .into_any_element(),
             Block::Error(message) => div()
-                .text_color(rgb(theme::ERROR))
+                .text_color(rgb(theme::current().error))
                 .child(message.clone())
                 .into_any_element(),
         }
@@ -1849,10 +1855,15 @@ impl Chats {
             .gap_2()
             .rounded_md()
             .border_1()
-            .border_color(rgb(theme::ACTIVE_BORDER))
+            .border_color(rgb(theme::current().active_border))
             .p_3()
             .child(format!("Claude wants to use {}", permission.tool_name))
-            .child(div().text_sm().text_color(rgb(theme::MUTED)).child(summary))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(theme::current().muted))
+                    .child(summary),
+            )
             .children(tools::input_detail(
                 &permission.tool_name,
                 &permission.input,
@@ -1883,14 +1894,16 @@ impl Chats {
                         ),
                 )
             }
-            Some(resolution) => card.child(div().text_sm().text_color(rgb(theme::DIM)).child(
-                match resolution {
-                    Resolution::Allowed => "Allowed",
-                    Resolution::Denied => "Denied",
-                    Resolution::Answered(_) => "Answered",
-                    Resolution::Cancelled => "Cancelled",
-                },
-            )),
+            Some(resolution) => {
+                card.child(div().text_sm().text_color(rgb(theme::current().dim)).child(
+                    match resolution {
+                        Resolution::Allowed => "Allowed",
+                        Resolution::Denied => "Denied",
+                        Resolution::Answered(_) => "Answered",
+                        Resolution::Cancelled => "Cancelled",
+                    },
+                ))
+            }
         }
         .into_any_element()
     }
@@ -1914,7 +1927,7 @@ fn thinking_view(text: &str) -> AnyElement {
     div()
         .text_sm()
         .italic()
-        .text_color(rgb(theme::DIM))
+        .text_color(rgb(theme::current().dim))
         .child(text.to_owned())
         .into_any_element()
 }
@@ -1949,11 +1962,11 @@ const AGENTS_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
 /// `claude` reports when it is idle.
 fn agent_style(agent: &Agent) -> (u32, String) {
     match (agent.status.as_str(), agent.state.as_deref()) {
-        (_, Some("blocked")) => (theme::NEEDS_USER, "Needs you".to_owned()),
-        ("busy", _) => (theme::WORKING, "Working".to_owned()),
-        ("idle", None) => (theme::OK, "Ready".to_owned()),
+        (_, Some("blocked")) => (theme::current().needs_user, "Needs you".to_owned()),
+        ("busy", _) => (theme::current().working, "Working".to_owned()),
+        ("idle", None) => (theme::current().ok, "Ready".to_owned()),
         (_, state) => (
-            theme::DIM,
+            theme::current().dim,
             capitalized(state.unwrap_or(agent.status.as_str())),
         ),
     }
@@ -1979,10 +1992,10 @@ fn capitalized(text: &str) -> String {
 
 fn status_style(status: Status) -> (u32, &'static str) {
     match status {
-        Status::Inactive => (theme::DIM, "Not running"),
-        Status::Idle => (theme::OK, "Ready"),
-        Status::Working => (theme::WORKING, "Working"),
-        Status::NeedsUser => (theme::NEEDS_USER, "Needs you"),
+        Status::Inactive => (theme::current().dim, "Not running"),
+        Status::Idle => (theme::current().ok, "Ready"),
+        Status::Working => (theme::current().working, "Working"),
+        Status::NeedsUser => (theme::current().needs_user, "Needs you"),
     }
 }
 
@@ -1997,10 +2010,10 @@ fn hidden_blocks(total: usize, shown: usize) -> usize {
 /// The sign that Claude has not answered yet: a pulsing orange dot and what it is doing.
 fn thinking(status: Status, compacting: bool) -> impl IntoElement {
     let (label, color) = match status {
-        Status::NeedsUser => ("Waiting for you", theme::NEEDS_USER),
+        Status::NeedsUser => ("Waiting for you", theme::current().needs_user),
         // what the CLI does by itself when the context is full, in blue like a question
-        _ if compacting => ("Auto-compacting…", theme::NEEDS_USER),
-        _ => ("Thinking…", theme::WORKING),
+        _ if compacting => ("Auto-compacting…", theme::current().needs_user),
+        _ => ("Thinking…", theme::current().working),
     };
     div()
         .flex()
@@ -2065,19 +2078,19 @@ mod tests {
     fn an_agent_shows_what_it_does_or_waits_for() {
         assert_eq!(
             agent_style(&agent("busy", None)),
-            (theme::WORKING, "Working".into())
+            (theme::current().working, "Working".into())
         );
         assert_eq!(
             agent_style(&agent("idle", Some("blocked"))),
-            (theme::NEEDS_USER, "Needs you".into())
+            (theme::current().needs_user, "Needs you".into())
         );
         assert_eq!(
             agent_style(&agent("idle", None)),
-            (theme::OK, "Ready".into())
+            (theme::current().ok, "Ready".into())
         );
         assert_eq!(
             agent_style(&agent("idle", Some("done"))),
-            (theme::DIM, "Done".into())
+            (theme::current().dim, "Done".into())
         );
     }
 

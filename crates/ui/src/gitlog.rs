@@ -1048,7 +1048,7 @@ impl LogPanel {
             .h(px(40.))
             .flex_shrink_0()
             .border_b_1()
-            .border_color(rgb(theme::BORDER))
+            .border_color(rgb(theme::current().border))
             .child(div().w(px(300.)).child(Input::new(&self.query)))
             .child(filter_menu(self, Filter::User, &entity))
             .child(filter_menu(self, Filter::Date, &entity))
@@ -1063,13 +1063,13 @@ impl LogPanel {
                     .px_2()
                     .h(px(26.))
                     .rounded_md()
-                    .bg(rgb(theme::SELECTION))
+                    .bg(rgb(theme::current().selection))
                     .child(format!("Branch: {label}"))
                     .child(
                         div()
                             .id("log-scope-clear")
                             .cursor_pointer()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::current().muted))
                             .child("×")
                             .on_click(move |_, _, cx| {
                                 clear.update(cx, |this, cx| {
@@ -1081,10 +1081,11 @@ impl LogPanel {
                             }),
                     )
             }))
-            .children(
-                self.loading
-                    .then(|| Spinner::new().small().color(rgb(theme::MUTED).into())),
-            );
+            .children(self.loading.then(|| {
+                Spinner::new()
+                    .small()
+                    .color(rgb(theme::current().muted).into())
+            }));
 
         div()
             .flex()
@@ -1092,7 +1093,7 @@ impl LogPanel {
             .flex_1()
             .min_h_0()
             .w_full()
-            .text_color(rgb(theme::TEXT))
+            .text_color(rgb(theme::current().text))
             .children(
                 self.context_menu
                     .as_ref()
@@ -1113,7 +1114,7 @@ impl LogPanel {
                             .w(px(380.))
                             .flex_shrink_0()
                             .border_l_1()
-                            .border_color(rgb(theme::BORDER))
+                            .border_color(rgb(theme::current().border))
                             .child(
                                 div()
                                     .flex_1()
@@ -1170,13 +1171,13 @@ fn filter_menu(panel: &LogPanel, filter: Filter, entity: &Entity<LogPanel>) -> D
                 .whitespace_nowrap()
                 .border_1()
                 .border_color(rgb(if open.is_some() {
-                    theme::ACTIVE_BORDER
+                    theme::current().active_border
                 } else {
-                    theme::CONTROL_BORDER
+                    theme::current().control_border
                 }))
-                .when(active, |d| d.bg(rgb(theme::SELECTION)))
+                .when(active, |d| d.bg(rgb(theme::current().selection)))
                 .child(label)
-                .child(div().text_color(rgb(theme::DIM)).child("⌄"))
+                .child(div().text_color(rgb(theme::current().dim)).child("⌄"))
                 .on_click(move |_, _, cx| {
                     toggle.update(cx, |this, cx| this.toggle_log_menu(filter, cx))
                 }),
@@ -1208,9 +1209,9 @@ fn filter_menu(panel: &LogPanel, filter: Filter, entity: &Entity<LogPanel>) -> D
                     .flex_col()
                     .gap_2()
                     .p_3()
-                    .bg(rgb(theme::POPUP))
+                    .bg(rgb(theme::current().popup))
                     .border_1()
-                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .border_color(rgb(theme::current().control_border))
                     .rounded_md()
                     .child(row("After", &panel.after))
                     .child(row("Before", &panel.before)),
@@ -1232,8 +1233,10 @@ fn filter_menu(panel: &LogPanel, filter: Filter, entity: &Entity<LogPanel>) -> D
                         .flex_shrink_0()
                         .cursor_pointer()
                         .whitespace_nowrap()
-                        .when(row == highlighted, |d| d.bg(rgb(theme::ACTIVE_BG)))
-                        .hover(|d| d.bg(rgb(theme::SELECTION)))
+                        .when(row == highlighted, |d| {
+                            d.bg(rgb(theme::current().active_bg))
+                        })
+                        .hover(|d| d.bg(rgb(theme::current().selection)))
                         .child(item)
                         .on_click(move |_, window, cx| {
                             pick.update(cx, |this, cx| {
@@ -1252,9 +1255,9 @@ fn filter_menu(panel: &LogPanel, filter: Filter, entity: &Entity<LogPanel>) -> D
                     .min_w(px(180.))
                     .max_h(px(ROW_HEIGHT * 10.))
                     .overflow_y_scroll()
-                    .bg(rgb(theme::POPUP))
+                    .bg(rgb(theme::current().popup))
                     .border_1()
-                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .border_color(rgb(theme::current().control_border))
                     .rounded_md()
                     .children(rows),
             ))
@@ -1269,16 +1272,20 @@ fn note(text: impl Into<SharedString>, loading: bool) -> Div {
         .gap_2()
         .p_3()
         .text_sm()
-        .text_color(rgb(theme::MUTED))
-        .children(loading.then(|| Spinner::new().small().color(rgb(theme::MUTED).into())))
+        .text_color(rgb(theme::current().muted))
+        .children(loading.then(|| {
+            Spinner::new()
+                .small()
+                .color(rgb(theme::current().muted).into())
+        }))
         .child(text.into())
 }
 
 fn focus_bg(focused: bool) -> u32 {
     if focused {
-        theme::TREE_FOCUSED
+        theme::current().tree_focused
     } else {
-        theme::TREE_SELECTED
+        theme::current().tree_selected
     }
 }
 
@@ -1373,7 +1380,7 @@ fn refs_pane(panel: &LogPanel, entity: &Entity<LogPanel>) -> Div {
                                         .child(
                                             Icon::new(Icon::empty().path(statusbar::BRANCH_ICON))
                                                 .size_4()
-                                                .text_color(rgb(theme::ICON_DATA)),
+                                                .text_color(rgb(theme::current().icon_data)),
                                         )
                                         .child(
                                             div()
@@ -1405,7 +1412,7 @@ fn refs_pane(panel: &LogPanel, entity: &Entity<LogPanel>) -> Div {
         .w(px(240.))
         .flex_shrink_0()
         .border_r_1()
-        .border_color(rgb(theme::BORDER))
+        .border_color(rgb(theme::current().border))
         .child(head)
         .child(body)
 }
@@ -1470,9 +1477,9 @@ fn ref_chip(label: &RefLabel) -> Div {
 /// The border and colors of [`ref_chip`], without its name.
 fn chip_frame(label: &RefLabel) -> Div {
     let color = match label.kind {
-        RefKind::Local | RefKind::Head => theme::ICON_DATA,
-        RefKind::Remote => theme::ICON_CODE,
-        RefKind::Tag => theme::ICON_FOLDER,
+        RefKind::Local | RefKind::Head => theme::current().icon_data,
+        RefKind::Remote => theme::current().icon_code,
+        RefKind::Tag => theme::current().icon_folder,
     };
     div()
         .px_1()
@@ -1492,7 +1499,7 @@ fn commits_pane(panel: &LogPanel, entity: &Entity<LogPanel>) -> Div {
     let body = match &panel.entries {
         Entries::Loading => note("Reading the history", true).into_any_element(),
         Entries::Failed(why) => note(why.clone(), false)
-            .text_color(rgb(theme::ERROR))
+            .text_color(rgb(theme::current().error))
             .into_any_element(),
         Entries::Ready { list, .. } if list.is_empty() => {
             note("No commits found", false).into_any_element()
@@ -1558,7 +1565,7 @@ fn commits_pane(panel: &LogPanel, entity: &Entity<LogPanel>) -> Div {
                                             .min_w_0()
                                             .truncate()
                                             .when(entry.parents.len() > 1, |d| {
-                                                d.text_color(rgb(theme::MUTED))
+                                                d.text_color(rgb(theme::current().muted))
                                             })
                                             .child(entry.commit.subject.clone()),
                                     )
@@ -1576,7 +1583,7 @@ fn commits_pane(panel: &LogPanel, entity: &Entity<LogPanel>) -> Div {
                                             .w(px(130.))
                                             .flex_shrink_0()
                                             .whitespace_nowrap()
-                                            .text_color(rgb(theme::MUTED))
+                                            .text_color(rgb(theme::current().muted))
                                             .child(format!("{date}, {clock}")),
                                     )
                                     .into_any_element()
@@ -1645,7 +1652,7 @@ fn details(panel: &LogPanel) -> Stateful<Div> {
         .p_3()
         .overflow_y_scroll()
         .border_t_1()
-        .border_color(rgb(theme::BORDER));
+        .border_color(rgb(theme::current().border));
     let Some(entry) = panel.selected_entry() else {
         return frame;
     };
@@ -1657,13 +1664,13 @@ fn details(panel: &LogPanel) -> Stateful<Div> {
         .child(
             div()
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(theme::STRONG))
+                .text_color(rgb(theme::current().strong))
                 .child(copyable("log-details-subject", &commit.subject)),
         )
         .children((!commit.body.is_empty()).then(|| {
             div()
                 .text_sm()
-                .text_color(rgb(theme::MUTED))
+                .text_color(rgb(theme::current().muted))
                 .child(copyable("log-details-body", &commit.body))
         }))
         .child(
@@ -1672,15 +1679,19 @@ fn details(panel: &LogPanel) -> Stateful<Div> {
                 .flex_wrap()
                 .gap_1()
                 .text_sm()
-                .text_color(rgb(theme::MUTED))
+                .text_color(rgb(theme::current().muted))
                 .child(copyable(
                     "log-details-who",
                     &format!("{} {}", commit.short_hash(), commit.author),
                 ))
-                .child(div().text_color(rgb(theme::ICON_CODE)).child(copyable(
-                    "log-details-email",
-                    &format!("<{}>", commit.email),
-                )))
+                .child(
+                    div()
+                        .text_color(rgb(theme::current().icon_code))
+                        .child(copyable(
+                            "log-details-email",
+                            &format!("<{}>", commit.email),
+                        )),
+                )
                 .child(copyable(
                     "log-details-when",
                     &format!("on {date} at {clock}"),
@@ -1697,10 +1708,13 @@ fn details(panel: &LogPanel) -> Stateful<Div> {
         }))
         .children(panel.in_branches.as_ref().map(|branches| {
             let count = changed_files::plural(branches.len(), "branch");
-            div().text_xs().text_color(rgb(theme::DIM)).child(copyable(
-                "log-details-branches",
-                &format!("In {count}: {}", branches.join(", ")),
-            ))
+            div()
+                .text_xs()
+                .text_color(rgb(theme::current().dim))
+                .child(copyable(
+                    "log-details-branches",
+                    &format!("In {count}: {}", branches.join(", ")),
+                ))
         }));
     frame.child(content)
 }

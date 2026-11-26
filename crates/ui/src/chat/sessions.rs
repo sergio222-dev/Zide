@@ -169,7 +169,7 @@ impl Chats {
                             div()
                                 .flex_none()
                                 .text_xs()
-                                .text_color(rgb(theme::DIM))
+                                .text_color(rgb(theme::current().dim))
                                 .child(if is_current {
                                     format!("current · {when}")
                                 } else {
@@ -187,11 +187,10 @@ impl Chats {
             .bordered(false)
             .max_h(px(360.))
             .empty(move |_, _, _| {
-                div().p_3().text_color(rgb(theme::DIM)).child(if loading {
-                    "Loading…"
-                } else {
-                    "No sessions"
-                })
+                div()
+                    .p_3()
+                    .text_color(rgb(theme::current().dim))
+                    .child(if loading { "Loading…" } else { "No sessions" })
             })
             .on_select(move |path, _, cx| {
                 hovered.update(cx, |this, cx| {
@@ -220,8 +219,8 @@ impl Chats {
                         .p_2()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(theme::BORDER))
-                        .bg(rgb(theme::POPUP))
+                        .border_color(rgb(theme::current().border))
+                        .bg(rgb(theme::current().popup))
                         .child(Input::new(&sessions.input))
                         .child(list),
                 ),

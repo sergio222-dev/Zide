@@ -191,7 +191,7 @@ impl Chats {
             .gap_2()
             .rounded_md()
             .border_1()
-            .border_color(rgb(theme::ACTIVE_BORDER))
+            .border_color(rgb(theme::current().active_border))
             .p_3();
         match (&ask.resolution, chat.asks.get(&ask.request_id)) {
             (Some(Resolution::Answered(answers)), _) => card
@@ -202,17 +202,21 @@ impl Chats {
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(theme::MUTED))
+                                .text_color(rgb(theme::current().muted))
                                 .child(question.clone()),
                         )
-                        .child(div().text_color(rgb(theme::STRONG)).child(answer.clone()))
+                        .child(
+                            div()
+                                .text_color(rgb(theme::current().strong))
+                                .child(answer.clone()),
+                        )
                 }))
                 .into_any_element(),
             (Some(_), _) => card
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(theme::DIM))
+                        .text_color(rgb(theme::current().dim))
                         .child("Question dismissed"),
                 )
                 .into_any_element(),

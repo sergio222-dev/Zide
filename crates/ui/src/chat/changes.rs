@@ -166,8 +166,8 @@ pub(super) fn starts(name: &str, input: &Value) -> Vec<usize> {
 
 fn band(kind: Kind) -> Option<Rgba> {
     match kind {
-        Kind::Added => Some(rgba(0x98c37926)),
-        Kind::Removed => Some(rgba(0xe06c7526)),
+        Kind::Added => Some(rgba(theme::current().tint_added)),
+        Kind::Removed => Some(rgba(theme::current().tint_removed)),
         Kind::Context | Kind::Gap => None,
     }
 }
@@ -180,12 +180,12 @@ pub(super) fn view(edit: &Edit, numbered: bool) -> Div {
         .text_xs()
         .child(
             div()
-                .text_color(rgb(theme::OK))
+                .text_color(rgb(theme::current().ok))
                 .child(format!("+{}", edit.added)),
         )
         .child(
             div()
-                .text_color(rgb(theme::ERROR))
+                .text_color(rgb(theme::current().error))
                 .child(format!("-{}", edit.removed)),
         );
     let shown = edit.rows.iter().take(MAX_ROWS).map(|row| {
@@ -208,16 +208,16 @@ pub(super) fn view(edit: &Edit, numbered: bool) -> Div {
             .px_2()
             .when_some(band(row.kind), |row, color| row.bg(color))
             .text_color(rgb(if row.kind == Kind::Gap {
-                theme::DIM
+                theme::current().dim
             } else {
-                theme::TEXT
+                theme::current().text
             }))
             .children(numbered.then(|| {
                 div()
                     .flex_none()
                     .w(px(36.))
                     .text_right()
-                    .text_color(rgb(theme::DIM))
+                    .text_color(rgb(theme::current().dim))
                     .child(row.number.map(|n| n.to_string()).unwrap_or_default())
             }))
             .child(div().flex_none().w(px(10.)).child(sign))
@@ -230,7 +230,7 @@ pub(super) fn view(edit: &Edit, numbered: bool) -> Div {
             .flex_col()
             .rounded_md()
             .overflow_hidden()
-            .bg(rgb(theme::BACKGROUND))
+            .bg(rgb(theme::current().background))
             .py_1()
             .font_family(crate::fonts::editor())
             .text_sm()
@@ -239,7 +239,7 @@ pub(super) fn view(edit: &Edit, numbered: bool) -> Div {
                 div()
                     .px_2()
                     .text_xs()
-                    .text_color(rgb(theme::DIM))
+                    .text_color(rgb(theme::current().dim))
                     .child(format!("… {hidden} more lines"))
             })),
     )

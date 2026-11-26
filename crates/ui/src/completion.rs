@@ -146,14 +146,14 @@ impl CompletionPopup {
                 .py_2()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(theme::CONTROL_BORDER))
-                .bg(rgb(theme::POPUP))
+                .border_color(rgb(theme::current().control_border))
+                .bg(rgb(theme::current().popup))
                 .text_sm()
                 .whitespace_normal()
                 .children(
                     item.detail
                         .clone()
-                        .map(|detail| div().text_color(rgb(theme::STRONG)).child(detail)),
+                        .map(|detail| div().text_color(rgb(theme::current().strong)).child(detail)),
                 )
                 .child(body),
         )
@@ -202,12 +202,12 @@ impl CompletionPopup {
                     .gap_2()
                     .h(px(row_height))
                     .px_2()
-                    .when(selected, |row| row.bg(rgb(theme::ACTIVE_BG)))
+                    .when(selected, |row| row.bg(rgb(theme::current().active_bg)))
                     .child(
                         div()
                             .flex_shrink_0()
                             .w(px(KIND_CELLS * cell_width))
-                            .text_color(rgb(theme::SYMBOL))
+                            .text_color(rgb(theme::current().symbol))
                             .child(kind_label(item.kind)),
                     )
                     .child(
@@ -216,11 +216,11 @@ impl CompletionPopup {
                             .flex_shrink_0()
                             .child(
                                 div()
-                                    .text_color(rgb(theme::STRONG))
+                                    .text_color(rgb(theme::current().strong))
                                     .child(SharedString::from(item.label.clone())),
                             )
                             .children(item.label_detail.clone().map(|signature| {
-                                div().text_color(rgb(theme::DIM)).child(signature)
+                                div().text_color(rgb(theme::current().dim)).child(signature)
                             })),
                     )
                     .children(item.detail.clone().map(|detail| {
@@ -230,7 +230,7 @@ impl CompletionPopup {
                             .overflow_hidden()
                             .text_ellipsis()
                             .text_right()
-                            .text_color(rgb(theme::DIM))
+                            .text_color(rgb(theme::current().dim))
                             .child(detail)
                     }))
             });
@@ -242,8 +242,8 @@ impl CompletionPopup {
             .py_1()
             .rounded_md()
             .border_1()
-            .border_color(rgb(theme::CONTROL_BORDER))
-            .bg(rgb(theme::POPUP))
+            .border_color(rgb(theme::current().control_border))
+            .bg(rgb(theme::current().popup))
             .whitespace_nowrap()
             .overflow_hidden()
             .children(rows)

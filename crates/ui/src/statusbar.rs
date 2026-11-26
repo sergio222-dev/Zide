@@ -16,16 +16,16 @@ pub const BRANCH_ICON: &str = "icons/git-branch.svg";
 /// (`↑`), those to pull (`↓`) and, when both exist (the branches diverged), the net difference.
 pub fn branch_label(branch: &BranchStatus) -> (String, u32) {
     match (branch.tracked, branch.ahead, branch.behind) {
-        (false, ..) => ("no upstream".into(), theme::DIM),
-        (true, 0, 0) => ("up-to-date".into(), theme::MUTED),
-        (true, ahead, 0) => (format!("↑{ahead}"), theme::CHANGE_ADDED),
-        (true, 0, behind) => (format!("↓{behind}"), theme::CARET_BAR),
+        (false, ..) => ("no upstream".into(), theme::current().dim),
+        (true, 0, 0) => ("up-to-date".into(), theme::current().muted),
+        (true, ahead, 0) => (format!("↑{ahead}"), theme::current().change_added),
+        (true, 0, behind) => (format!("↓{behind}"), theme::current().caret_bar),
         (true, ahead, behind) => (
             format!(
                 "↑{ahead} ↓{behind} Δ{:+}",
                 i64::from(ahead) - i64::from(behind)
             ),
-            theme::ICON_FOLDER,
+            theme::current().icon_folder,
         ),
     }
 }
@@ -34,9 +34,9 @@ pub fn branch_label(branch: &BranchStatus) -> (String, u32) {
 /// green when none does and one waits.
 pub fn claude_color(overall: Overall) -> u32 {
     match overall {
-        Overall::Off => theme::DIM,
-        Overall::Working => theme::WORKING,
-        Overall::Waiting => theme::OK,
+        Overall::Off => theme::current().dim,
+        Overall::Working => theme::current().working,
+        Overall::Waiting => theme::current().ok,
     }
 }
 
@@ -65,20 +65,20 @@ pub fn server_indicator(command: &str, server: Server) -> ServerIndicator {
     let (label, color, tooltip) = match server {
         Server::Stopped => (
             command.to_string(),
-            theme::DIM,
+            theme::current().dim,
             "Language server not running: it starts on the next request".to_string(),
         ),
         Server::Starting => (
             format!("{command} starting…"),
-            theme::WORKING,
+            theme::current().working,
             "Language server starting".to_string(),
         ),
         Server::Ready(label) => (
             label.to_string(),
-            theme::OK,
+            theme::current().ok,
             "Language server running".to_string(),
         ),
-        Server::Unavailable(why) => (command.to_string(), theme::ERROR, why.to_string()),
+        Server::Unavailable(why) => (command.to_string(), theme::current().error, why.to_string()),
     };
     ServerIndicator {
         label,
@@ -104,9 +104,9 @@ pub fn render(
     on_ai: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> StatusBar {
     let mut bar = StatusBar::new()
-        .bg(rgb(theme::BACKGROUND))
-        .border_color(rgb(theme::BORDER))
-        .text_color(rgb(theme::MUTED));
+        .bg(rgb(theme::current().background))
+        .border_color(rgb(theme::current().border))
+        .text_color(rgb(theme::current().muted));
     if let Some(notice) = status.as_ref().and_then(|s| s.notice.clone()) {
         bar = bar.left(notice);
     }
@@ -117,7 +117,11 @@ pub fn render(
                 .flex()
                 .items_center()
                 .gap_1()
-                .child(Spinner::new().small().color(rgb(theme::WORKING).into()))
+                .child(
+                    Spinner::new()
+                        .small()
+                        .color(rgb(theme::current().working).into()),
+                )
                 .child(label),
         );
     }
@@ -164,7 +168,7 @@ pub fn render(
         if let Some(progress) = &branch.progress {
             bar = bar.right(
                 div()
-                    .text_color(rgb(theme::WORKING))
+                    .text_color(rgb(theme::current().working))
                     .child(progress.label()),
             );
         }
@@ -180,7 +184,7 @@ pub fn render(
                     svg()
                         .path(BRANCH_ICON)
                         .size_3()
-                        .text_color(rgb(theme::MUTED)),
+                        .text_color(rgb(theme::current().muted)),
                 )
                 .child(branch.name.clone()),
         );
@@ -230,20 +234,20 @@ mod tests {
         let stopped = server_indicator("pyright-langserver", Server::Stopped);
         assert_eq!(
             (stopped.label.as_str(), stopped.color),
-            ("pyright-langserver", theme::DIM)
+            ("pyright-langserver", theme::current().dim)
         );
 
         let starting = server_indicator("pyright-langserver", Server::Starting);
         assert_eq!(
             (starting.label.as_str(), starting.color),
-            ("pyright-langserver starting…", theme::WORKING)
+            ("pyright-langserver starting…", theme::current().working)
         );
 
         // the running server's own name wins: a native build is not the spec's command
         let ready = server_indicator("rust-analyzer", Server::Ready("rust (native)"));
         assert_eq!(
             (ready.label.as_str(), ready.color),
-            ("rust (native)", theme::OK)
+            ("rust (native)", theme::current().ok)
         );
 
         let why = "pyright-langserver is not installed. Setup: npm install pyright";
@@ -254,7 +258,7 @@ mod tests {
                 missing.color,
                 missing.tooltip.as_str()
             ),
-            ("pyright-langserver", theme::ERROR, why)
+            ("pyright-langserver", theme::current().error, why)
         );
     }
 }

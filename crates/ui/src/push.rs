@@ -397,17 +397,23 @@ impl Workspace {
                 .whitespace_nowrap()
                 .child(
                     div()
-                        .text_color(rgb(theme::STRONG))
+                        .text_color(rgb(theme::current().strong))
                         .child(outgoing.branch.clone()),
                 )
-                .child(div().text_color(rgb(theme::DIM)).child("→"))
-                .child(div().text_color(rgb(theme::ICON_CODE)).child(format!(
-                    "{} : {}{}",
-                    outgoing.remote,
-                    outgoing.branch,
-                    if outgoing.on_remote { "" } else { " (new)" }
-                ))),
-            _ => div().text_color(rgb(theme::DIM)).child("Commits to push"),
+                .child(div().text_color(rgb(theme::current().dim)).child("→"))
+                .child(
+                    div()
+                        .text_color(rgb(theme::current().icon_code))
+                        .child(format!(
+                            "{} : {}{}",
+                            outgoing.remote,
+                            outgoing.branch,
+                            if outgoing.on_remote { "" } else { " (new)" }
+                        )),
+                ),
+            _ => div()
+                .text_color(rgb(theme::current().dim))
+                .child("Commits to push"),
         };
 
         div()
@@ -426,10 +432,10 @@ impl Workspace {
                     .h(px(520.))
                     .flex()
                     .flex_col()
-                    .bg(rgb(theme::POPUP))
-                    .text_color(rgb(theme::TEXT))
+                    .bg(rgb(theme::current().popup))
+                    .text_color(rgb(theme::current().text))
                     .border_1()
-                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .border_color(rgb(theme::current().control_border))
                     .rounded_md()
                     .child(
                         div()
@@ -440,7 +446,7 @@ impl Workspace {
                             .flex_shrink_0()
                             .overflow_hidden()
                             .border_b_1()
-                            .border_color(rgb(theme::BORDER))
+                            .border_color(rgb(theme::current().border))
                             .child(heading),
                     )
                     .child(
@@ -455,7 +461,7 @@ impl Workspace {
                                     .w(px(340.))
                                     .flex_shrink_0()
                                     .border_r_1()
-                                    .border_color(rgb(theme::BORDER))
+                                    .border_color(rgb(theme::current().border))
                                     .child(div().relative().flex_1().min_h_0().child(commits)),
                             )
                             .child(
@@ -494,19 +500,14 @@ impl Workspace {
                                         })
                                     }),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme::DIM))
-                                    .child(match pane {
-                                        Pane::Commits => {
-                                            "Enter: files · Tab: switch · Ctrl+Enter: push"
-                                        }
-                                        Pane::Files => {
-                                            "Enter: diff · Tab: switch · Ctrl+Enter: push"
-                                        }
-                                    }),
-                            )
+                            .child(div().text_xs().text_color(rgb(theme::current().dim)).child(
+                                match pane {
+                                    Pane::Commits => {
+                                        "Enter: files · Tab: switch · Ctrl+Enter: push"
+                                    }
+                                    Pane::Files => "Enter: diff · Tab: switch · Ctrl+Enter: push",
+                                },
+                            ))
                             .child(
                                 div()
                                     .ml_auto()
@@ -543,8 +544,12 @@ fn note(text: impl Into<SharedString>, loading: bool) -> Div {
         .gap_2()
         .p_3()
         .text_sm()
-        .text_color(rgb(theme::MUTED))
-        .children(loading.then(|| Spinner::new().small().color(rgb(theme::MUTED).into())))
+        .text_color(rgb(theme::current().muted))
+        .children(loading.then(|| {
+            Spinner::new()
+                .small()
+                .color(rgb(theme::current().muted).into())
+        }))
         .child(text.into())
 }
 
@@ -583,9 +588,9 @@ fn commit_list(popup: &PushPopup, workspace: &Entity<Workspace>) -> AnyElement {
                             .cursor_pointer()
                             .when(index == selected, |row| {
                                 row.bg(rgb(if focused {
-                                    theme::TREE_FOCUSED
+                                    theme::current().tree_focused
                                 } else {
-                                    theme::TREE_SELECTED
+                                    theme::current().tree_selected
                                 }))
                             })
                             .on_click(move |_, _, cx| {
@@ -648,7 +653,7 @@ fn commit_details(popup: &PushPopup) -> Div {
         .p_3()
         .overflow_hidden()
         .border_t_1()
-        .border_color(rgb(theme::BORDER));
+        .border_color(rgb(theme::current().border));
     let Some(commit) = popup.selected_commit() else {
         return panel;
     };
@@ -657,13 +662,13 @@ fn commit_details(popup: &PushPopup) -> Div {
         .child(
             div()
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(theme::STRONG))
+                .text_color(rgb(theme::current().strong))
                 .child(commit.subject.clone()),
         )
         .children((!commit.body.is_empty()).then(|| {
             div()
                 .text_sm()
-                .text_color(rgb(theme::MUTED))
+                .text_color(rgb(theme::current().muted))
                 .child(commit.body.clone())
         }))
         .child(
@@ -671,11 +676,11 @@ fn commit_details(popup: &PushPopup) -> Div {
                 .flex()
                 .gap_1()
                 .text_sm()
-                .text_color(rgb(theme::MUTED))
+                .text_color(rgb(theme::current().muted))
                 .child(format!("{} {}", commit.short_hash(), commit.author))
                 .child(
                     div()
-                        .text_color(rgb(theme::ICON_CODE))
+                        .text_color(rgb(theme::current().icon_code))
                         .child(format!("<{}>", commit.email)),
                 )
                 .child(format!("on {date} at {clock}")),
