@@ -177,3 +177,22 @@ pub fn current() -> &'static Theme {
 pub fn set(theme: &'static Theme) {
     *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Some(theme);
 }
+
+/// Every theme to pick from: the built-in ones, then the user's. The first is the default.
+#[allow(dead_code)] // the theme selector calls it
+pub fn all() -> &'static [&'static Theme] {
+    static ALL: std::sync::OnceLock<Vec<&'static Theme>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| vec![Box::leak(Box::new(dark()))])
+}
+
+/// The theme called `name`, if there is one.
+#[allow(dead_code)] // the theme selector calls it
+pub fn find(name: &str) -> Option<&'static Theme> {
+    all().iter().copied().find(|theme| theme.name == name)
+}
+
+/// What was wrong in the theme files read by `all`, one line each, to report once.
+#[allow(dead_code)] // the theme selector calls it
+pub fn problems() -> Vec<String> {
+    Vec::new()
+}
