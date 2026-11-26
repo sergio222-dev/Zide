@@ -338,12 +338,16 @@ impl AgentForm {
             .flex_wrap()
             .items_center()
             .gap_2()
-            .child(div().text_color(rgb(theme::TEXT)).child("Protocol"))
+            .child(
+                div()
+                    .text_color(rgb(theme::current().text))
+                    .child("Protocol"),
+            )
             .child(choice("protocol-claude", "Claude Code", Protocol::Claude))
             .child(choice("protocol-acp", "ACP", Protocol::Acp))
             .child(
                 div()
-                    .text_color(rgb(theme::DIM))
+                    .text_color(rgb(theme::current().dim))
                     .child(match self.protocol {
                         Protocol::Claude => "the command runs claude",
                         Protocol::Acp => "e.g. copilot --acp --stdio",
@@ -379,13 +383,17 @@ impl AgentForm {
             .py_1()
             .rounded_sm()
             .cursor_pointer()
-            .text_color(rgb(if current { theme::STRONG } else { theme::TEXT }))
-            .when(current, |row| row.bg(rgb(theme::ACTIVE_BG)))
+            .text_color(rgb(if current {
+                theme::current().strong
+            } else {
+                theme::current().text
+            }))
+            .when(current, |row| row.bg(rgb(theme::current().active_bg)))
             .child(
                 div()
                     .size_2()
                     .rounded_full()
-                    .when(in_use, |dot| dot.bg(rgb(theme::OK))),
+                    .when(in_use, |dot| dot.bg(rgb(theme::current().ok))),
             )
             .child(div().flex_1().truncate().child(label))
             .on_click(
@@ -404,8 +412,8 @@ fn row(label: &'static str, hint: &'static str, input: &Entity<InputState>) -> D
             div()
                 .flex()
                 .gap_2()
-                .child(div().text_color(rgb(theme::TEXT)).child(label))
-                .child(div().text_color(rgb(theme::DIM)).child(hint)),
+                .child(div().text_color(rgb(theme::current().text)).child(label))
+                .child(div().text_color(rgb(theme::current().dim)).child(hint)),
         )
         .child(Input::new(input))
 }
@@ -425,7 +433,7 @@ impl Render for AgentForm {
             .flex_none()
             .pr_3()
             .border_r_1()
-            .border_color(rgb(theme::BORDER))
+            .border_color(rgb(theme::current().border))
             .child(self.list_row(0, "Claude (PATH)".into(), Selected::Path, cx));
         for (i, agent) in agents.into_iter().enumerate() {
             let selected = Selected::Agent(agent.name.clone());
@@ -446,7 +454,7 @@ impl Render for AgentForm {
             .flex()
             .flex_col()
             .gap_3()
-            .child(div().text_color(rgb(theme::MUTED)).child(if !editing {
+            .child(div().text_color(rgb(theme::current().muted)).child(if !editing {
                 "Claude found on PATH (or its usual install places), with its own config in \
                  ~/.claude."
             } else if self.protocol == Protocol::Acp {
@@ -475,7 +483,7 @@ impl Render for AgentForm {
             })
             .children(self.message.as_ref().map(|(ok, text)| {
                 div()
-                    .text_color(rgb(if *ok { theme::OK } else { theme::ERROR }))
+                    .text_color(rgb(if *ok { theme::current().ok } else { theme::current().error }))
                     .child(text.clone())
             }))
             .child(
@@ -487,7 +495,7 @@ impl Render for AgentForm {
                     .gap_2()
                     .children(
                         self.testing
-                            .then(|| Spinner::new().small().color(rgb(theme::MUTED).into())),
+                            .then(|| Spinner::new().small().color(rgb(theme::current().muted).into())),
                     )
                     .child(
                         Button::new("agent-test")

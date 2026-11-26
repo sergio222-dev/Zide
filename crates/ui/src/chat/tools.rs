@@ -30,7 +30,7 @@ fn mono_block() -> Div {
         .flex()
         .flex_col()
         .rounded_md()
-        .bg(rgb(theme::BACKGROUND))
+        .bg(rgb(theme::current().background))
         .px_3()
         .py_2()
         .font_family(crate::fonts::editor())
@@ -42,7 +42,7 @@ fn file_label(input: &Value) -> Option<Div> {
     Some(
         div()
             .text_xs()
-            .text_color(rgb(theme::DIM))
+            .text_color(rgb(theme::current().dim))
             .child(path.to_owned()),
     )
 }
@@ -76,9 +76,9 @@ fn output_view(output: &ToolOutput) -> Option<Div> {
     }
     let (lines, hidden) = clip(&output.text, OUTPUT_LINES);
     let color = if output.is_error {
-        theme::ERROR
+        theme::current().error
     } else {
-        theme::MUTED
+        theme::current().muted
     };
     Some(
         mono_block()
@@ -86,7 +86,7 @@ fn output_view(output: &ToolOutput) -> Option<Div> {
             .children(lines.into_iter().map(|line| line.to_owned()))
             .children((hidden > 0).then(|| {
                 div()
-                    .text_color(rgb(theme::DIM))
+                    .text_color(rgb(theme::current().dim))
                     .child(format!("… {hidden} more lines"))
             })),
     )
@@ -169,14 +169,14 @@ impl Chats {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.claude_toggle_tool(chat_id, &toggle, cx)
                     }))
-                    .child(div().text_color(rgb(theme::DIM)).child(if open {
+                    .child(div().text_color(rgb(theme::current().dim)).child(if open {
                         "▾"
                     } else {
                         "▸"
                     }))
                     .child(
                         div()
-                            .text_color(rgb(theme::STRONG))
+                            .text_color(rgb(theme::current().strong))
                             .child(section.title.clone()),
                     );
             Collapsible::new()
@@ -196,9 +196,9 @@ impl Chats {
     /// A tool call: its line, opening to the change it makes and what it printed.
     pub(super) fn tool_card(&self, chat: &Chat, call: &ToolCall, cx: &mut Context<Self>) -> Div {
         let (mark, color) = match &call.output {
-            None => ("…", theme::DIM),
-            Some(output) if output.is_error => ("✗", theme::ERROR),
-            Some(_) => ("✓", theme::OK),
+            None => ("…", theme::current().dim),
+            Some(output) if output.is_error => ("✗", theme::current().error),
+            Some(_) => ("✓", theme::current().ok),
         };
         let open = starts_open(&call.name) != chat.toggled.contains(&call.id);
         let (chat_id, tool_id) = (chat.id, call.id.clone());
@@ -211,22 +211,22 @@ impl Chats {
             .on_click(
                 cx.listener(move |this, _, _, cx| this.claude_toggle_tool(chat_id, &tool_id, cx)),
             )
-            .child(
-                div()
-                    .text_color(rgb(theme::DIM))
-                    .child(if open { "▾" } else { "▸" }),
-            )
+            .child(div().text_color(rgb(theme::current().dim)).child(if open {
+                "▾"
+            } else {
+                "▸"
+            }))
             .child(div().text_color(rgb(color)).child(mark))
             .child(
                 div()
-                    .text_color(rgb(theme::STRONG))
+                    .text_color(rgb(theme::current().strong))
                     .child(call.name.clone()),
             )
             .child(
                 div()
                     .min_w_0()
                     .truncate()
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::current().muted))
                     .child(summary(&call.input)),
             );
         let detail = div()

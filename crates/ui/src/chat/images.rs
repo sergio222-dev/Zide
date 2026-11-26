@@ -117,7 +117,7 @@ impl Chats {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(theme::DIM))
+                            .text_color(rgb(theme::current().dim))
                             .child(format!("Image #{}", picture.number)),
                     )
                     .id(SharedString::from(format!(
@@ -216,9 +216,9 @@ impl Chats {
                 .gap_1()
                 .px_2()
                 .rounded_md()
-                .bg(rgb(theme::TREE_SELECTED))
+                .bg(rgb(theme::current().tree_selected))
                 .text_sm()
-                .text_color(rgb(theme::TEXT))
+                .text_color(rgb(theme::current().text))
                 .child(
                     div()
                         .id(SharedString::from(format!("image-open-{index}")))
@@ -231,7 +231,7 @@ impl Chats {
                 .child(
                     div()
                         .id(SharedString::from(format!("image-remove-{index}")))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::current().muted))
                         .cursor_pointer()
                         .child("×")
                         .on_click(

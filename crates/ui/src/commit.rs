@@ -355,14 +355,14 @@ pub(crate) fn panel_tabs(workspace: &Entity<Workspace>, active: PanelTab) -> Div
             .cursor_pointer()
             .border_b_2()
             .border_color(rgb(if which == active {
-                theme::ACTIVE_BORDER
+                theme::current().active_border
             } else {
-                theme::BACKGROUND
+                theme::current().background
             }))
             .text_color(rgb(if which == active {
-                theme::STRONG
+                theme::current().strong
             } else {
-                theme::DIM
+                theme::current().dim
             }))
             .on_click(move |_, window, cx| {
                 workspace.update(cx, |this, cx| this.set_panel_tab(which, window, cx))
@@ -429,9 +429,9 @@ fn commit_menu(at: Point<Pixels>, workspace: Entity<Workspace>) -> impl IntoElem
                     .occlude()
                     .min_w(px(200.))
                     .py_1()
-                    .bg(rgb(theme::POPUP))
+                    .bg(rgb(theme::current().popup))
                     .border_1()
-                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .border_color(rgb(theme::current().control_border))
                     .rounded_md()
                     .child(
                         div()
@@ -442,7 +442,7 @@ fn commit_menu(at: Point<Pixels>, workspace: Entity<Workspace>) -> impl IntoElem
                             .items_center()
                             .whitespace_nowrap()
                             .cursor_pointer()
-                            .hover(|d| d.bg(rgb(theme::SELECTION)))
+                            .hover(|d| d.bg(rgb(theme::current().selection)))
                             .on_click(move |_, window, cx| {
                                 discard.update(cx, |this, cx| this.confirm_discard(window, cx))
                             })
@@ -456,11 +456,11 @@ fn commit_menu(at: Point<Pixels>, workspace: Entity<Workspace>) -> impl IntoElem
 
 pub(crate) fn kind_color(kind: ChangeKind) -> u32 {
     match kind {
-        ChangeKind::Added => theme::OK,
-        ChangeKind::Modified | ChangeKind::Renamed => theme::ICON_CODE,
-        ChangeKind::Deleted => theme::CHANGE_REMOVED,
+        ChangeKind::Added => theme::current().ok,
+        ChangeKind::Modified | ChangeKind::Renamed => theme::current().icon_code,
+        ChangeKind::Deleted => theme::current().change_removed,
         // red: git does not track it yet (the project tree shows it; the panel does not list it)
-        ChangeKind::Conflicted | ChangeKind::Untracked => theme::ERROR,
+        ChangeKind::Conflicted | ChangeKind::Untracked => theme::current().error,
     }
 }
 
@@ -474,10 +474,14 @@ pub(crate) fn check_box(check: Check) -> Div {
         .size(px(14.))
         .rounded(px(3.))
         .border_1()
-        .border_color(rgb(if on { theme::ACTIVE_BORDER } else { theme::DIM }))
-        .when(on, |d| d.bg(rgb(theme::ACTIVE_BORDER)))
+        .border_color(rgb(if on {
+            theme::current().active_border
+        } else {
+            theme::current().dim
+        }))
+        .when(on, |d| d.bg(rgb(theme::current().active_border)))
         .text_size(px(11.))
-        .text_color(rgb(theme::STRONG))
+        .text_color(rgb(theme::current().strong))
         .child(match check {
             Check::On => "✓",
             Check::Some => "–",
@@ -880,9 +884,9 @@ impl Workspace {
                             .whitespace_nowrap()
                             .when(is_selected, |d| {
                                 d.bg(rgb(if list_focused {
-                                    theme::TREE_FOCUSED
+                                    theme::current().tree_focused
                                 } else {
-                                    theme::TREE_SELECTED
+                                    theme::current().tree_selected
                                 }))
                             })
                             .on_click(move |event, window, cx| {
@@ -946,12 +950,12 @@ impl Workspace {
                                     .flex_shrink_0()
                                     .text_color(rgb(match row.kind {
                                         RowKind::File(kind) => kind_color(kind),
-                                        _ => theme::TEXT,
+                                        _ => theme::current().text,
                                     }))
                                     .child(row.name.clone()),
                             )
                             .when(foldable, |d| {
-                                d.child(div().text_color(rgb(theme::DIM)).child(format!(
+                                d.child(div().text_color(rgb(theme::current().dim)).child(format!(
                                     "{} file{}",
                                     row.count,
                                     if row.count == 1 { "" } else { "s" }
@@ -976,9 +980,9 @@ impl Workspace {
             .w(px(340.))
             .h_full()
             .border_r_1()
-            .border_color(rgb(theme::BORDER))
-            .bg(rgb(theme::BACKGROUND))
-            .text_color(rgb(theme::TEXT))
+            .border_color(rgb(theme::current().border))
+            .bg(rgb(theme::current().background))
+            .text_color(rgb(theme::current().text))
             .child(panel_tabs(&workspace_for_tabs, PanelTab::Commit))
             .child(
                 div()
@@ -1016,7 +1020,7 @@ impl Workspace {
                     .child(
                         div()
                             .ml_auto()
-                            .text_color(rgb(theme::ICON_CODE))
+                            .text_color(rgb(theme::current().icon_code))
                             .child(format!("{ticked} of {count} selected")),
                     ),
             )
@@ -1053,7 +1057,7 @@ impl Workspace {
                 div()
                     .px_2()
                     .text_xs()
-                    .text_color(rgb(theme::DIM))
+                    .text_color(rgb(theme::current().dim))
                     .child("Tab: message · Alt+Enter: commit · Esc: files"),
             )
     }
@@ -1224,7 +1228,7 @@ mod tests {
         assert_eq!(changes.count(), 1);
         assert_eq!(changes.paths(), ["kept.rs"]);
         assert!(changes.change("loose.rs").is_none());
-        assert_eq!(kind_color(ChangeKind::Untracked), theme::ERROR);
+        assert_eq!(kind_color(ChangeKind::Untracked), theme::current().error);
     }
 
     #[::core::prelude::v1::test]

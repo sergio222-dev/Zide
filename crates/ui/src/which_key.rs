@@ -35,9 +35,12 @@ pub fn render(group: &Binding, next: &[&Binding]) -> Div {
     next.sort_by_key(|binding| order(binding));
     let rows = next.into_iter().map(|binding| {
         let (color, description) = if binding.is_group() {
-            (theme::CARET_BAR, format!("+{}", binding.description))
+            (
+                theme::current().caret_bar,
+                format!("+{}", binding.description),
+            )
         } else {
-            (theme::SYMBOL, binding.description.to_string())
+            (theme::current().symbol, binding.description.to_string())
         };
         div()
             .flex()
@@ -47,10 +50,10 @@ pub fn render(group: &Binding, next: &[&Binding]) -> Div {
                     .w(px(36.))
                     .flex()
                     .justify_end()
-                    .text_color(rgb(theme::ICON_FOLDER))
+                    .text_color(rgb(theme::current().icon_folder))
                     .child(label(binding.key)),
             )
-            .child(div().text_color(rgb(theme::DIM)).child("→"))
+            .child(div().text_color(rgb(theme::current().dim)).child("→"))
             .child(div().text_color(rgb(color)).child(description))
     });
     div()
@@ -61,15 +64,15 @@ pub fn render(group: &Binding, next: &[&Binding]) -> Div {
         .py_2()
         .rounded_md()
         .border_1()
-        .border_color(rgb(theme::ACTIVE_BORDER))
-        .bg(rgb(theme::POPUP))
+        .border_color(rgb(theme::current().active_border))
+        .bg(rgb(theme::current().popup))
         .shadow_lg()
         .font_family(fonts::editor())
         .text_sm()
         .child(
             div()
                 .pb_1()
-                .text_color(rgb(theme::CARET_BAR))
+                .text_color(rgb(theme::current().caret_bar))
                 .child(format!("+{}", group.description)),
         )
         .children(rows)
@@ -80,7 +83,11 @@ pub fn render(group: &Binding, next: &[&Binding]) -> Div {
                 .justify_center()
                 .gap_2()
                 .text_xs()
-                .child(div().text_color(rgb(theme::ICON_FOLDER)).child("esc"))
-                .child(div().text_color(rgb(theme::DIM)).child("close")),
+                .child(
+                    div()
+                        .text_color(rgb(theme::current().icon_folder))
+                        .child("esc"),
+                )
+                .child(div().text_color(rgb(theme::current().dim)).child("close")),
         )
 }

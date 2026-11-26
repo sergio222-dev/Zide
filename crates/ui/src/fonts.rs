@@ -209,8 +209,8 @@ fn row(label: &'static str, hint: &'static str, select: &FontSelect) -> Div {
             div()
                 .flex()
                 .gap_2()
-                .child(div().text_color(rgb(theme::STRONG)).child(label))
-                .child(div().text_color(rgb(theme::MUTED)).child(hint)),
+                .child(div().text_color(rgb(theme::current().strong)).child(label))
+                .child(div().text_color(rgb(theme::current().muted)).child(hint)),
         )
         .child(Select::new(select).menu_max_h(px(320.)))
 }
@@ -230,7 +230,7 @@ impl Render for FontsForm {
             .children(
                 self.error
                     .clone()
-                    .map(|error| div().text_color(rgb(theme::ERROR)).child(error)),
+                    .map(|error| div().text_color(rgb(theme::current().error)).child(error)),
             )
     }
 }

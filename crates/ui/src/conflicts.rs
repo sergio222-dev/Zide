@@ -361,7 +361,7 @@ impl Workspace {
         let name = |text: &str| {
             div()
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(theme::STRONG))
+                .text_color(rgb(theme::current().strong))
                 .child(text.to_string())
         };
         let words = |text: &str| div().child(text.to_string());
@@ -405,8 +405,8 @@ impl Workspace {
             .h(px(ROW_HEIGHT))
             .flex_shrink_0()
             .border_b_1()
-            .border_color(rgb(theme::BORDER))
-            .text_color(rgb(theme::MUTED))
+            .border_color(rgb(theme::current().border))
+            .text_color(rgb(theme::current().muted))
             .child(column("Name".into()))
             .child(column(format!("Yours ({yours})")))
             .child(column(format!("Theirs ({theirs})")));
@@ -430,10 +430,12 @@ impl Workspace {
                                     .child(div().w(px(12.)).child("▾"))
                                     .child(Icon::new(icon).size_4().text_color(rgb(color)))
                                     .child(label.clone())
-                                    .child(div().text_color(rgb(theme::DIM)).child(format!(
-                                        "{count} file{}",
-                                        if *count == 1 { "" } else { "s" }
-                                    )))
+                                    .child(div().text_color(rgb(theme::current().dim)).child(
+                                        format!(
+                                            "{count} file{}",
+                                            if *count == 1 { "" } else { "s" }
+                                        ),
+                                    ))
                                     .into_any_element()
                             }
                             Row::File {
@@ -446,7 +448,9 @@ impl Workspace {
                                 let (index, workspace) = (*index, workspace.clone());
                                 let (icon, color) = file_icon::for_row(name, false, false);
                                 line.cursor_pointer()
-                                    .when(index == selected, |row| row.bg(rgb(theme::TREE_FOCUSED)))
+                                    .when(index == selected, |row| {
+                                        row.bg(rgb(theme::current().tree_focused))
+                                    })
                                     .on_click(move |event, window, cx| {
                                         let double = event.click_count() == 2;
                                         workspace.update(cx, |this, cx| {
@@ -481,7 +485,7 @@ impl Workspace {
                                                 d.child(
                                                     div()
                                                         .text_xs()
-                                                        .text_color(rgb(theme::DIM))
+                                                        .text_color(rgb(theme::current().dim))
                                                         .child(dir.clone()),
                                                 )
                                             }),
@@ -524,10 +528,10 @@ impl Workspace {
                     .flex_col()
                     .gap_3()
                     .p_4()
-                    .bg(rgb(theme::POPUP))
-                    .text_color(rgb(theme::TEXT))
+                    .bg(rgb(theme::current().popup))
+                    .text_color(rgb(theme::current().text))
                     .border_1()
-                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .border_color(rgb(theme::current().control_border))
                     .rounded_md()
                     .child(heading)
                     .child(
@@ -542,9 +546,9 @@ impl Workspace {
                                     .flex_col()
                                     .flex_1()
                                     .min_w_0()
-                                    .bg(rgb(theme::BACKGROUND))
+                                    .bg(rgb(theme::current().background))
                                     .border_1()
-                                    .border_color(rgb(theme::BORDER))
+                                    .border_color(rgb(theme::current().border))
                                     .child(header)
                                     .child(
                                         div()

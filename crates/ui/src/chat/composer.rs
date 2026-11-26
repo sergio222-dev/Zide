@@ -20,11 +20,11 @@ fn panel(width: f32) -> Div {
         .p_2()
         .rounded_lg()
         .border_1()
-        .border_color(rgb(theme::CONTROL_BORDER))
-        .bg(rgb(theme::POPUP))
+        .border_color(rgb(theme::current().control_border))
+        .bg(rgb(theme::current().popup))
         .shadow_lg()
         .text_sm()
-        .text_color(rgb(theme::TEXT))
+        .text_color(rgb(theme::current().text))
 }
 
 impl Chats {
@@ -52,8 +52,8 @@ impl Chats {
                 div()
                     .rounded_xl()
                     .border_1()
-                    .border_color(rgb(theme::CONTROL_BORDER))
-                    .bg(rgb(theme::POPUP))
+                    .border_color(rgb(theme::current().control_border))
+                    .bg(rgb(theme::current().popup))
                     .px_3()
                     .py_2()
                     .children(images)
@@ -76,7 +76,7 @@ impl Chats {
                     .gap_4()
                     .px_1()
                     .text_xs()
-                    .text_color(rgb(theme::DIM))
+                    .text_color(rgb(theme::current().dim))
                     .child(
                         div()
                             .flex()
@@ -86,7 +86,7 @@ impl Chats {
                             .children(bare.then(|| {
                                 div()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(theme::ERROR))
+                                    .text_color(rgb(theme::current().error))
                                     .child("BARE MODE")
                             })),
                     )
@@ -173,12 +173,11 @@ impl Chats {
                         .py_1p5()
                         .rounded_md()
                         .cursor_pointer()
-                        .hover(|row| row.bg(rgb(theme::TREE_SELECTED)))
+                        .hover(|row| row.bg(rgb(theme::current().tree_selected)))
                         .child(row.clone())
-                        .children(
-                            (*row == selected)
-                                .then(|| Icon::new(IconName::Check).text_color(rgb(theme::OK))),
-                        )
+                        .children((*row == selected).then(|| {
+                            Icon::new(IconName::Check).text_color(rgb(theme::current().ok))
+                        }))
                         .on_click(move |_, window, cx| {
                             workspace
                                 .update(cx, |this, cx| this.claude_pick_model(id, &name, cx))
@@ -222,15 +221,23 @@ impl Chats {
                         div()
                             .flex()
                             .gap_2()
-                            .child(div().text_color(rgb(theme::MUTED)).child("Effort"))
-                            .child(div().text_color(rgb(theme::STRONG)).child(label.clone())),
+                            .child(
+                                div()
+                                    .text_color(rgb(theme::current().muted))
+                                    .child("Effort"),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(theme::current().strong))
+                                    .child(label.clone()),
+                            ),
                     )
                     .child(
                         div()
                             .flex()
                             .justify_between()
                             .text_xs()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::current().muted))
                             .child("Faster")
                             .child("Smarter"),
                     )
@@ -239,10 +246,10 @@ impl Chats {
                         div()
                             .id("claude-effort-default")
                             .text_xs()
-                            .text_color(rgb(theme::DIM))
+                            .text_color(rgb(theme::current().dim))
                             .when(chosen, |hint| {
                                 hint.cursor_pointer()
-                                    .hover(|hint| hint.text_color(rgb(theme::STRONG)))
+                                    .hover(|hint| hint.text_color(rgb(theme::current().strong)))
                                     .on_click(move |_, _, cx| {
                                         let reset = reset.clone();
                                         workspace

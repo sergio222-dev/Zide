@@ -2304,8 +2304,8 @@ impl Workspace {
                     let row = &rows[index];
                     let workspace = workspace.clone();
                     let background = match (selected == Some(index), focused) {
-                        (true, true) => Some(theme::TREE_FOCUSED),
-                        (true, false) => Some(theme::TREE_SELECTED),
+                        (true, true) => Some(theme::current().tree_focused),
+                        (true, false) => Some(theme::current().tree_selected),
                         _ => None,
                     };
                     let line = div()
@@ -2366,10 +2366,10 @@ impl Workspace {
                 .id(id)
                 .p_1()
                 .rounded(px(3.))
-                .text_color(rgb(theme::MUTED))
+                .text_color(rgb(theme::current().muted))
                 .hover(|d| {
-                    d.bg(rgb(theme::TREE_SELECTED))
-                        .text_color(rgb(theme::STRONG))
+                    d.bg(rgb(theme::current().tree_selected))
+                        .text_color(rgb(theme::current().strong))
                 })
                 .child(Icon::new(icon).size_4())
         };
@@ -2381,9 +2381,9 @@ impl Workspace {
             .w(px(TREE_WIDTH))
             .h_full()
             .border_r_1()
-            .border_color(rgb(theme::BORDER))
-            .bg(rgb(theme::BACKGROUND))
-            .text_color(rgb(theme::TEXT))
+            .border_color(rgb(theme::current().border))
+            .bg(rgb(theme::current().background))
+            .text_color(rgb(theme::current().text))
             .child(
                 div()
                     .flex()
@@ -3929,7 +3929,7 @@ impl Render for Workspace {
                 .rounded_sm()
                 .bg(rgba(0x000000b0))
                 .text_xs()
-                .text_color(rgb(theme::STRONG))
+                .text_color(rgb(theme::current().strong))
                 .child(meter.label()),
         )
     }
@@ -3949,7 +3949,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(theme::BACKGROUND))
+            .bg(rgb(theme::current().background))
             .key_context("Workspace")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| {
@@ -4158,7 +4158,7 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .h_full()
-                                .text_color(rgb(theme::TEXT))
+                                .text_color(rgb(theme::current().text))
                                 .children(self.find_panel(cx))
                                 .child(viewer.render(
                                     std::rc::Rc::new({
@@ -4215,7 +4215,7 @@ impl Workspace {
                                         this.zoom(event, window, cx);
                                     }
                                 })),
-                            None => div().flex_1().p_4().text_color(rgb(theme::DIM)).child(
+                            None => div().flex_1().p_4().text_color(rgb(theme::current().dim)).child(
                                 "Press Space twice to open the popup. Alt+1 shows the project tree.",
                             ),
                         })
@@ -4226,7 +4226,7 @@ impl Workspace {
                                 .h_full()
                                 .p_4()
                                 .border_l_1()
-                                .border_color(rgb(theme::BORDER))
+                                .border_color(rgb(theme::current().border))
                                 .child(view)
                         }))
                         .into_any_element()
@@ -4357,7 +4357,7 @@ impl Workspace {
                 .px_3()
                 .py_1()
                 .border_b_1()
-                .border_color(rgb(theme::CONTROL_BORDER))
+                .border_color(rgb(theme::current().control_border))
                 .child(
                     div()
                         .flex()
@@ -4367,7 +4367,11 @@ impl Workspace {
                         .child(
                             div()
                                 .min_w(px(90.))
-                                .text_color(rgb(if failed { theme::ERROR } else { theme::MUTED }))
+                                .text_color(rgb(if failed {
+                                    theme::current().error
+                                } else {
+                                    theme::current().muted
+                                }))
                                 .child(summary),
                         )
                         .child(
@@ -4429,13 +4433,13 @@ fn small_button(id: &'static str, label: &'static str, on: bool) -> Stateful<Div
         .px_2()
         .rounded_sm()
         .border_1()
-        .border_color(rgb(theme::CONTROL_BORDER))
+        .border_color(rgb(theme::current().control_border))
         .cursor_pointer()
         .child(label);
     if on {
         button
-            .bg(rgb(theme::ACTIVE_BG))
-            .border_color(rgb(theme::ACTIVE_BORDER))
+            .bg(rgb(theme::current().active_bg))
+            .border_color(rgb(theme::current().active_border))
     } else {
         button
     }
@@ -4538,7 +4542,12 @@ fn command_list(
         .searchable(false)
         .bordered(false)
         .max_h(px(320.))
-        .empty(|_, _, _| div().p_3().text_color(rgb(theme::DIM)).child("No results"))
+        .empty(|_, _, _| {
+            div()
+                .p_3()
+                .text_color(rgb(theme::current().dim))
+                .child("No results")
+        })
         .on_select(move |path, _, cx| {
             hovered.update(cx, |this, cx| {
                 if let Some(popup) = this.popup.as_mut().filter(|p| p.tab == tab)
@@ -4584,7 +4593,7 @@ fn action_items(
                     .child(
                         div()
                             .ml_auto()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::current().muted))
                             .child(shortcut),
                     )
                     .children(on.map(|on| {
@@ -4627,7 +4636,7 @@ fn project_items(projects: &[PathBuf]) -> Vec<CommandItem> {
                 div().flex().flex_1().gap_2().child(title.clone()).child(
                     div()
                         .ml_auto()
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::current().muted))
                         .child(location.clone()),
                 )
             })
@@ -4669,14 +4678,14 @@ fn symbol_items(index: &FileIndex, symbols: &StubStore, hits: &[SymbolHit]) -> V
                         div()
                             .flex_shrink_0()
                             .w(px(64.))
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::current().muted))
                             .child(kind),
                     )
                     .child(highlighted(name.clone(), ranges.clone()))
                     .child(
                         div()
                             .ml_auto()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::current().muted))
                             .child(place.clone()),
                     )
             })
@@ -4729,7 +4738,7 @@ fn text_items(index: &FileIndex, hits: &[TextHit]) -> Vec<CommandItem> {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::current().muted))
                             .child(place.clone()),
                     )
                     .child(highlighted_bytes(text.clone(), ranges.clone()))
@@ -4739,7 +4748,7 @@ fn text_items(index: &FileIndex, hits: &[TextHit]) -> Vec<CommandItem> {
 }
 
 const HIGHLIGHT: fn() -> HighlightStyle = || HighlightStyle {
-    color: Some(rgb(theme::ACTIVE_BORDER).into()),
+    color: Some(rgb(theme::current().active_border).into()),
     font_weight: Some(FontWeight::BOLD),
     ..Default::default()
 };
@@ -4778,12 +4787,12 @@ fn chip(
         .px_1()
         .rounded_sm()
         .border_1()
-        .border_color(rgb(theme::CONTROL_BORDER))
+        .border_color(rgb(theme::current().control_border))
         .cursor_pointer()
         .child(label);
     let chip = if on {
-        chip.bg(rgb(theme::ACTIVE_BG))
-            .border_color(rgb(theme::ACTIVE_BORDER))
+        chip.bg(rgb(theme::current().active_bg))
+            .border_color(rgb(theme::current().active_border))
     } else {
         chip
     };
@@ -4800,7 +4809,8 @@ fn popup_frame(
     let tab_label = |label: &'static str, this: Tab| {
         let item = div().px_2().rounded_sm().child(label);
         if tab == this {
-            item.bg(rgb(theme::ACTIVE_BG)).font_weight(FontWeight::BOLD)
+            item.bg(rgb(theme::current().active_bg))
+                .font_weight(FontWeight::BOLD)
         } else {
             item
         }
@@ -4815,9 +4825,9 @@ fn popup_frame(
         .gap_2()
         .flex()
         .flex_col()
-        .bg(rgb(theme::POPUP))
+        .bg(rgb(theme::current().popup))
         .border_1()
-        .border_color(rgb(theme::CONTROL_BORDER))
+        .border_color(rgb(theme::current().control_border))
         .rounded_md()
         .child(
             div()
@@ -4835,7 +4845,12 @@ fn popup_frame(
         )
         .child(Input::new(input))
         .children(filters)
-        .child(div().text_xs().text_color(rgb(theme::MUTED)).child(status))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::current().muted))
+                .child(status),
+        )
 }
 
 /// The window's content: the welcome screen until a project is opened, then its workspace.
@@ -5195,17 +5210,17 @@ fn apply_palette(cx: &mut App) {
         theme.notification.margins.bottom = STATUS_BAR_HEIGHT + px(16.);
         let colors = &mut theme.colors;
         // background and text
-        colors.popover = rgb(theme::POPUP).into();
-        colors.popover_foreground = rgb(theme::TEXT).into();
+        colors.popover = rgb(theme::current().popup).into();
+        colors.popover_foreground = rgb(theme::current().text).into();
         // the selected row, like the active tab chip
-        colors.accent = rgb(theme::ACTIVE_BG).into();
-        colors.accent_foreground = rgb(theme::STRONG).into();
+        colors.accent = rgb(theme::current().active_bg).into();
+        colors.accent_foreground = rgb(theme::current().strong).into();
         // the diff dialog: the editor's background, with Zide's green and red for what changed
-        colors.background = rgb(theme::BACKGROUND).into();
-        colors.success = rgb(theme::OK).into();
-        colors.danger = rgb(theme::ERROR).into();
+        colors.background = rgb(theme::current().background).into();
+        colors.success = rgb(theme::current().ok).into();
+        colors.danger = rgb(theme::current().error).into();
         // shortcuts, paths, hints
-        colors.muted_foreground = rgb(theme::MUTED).into();
+        colors.muted_foreground = rgb(theme::current().muted).into();
     });
 }
 

@@ -160,8 +160,8 @@ impl Render for ResetDialog {
                 .px_2()
                 .cursor_pointer()
                 .rounded_md()
-                .when(mode == self.mode, |d| d.bg(rgb(theme::ACTIVE_BG)))
-                .hover(|d| d.bg(rgb(theme::SELECTION)))
+                .when(mode == self.mode, |d| d.bg(rgb(theme::current().active_bg)))
+                .hover(|d| d.bg(rgb(theme::current().selection)))
                 .child(if mode == self.mode { "◉" } else { "○" })
                 .child(mode.label())
                 .on_click(move |_, _, cx| {
@@ -176,9 +176,9 @@ impl Render for ResetDialog {
                 .pt_1()
                 .text_xs()
                 .text_color(rgb(if self.mode == ResetMode::Hard {
-                    theme::ERROR
+                    theme::current().error
                 } else {
-                    theme::MUTED
+                    theme::current().muted
                 }))
                 .child(self.mode.describe()),
         )
@@ -555,8 +555,10 @@ pub fn view(menu: &ContextMenu, entity: &Entity<LogPanel>) -> impl IntoElement {
                 .items_center()
                 .whitespace_nowrap()
                 .cursor_pointer()
-                .when(position == menu.row, |d| d.bg(rgb(theme::TREE_FOCUSED)))
-                .hover(|d| d.bg(rgb(theme::SELECTION)))
+                .when(position == menu.row, |d| {
+                    d.bg(rgb(theme::current().tree_focused))
+                })
+                .hover(|d| d.bg(rgb(theme::current().selection)))
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |this, cx| this.menu_action(action, cx))
                 })
@@ -574,9 +576,9 @@ pub fn view(menu: &ContextMenu, entity: &Entity<LogPanel>) -> impl IntoElement {
                     .py_1()
                     .flex()
                     .flex_col()
-                    .bg(rgb(theme::POPUP))
+                    .bg(rgb(theme::current().popup))
                     .border_1()
-                    .border_color(rgb(theme::CONTROL_BORDER))
+                    .border_color(rgb(theme::current().control_border))
                     .rounded_md()
                     .children(rows),
             ),

@@ -166,7 +166,7 @@ pub fn list(
                                     .child(label.clone())
                                     .child(
                                         div()
-                                            .text_color(rgb(theme::DIM))
+                                            .text_color(rgb(theme::current().dim))
                                             .child(plural(*count, "file")),
                                     )
                                     .into_any_element()
@@ -179,9 +179,9 @@ pub fn list(
                                 row.pl(px(32.))
                                     .when(selected.contains(&index), |row| {
                                         row.bg(rgb(if focused {
-                                            theme::TREE_FOCUSED
+                                            theme::current().tree_focused
                                         } else {
-                                            theme::TREE_SELECTED
+                                            theme::current().tree_selected
                                         }))
                                     })
                                     .cursor_pointer()

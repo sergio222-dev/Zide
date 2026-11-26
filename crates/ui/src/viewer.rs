@@ -126,12 +126,12 @@ impl Tint {
         match self {
             Tint::Syntax(class) => style(class),
             Tint::Hint => HighlightStyle {
-                color: Some(rgb(theme::HINT_TEXT).into()),
-                background_color: Some(rgb(theme::HINT_BG).into()),
+                color: Some(rgb(theme::current().hint_text).into()),
+                background_color: Some(rgb(theme::current().hint_bg).into()),
                 ..Default::default()
             },
             Tint::Ghost => HighlightStyle {
-                color: Some(rgb(theme::DIM).into()),
+                color: Some(rgb(theme::current().dim).into()),
                 font_style: Some(FontStyle::Italic),
                 ..Default::default()
             },
@@ -697,8 +697,8 @@ impl Viewer {
                 .py_2()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(theme::CONTROL_BORDER))
-                .bg(rgb(theme::POPUP))
+                .border_color(rgb(theme::current().control_border))
+                .bg(rgb(theme::current().popup))
                 .text_sm()
                 .whitespace_normal()
                 .flex()
@@ -715,11 +715,13 @@ impl Viewer {
                                 .flex_col()
                                 .child(
                                     div()
-                                        .text_color(rgb(theme::STRONG))
+                                        .text_color(rgb(theme::current().strong))
                                         .child(headline(diagnostic)),
                                 )
                                 .children(related_lines(diagnostic).into_iter().map(|line| {
-                                    div().text_color(rgb(theme::CARET_BAR)).child(line)
+                                    div()
+                                        .text_color(rgb(theme::current().caret_bar))
+                                        .child(line)
                                 }))
                         }),
                 ),
@@ -1515,7 +1517,7 @@ impl Viewer {
                     .map_or(label.len(), |(b, _)| b)
             };
             let style = HighlightStyle {
-                color: Some(rgb(theme::STRONG).into()),
+                color: Some(rgb(theme::current().strong).into()),
                 font_weight: Some(FontWeight::BOLD),
                 ..HighlightStyle::default()
             };
@@ -1533,14 +1535,14 @@ impl Viewer {
                 .gap_2()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(theme::CONTROL_BORDER))
-                .bg(rgb(theme::POPUP))
-                .text_color(rgb(theme::MUTED))
+                .border_color(rgb(theme::current().control_border))
+                .bg(rgb(theme::current().popup))
+                .text_color(rgb(theme::current().muted))
                 .whitespace_nowrap()
                 .child(StyledText::new(label.clone()).with_highlights(active))
                 .children((hint.count > 1).then(|| {
                     div()
-                        .text_color(rgb(theme::DIM))
+                        .text_color(rgb(theme::current().dim))
                         .child(format!("+{} overloads", hint.count - 1))
                 })),
         )
@@ -1568,8 +1570,8 @@ impl Viewer {
                 .left(px(self.gutter_width() + f32::from(offset.x)))
                 .right_0()
                 .top(px(caret_y + row_height))
-                .bg(rgb(theme::BACKGROUND))
-                .text_color(rgb(theme::DIM))
+                .bg(rgb(theme::current().background))
+                .text_color(rgb(theme::current().dim))
                 .italic()
                 .children(
                     rest.into_iter()
@@ -2395,7 +2397,7 @@ impl Viewer {
 
     /// Project folder, directories, file and the symbols around the cursor.
     fn breadcrumb(&self) -> Div {
-        let separator = || div().text_color(rgb(theme::DIM)).child("›");
+        let separator = || div().text_color(rgb(theme::current().dim)).child("›");
         let mut parts: Vec<&str> = vec![self.root_name.as_str()];
         parts.extend(self.path.split('/'));
         let file = parts.pop().unwrap_or_default();
@@ -2408,7 +2410,11 @@ impl Viewer {
         for part in parts.into_iter().filter(|p| !p.is_empty()) {
             path = path.child(part.to_string()).child(separator());
         }
-        let path = path.child(div().text_color(rgb(theme::STRONG)).child(file.to_string()));
+        let path = path.child(
+            div()
+                .text_color(rgb(theme::current().strong))
+                .child(file.to_string()),
+        );
         let mut symbols = div().flex().gap_1p5().flex_shrink_0().whitespace_nowrap();
         for symbol in self.enclosing_symbols() {
             let name = symbol.name.as_deref().unwrap_or("");
@@ -2419,7 +2425,7 @@ impl Viewer {
                     .gap_1()
                     .child(
                         div()
-                            .text_color(rgb(theme::SYMBOL))
+                            .text_color(rgb(theme::current().symbol))
                             .child(symbol_glyph(symbol.kind)),
                     )
                     .child(if callable {
@@ -2434,7 +2440,7 @@ impl Viewer {
             .gap_1p5()
             .px_3()
             .py_1()
-            .text_color(rgb(theme::MUTED))
+            .text_color(rgb(theme::current().muted))
             .child(path)
             .child(symbols)
     }
@@ -2499,9 +2505,9 @@ impl Viewer {
                 .top_0()
                 .left_0()
                 .w_full()
-                .bg(rgb(theme::BACKGROUND))
+                .bg(rgb(theme::current().background))
                 .border_b_1()
-                .border_color(rgb(theme::BORDER))
+                .border_color(rgb(theme::current().border))
                 .children(pinned.into_iter().map(|(line, shown)| {
                     div()
                         .flex()
@@ -2512,7 +2518,7 @@ impl Viewer {
                                 .w(px(gutter))
                                 .pr_3()
                                 .text_right()
-                                .text_color(rgb(theme::DIM))
+                                .text_color(rgb(theme::current().dim))
                                 .child(rows.number(line, cursor_line).to_string()),
                         )
                         .child(StyledText::new(shown.text.clone()).with_highlights(shown.styles()))
@@ -2537,12 +2543,12 @@ impl Viewer {
                         let from = found.start - line.start;
                         let to = found.end - line.start;
                         let range = line.display_byte(from)..line.display_byte(to);
-                        colors = paint(&colors, range, rgb(theme::WORD).into());
+                        colors = paint(&colors, range, rgb(theme::current().word).into());
                     }
                     for (_, range) in squiggles.get(&row).into_iter().flatten() {
                         colors = restyle(&colors, range.clone(), |style| HighlightStyle {
                             underline: Some(UnderlineStyle {
-                                color: Some(rgb(theme::ERROR).into()),
+                                color: Some(rgb(theme::current().error).into()),
                                 thickness: px(1.),
                                 wavy: true,
                             }),
@@ -2554,7 +2560,7 @@ impl Viewer {
                             let from = end.start - line.start;
                             let to = end.end.min(line.start + line.chars) - line.start;
                             let range = line.display_byte(from)..line.display_byte(to);
-                            colors = paint(&colors, range, rgb(theme::BRACKET).into());
+                            colors = paint(&colors, range, rgb(theme::current().bracket).into());
                         }
                     }
                     if let Some(matches) = &matches {
@@ -2566,9 +2572,9 @@ impl Viewer {
                             let from = found.start.max(line.start) - line.start;
                             let to = found.end.min(line.start + line.chars) - line.start;
                             let color = if Some(found.start) == current_match {
-                                theme::FIND_CURRENT
+                                theme::current().find_current
                             } else {
-                                theme::FIND_MATCH
+                                theme::current().find_match
                             };
                             let range = line.display_byte(from)..line.display_byte(to);
                             colors = paint(&colors, range, rgb(color).into());
@@ -2578,7 +2584,7 @@ impl Viewer {
                     // characterwise selection paints its text
                     let selection = selection.filter(|s| !s.linewise);
                     if let Some(range) = selection.and_then(|s| s.on_line(row, line)) {
-                        colors = paint(&colors, range, rgb(theme::SELECTION).into());
+                        colors = paint(&colors, range, rgb(theme::current().selection).into());
                     }
                     let line_band = linewise_selection.filter(|s| s.covers_row(row)).map(|_| {
                         div()
@@ -2587,7 +2593,7 @@ impl Viewer {
                             .left(px((12. * digits as f32 + 28.) * scale))
                             .right_0()
                             .h(px(row_height))
-                            .bg(rgb(theme::SELECTION))
+                            .bg(rgb(theme::current().selection))
                     });
                     // The caret is drawn on the cell grid, so it is as wide on a space or
                     // a thin letter as on any other character.
@@ -2597,9 +2603,11 @@ impl Viewer {
                         let left = px(gutter + column as f32 * cell_width);
                         let caret = div().absolute().top_0().left(left).h(px(row_height));
                         if insert {
-                            caret.w(px(2.)).bg(rgb(theme::CARET_BAR)) // a bar, like a terminal's
+                            caret.w(px(2.)).bg(rgb(theme::current().caret_bar)) // a bar, like a terminal's
                         } else {
-                            caret.w(px(cell_width)).bg(rgba(0xff7a0099)) // a block you can see
+                            caret
+                                .w(px(cell_width))
+                                .bg(rgba(theme::current().caret_block)) // a block you can see
                         }
                     });
                     let bands = (0..line.level).map(|i| {
@@ -2610,7 +2618,10 @@ impl Viewer {
                             .left(px(left))
                             .w(px(line.step as f32 * cell_width))
                             .h(px(row_height))
-                            .bg(rgba(theme::INDENT_BANDS[i % theme::INDENT_BANDS.len()]))
+                            .bg(rgba(
+                                theme::current().indent_bands
+                                    [i % theme::current().indent_bands.len()],
+                            ))
                     });
                     let dots = indent::dots(&line.text).into_iter().map(|column| {
                         let left = gutter + (column as f32 + 0.5) * cell_width - 1.;
@@ -2621,7 +2632,7 @@ impl Viewer {
                             .w(px(2.))
                             .h(px(2.))
                             .rounded_full()
-                            .bg(rgba(theme::WHITESPACE))
+                            .bg(rgba(theme::current().whitespace))
                     });
                     let hover = on_hover.clone();
                     let click = on_click.clone();
@@ -2645,7 +2656,7 @@ impl Viewer {
                                 .w(px(gutter))
                                 .pr_3()
                                 .text_right()
-                                .text_color(rgb(theme::DIM))
+                                .text_color(rgb(theme::current().dim))
                                 .child(rows.number(row, cursor_line).to_string())
                                 .children(
                                     changes.get(&row).map(|change| {
@@ -2676,7 +2687,7 @@ impl Viewer {
                                 .ml_6()
                                 .whitespace_nowrap()
                                 .italic()
-                                .text_color(rgb(theme::DIM))
+                                .text_color(rgb(theme::current().dim))
                                 .child(label)
                         }))
                         .children(folded.contains(&row).then(|| {
@@ -2684,8 +2695,8 @@ impl Viewer {
                                 .px_1()
                                 .mx_1()
                                 .rounded_sm()
-                                .bg(rgb(theme::BORDER))
-                                .text_color(rgb(theme::DIM))
+                                .bg(rgb(theme::current().border))
+                                .text_color(rgb(theme::current().dim))
                                 .child("...")
                         }))
                         .children(dots)
@@ -2703,8 +2714,8 @@ impl Viewer {
             .flex_1()
             .min_h_0()
             .w_full()
-            .bg(rgb(theme::BACKGROUND))
-            .text_color(rgb(theme::TEXT))
+            .bg(rgb(theme::current().background))
+            .text_color(rgb(theme::current().text))
             .child(self.breadcrumb())
             .child(
                 div()
@@ -2753,7 +2764,7 @@ impl Viewer {
     /// cursor painted across.
     fn minimap(&self) -> impl IntoElement {
         let lines = self.lines.clone();
-        let default: Hsla = rgb(theme::TEXT).into();
+        let default: Hsla = rgb(theme::current().text).into();
         let rows = self.rows.clone();
         let across = |color: u32, alpha: f32| Hsla {
             a: alpha,
@@ -2766,22 +2777,22 @@ impl Viewer {
             .map(|(line, change)| minimap::Mark {
                 row: rows.row_of((*line).min(last)),
                 color: match change {
-                    LineChange::Added => across(theme::CHANGE_ADDED, 0.7),
-                    LineChange::Modified => across(theme::CHANGE_MODIFIED, 0.7),
+                    LineChange::Added => across(theme::current().change_added, 0.7),
+                    LineChange::Modified => across(theme::current().change_modified, 0.7),
                     LineChange::Removed | LineChange::RemovedBelow => {
-                        across(theme::CHANGE_REMOVED, 0.7)
+                        across(theme::current().change_removed, 0.7)
                     }
                 },
             })
             .collect();
         marks.extend(self.squiggles.keys().map(|line| minimap::Mark {
             row: rows.row_of((*line).min(last)),
-            color: across(theme::ERROR, 0.8),
+            color: across(theme::current().error, 0.8),
         }));
         let (cursor_line, _) = self.cursor_cell();
         marks.push(minimap::Mark {
             row: rows.row_of(cursor_line.min(last)),
-            color: across(theme::MINIMAP_CURSOR, 0.9),
+            color: across(theme::current().minimap_cursor, 0.9),
         });
         minimap::Minimap {
             rows,
@@ -3018,18 +3029,19 @@ fn related_lines(diagnostic: &Diagnostic) -> Vec<String> {
 }
 
 fn style(class: Class) -> HighlightStyle {
+    let theme = theme::current();
     let color = match class {
-        Class::Keyword | Class::Marker => 0xc678dd,
-        Class::String => 0x98c379,
-        Class::Number | Class::Constant | Class::Strong => 0xd19a66,
-        Class::Comment => 0x7f848e,
-        Class::Function => 0x61afef,
-        Class::Type | Class::Tag => 0xe5c07b,
-        Class::Property | Class::Attribute => 0xd19a66,
-        Class::Variable | Class::Heading => 0xe06c75,
-        Class::Operator | Class::Punctuation => 0xabb2bf,
-        Class::Emphasis => 0xc678dd,
-        Class::Link => 0x56b6c2,
+        Class::Keyword | Class::Marker => theme.syntax_keyword,
+        Class::String => theme.syntax_string,
+        Class::Number | Class::Constant | Class::Strong => theme.syntax_number,
+        Class::Comment => theme.syntax_comment,
+        Class::Function => theme.syntax_function,
+        Class::Type | Class::Tag => theme.syntax_type,
+        Class::Property | Class::Attribute => theme.syntax_property,
+        Class::Variable | Class::Heading => theme.syntax_variable,
+        Class::Operator | Class::Punctuation => theme.syntax_operator,
+        Class::Emphasis => theme.syntax_emphasis,
+        Class::Link => theme.syntax_link,
     };
     let mut style = HighlightStyle {
         color: Some(rgb(color).into()),
@@ -3198,10 +3210,14 @@ fn expand_tabs(line: &str) -> (String, Vec<usize>) {
 /// from the last commit; deletions are a short notch on the line edge where the lines were.
 fn change_mark(change: LineChange, gutter: f32, scale: f32, row_height: f32) -> Div {
     let (color, top, height) = match change {
-        LineChange::Added => (theme::CHANGE_ADDED, 0., row_height),
-        LineChange::Modified => (theme::CHANGE_MODIFIED, 0., row_height),
-        LineChange::Removed => (theme::CHANGE_REMOVED, 0., 4. * scale),
-        LineChange::RemovedBelow => (theme::CHANGE_REMOVED, row_height - 4. * scale, 4. * scale),
+        LineChange::Added => (theme::current().change_added, 0., row_height),
+        LineChange::Modified => (theme::current().change_modified, 0., row_height),
+        LineChange::Removed => (theme::current().change_removed, 0., 4. * scale),
+        LineChange::RemovedBelow => (
+            theme::current().change_removed,
+            row_height - 4. * scale,
+            4. * scale,
+        ),
     };
     div()
         .absolute()

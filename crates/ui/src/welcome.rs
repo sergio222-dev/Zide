@@ -159,7 +159,12 @@ impl Welcome {
             .searchable(false)
             .bordered(false)
             .max_h(px(320.))
-            .empty(|_, _, _| div().p_3().text_color(rgb(theme::DIM)).child("No results"))
+            .empty(|_, _, _| {
+                div()
+                    .p_3()
+                    .text_color(rgb(theme::current().dim))
+                    .child("No results")
+            })
             .on_select(move |path, _, cx| {
                 hovered.update(cx, |this, cx| {
                     if let Some(palette) = this.palette.as_mut().filter(|p| p.selected != path.row)
@@ -192,8 +197,8 @@ impl Welcome {
                         .p_2()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(theme::BORDER))
-                        .bg(rgb(theme::POPUP))
+                        .border_color(rgb(theme::current().border))
+                        .bg(rgb(theme::current().popup))
                         .child(Input::new(&palette.input))
                         .child(list),
                 ),
@@ -221,18 +226,22 @@ fn project_item(project: &Path) -> CommandItem {
                     .rounded_md()
                     .bg(rgb(badge))
                     .text_xs()
-                    .text_color(rgb(theme::BACKGROUND))
+                    .text_color(rgb(theme::current().background))
                     .child(projects::initials(&title)),
             )
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().text_color(rgb(theme::STRONG)).child(title.clone()))
+                    .child(
+                        div()
+                            .text_color(rgb(theme::current().strong))
+                            .child(title.clone()),
+                    )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(theme::DIM))
+                            .text_color(rgb(theme::current().dim))
                             .child(location.clone()),
                     ),
             )
@@ -298,7 +307,12 @@ impl Render for Welcome {
             .items(items)
             .searchable(false)
             .bordered(false)
-            .empty(move |_, _, _| div().p_3().text_color(rgb(theme::DIM)).child(none))
+            .empty(move |_, _, _| {
+                div()
+                    .p_3()
+                    .text_color(rgb(theme::current().dim))
+                    .child(none)
+            })
             .on_select(move |path, _, cx| {
                 hovered.update(cx, |this, cx| {
                     if this.selected != path.row {
@@ -348,8 +362,8 @@ impl Render for Welcome {
             .relative()
             .flex()
             .size_full()
-            .bg(rgb(theme::BACKGROUND))
-            .text_color(rgb(theme::TEXT))
+            .bg(rgb(theme::current().background))
+            .text_color(rgb(theme::current().text))
             .child(
                 div()
                     .flex()
@@ -358,14 +372,14 @@ impl Render for Welcome {
                     .h_full()
                     .flex_none()
                     .p_2()
-                    .bg(rgb(theme::POPUP))
+                    .bg(rgb(theme::current().popup))
                     .child(
                         div()
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(theme::ACTIVE_BG))
-                            .text_color(rgb(theme::STRONG))
+                            .bg(rgb(theme::current().active_bg))
+                            .text_color(rgb(theme::current().strong))
                             .child("Projects"),
                     ),
             )
@@ -383,7 +397,7 @@ impl Render for Welcome {
                             .gap_3()
                             .p_3()
                             .border_b_1()
-                            .border_color(rgb(theme::BORDER))
+                            .border_color(rgb(theme::current().border))
                             .child(div().flex_1().child(Input::new(&self.filter)))
                             .child(
                                 div()
@@ -392,9 +406,9 @@ impl Render for Welcome {
                                     .py_1()
                                     .rounded_sm()
                                     .border_1()
-                                    .border_color(rgb(theme::CONTROL_BORDER))
+                                    .border_color(rgb(theme::current().control_border))
                                     .cursor_pointer()
-                                    .hover(|b| b.bg(rgb(theme::TREE_SELECTED)))
+                                    .hover(|b| b.bg(rgb(theme::current().tree_selected)))
                                     .child("Open")
                                     .on_click(cx.listener(|this, _, _, cx| this.pick_folder(cx))),
                             ),

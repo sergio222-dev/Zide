@@ -36,10 +36,10 @@ impl State {
     /// it failed.
     pub fn color(&self) -> u32 {
         match self {
-            State::Off => theme::DIM,
-            State::Starting | State::Pulling | State::Working => theme::WORKING,
-            State::Ready => theme::OK,
-            State::Failed(_) => theme::ERROR,
+            State::Off => theme::current().dim,
+            State::Starting | State::Pulling | State::Working => theme::current().working,
+            State::Ready => theme::current().ok,
+            State::Failed(_) => theme::current().error,
         }
     }
 
@@ -292,14 +292,14 @@ mod tests {
     #[::core::prelude::v1::test]
     fn the_indicator_tells_off_busy_ready_and_failed_apart() {
         assert_eq!(State::default(), State::Off);
-        assert_eq!(State::Off.color(), theme::DIM);
+        assert_eq!(State::Off.color(), theme::current().dim);
         for busy in [State::Starting, State::Pulling, State::Working] {
-            assert_eq!(busy.color(), theme::WORKING);
+            assert_eq!(busy.color(), theme::current().working);
             assert!(busy.on());
         }
-        assert_eq!(State::Ready.color(), theme::OK);
+        assert_eq!(State::Ready.color(), theme::current().ok);
         let failed = State::Failed("ollama is not installed".into());
-        assert_eq!(failed.color(), theme::ERROR);
+        assert_eq!(failed.color(), theme::current().error);
         assert_eq!(failed.label(), "Qwen: ollama is not installed");
         let ai = |state, processor| Ai {
             state,

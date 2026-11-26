@@ -427,9 +427,9 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
                 .py_1()
                 .flex()
                 .flex_col()
-                .bg(rgb(theme::POPUP))
+                .bg(rgb(theme::current().popup))
                 .border_1()
-                .border_color(rgb(theme::CONTROL_BORDER))
+                .border_color(rgb(theme::current().control_border))
                 .rounded_md()
                 .children(menu_entries(&target).into_iter().enumerate().map(
                     |(position, (label, action))| {
@@ -449,7 +449,7 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
                             })
                             .child(label);
                         if position == chosen {
-                            line.bg(rgb(theme::TREE_FOCUSED))
+                            line.bg(rgb(theme::current().tree_focused))
                         } else {
                             line
                         }
@@ -502,7 +502,7 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
                         .child(
                             div()
                                 .w(px(16.))
-                                .text_color(rgb(theme::ICON_FOLDER))
+                                .text_color(rgb(theme::current().icon_folder))
                                 .child(if *current { "★" } else { "" }),
                         )
                         .child(row.label.clone())
@@ -510,12 +510,12 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
                             div()
                                 .ml_auto()
                                 .text_xs()
-                                .text_color(rgb(theme::DIM))
+                                .text_color(rgb(theme::current().dim))
                                 .child(upstream)
                         })),
                 };
                 let line = if index == selected {
-                    line.bg(rgb(theme::TREE_FOCUSED))
+                    line.bg(rgb(theme::current().tree_focused))
                 } else {
                     line
                 };
@@ -537,9 +537,9 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
         .gap_2()
         .flex()
         .flex_col()
-        .bg(rgb(theme::POPUP))
+        .bg(rgb(theme::current().popup))
         .border_1()
-        .border_color(rgb(theme::CONTROL_BORDER))
+        .border_color(rgb(theme::current().control_border))
         .rounded_md()
         .child(
             div()
@@ -553,8 +553,12 @@ pub fn render(popup: &BranchPopup, cx: &mut Context<Workspace>) -> Div {
                         .items_center()
                         .gap_1()
                         .text_xs()
-                        .text_color(rgb(theme::MUTED))
-                        .child(Spinner::new().small().color(rgb(theme::MUTED).into()))
+                        .text_color(rgb(theme::current().muted))
+                        .child(
+                            Spinner::new()
+                                .small()
+                                .color(rgb(theme::current().muted).into()),
+                        )
                         .child("Loading")
                 })),
         )
@@ -650,11 +654,12 @@ impl Render for NameDialog {
                     })
                     .child(div().flex_1().child(Input::new(&self.input))),
             )
-            .children(
-                self.error
-                    .clone()
-                    .map(|error| div().text_xs().text_color(rgb(theme::ERROR)).child(error)),
-            )
+            .children(self.error.clone().map(|error| {
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::current().error))
+                    .child(error)
+            }))
     }
 }
 
