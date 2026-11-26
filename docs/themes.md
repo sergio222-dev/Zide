@@ -1,6 +1,6 @@
 # Themes
 
-Zide's colors come from a theme. Five themes are built in, and you can add your own as JSON files.
+Zide's colors come from a theme. Eleven themes are built in, and you can add your own as JSON files.
 
 ## Built-in themes
 
@@ -11,6 +11,12 @@ Zide's colors come from a theme. Five themes are built in, and you can add your 
 | Zide Ember | Warm and low-contrast: browns, amber and sage. |
 | Zide Fjord | Cool blues and teals on a deep navy. |
 | Zide High Contrast | Bright, saturated colors on black. |
+| Catppuccin Mocha | Soft pastels on a dark lavender-grey base. Port of [Catppuccin](https://github.com/catppuccin/catppuccin) (MIT). |
+| Gruvbox Dark | Retro and warm: earthy reds, yellows and greens on dark brown. Port of [gruvbox](https://github.com/morhetz/gruvbox) by morhetz (MIT). |
+| Tokyo Night | Neon blues and purples on a deep night blue (the Night variant). Port of [Tokyo Night](https://github.com/enkia/tokyo-night-vscode-theme) by enkia (MIT). |
+| Nord | Calm arctic blues and frost greys. Port of [Nord](https://github.com/nordtheme/nord) by Arctic Ice Studio (MIT). |
+| Dracula | Vivid pink, purple and green on a dark violet-grey. Port of [Dracula](https://github.com/dracula/dracula-theme) (MIT). |
+| Solarized Light | Low-contrast precision colors on warm cream. Port of [Solarized](https://github.com/altercation/solarized) by Ethan Schoonover (MIT). |
 
 Their files live in [`crates/ui/themes/`](../crates/ui/themes/); copy one as a starting point for your own.
 
