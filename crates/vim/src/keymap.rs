@@ -764,7 +764,7 @@ impl<'a> Builder<'a> {
             .or((spec.has_keys() || base.has_keys()).then_some("prefix"))
             .ok_or("no `code`: say which opcode the key runs")?;
         let op = opcode(code).ok_or_else(|| {
-            format!("unknown opcode `{code}` (see the opcode list in the README)")
+            format!("unknown opcode `{code}` (see the opcode list in docs/vim.md)")
         })?;
         if let Some(why) = misplaced(op.action, ctx) {
             return Err(format!("`{code}` cannot go here: {why}"));
@@ -957,11 +957,11 @@ mod tests {
     }
 
     #[test]
-    fn the_readme_lists_every_opcode() {
-        let readme = include_str!("../../../README.md");
+    fn the_vim_docs_list_every_opcode() {
+        let readme = include_str!("../../../docs/vim.md");
         let list = readme
             .split_once("Opcodes: ")
-            .expect("README has the opcode list")
+            .expect("docs/vim.md has the opcode list")
             .1
             .split_once(".\n")
             .unwrap()
