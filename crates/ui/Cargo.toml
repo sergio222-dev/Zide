@@ -1,0 +1,34 @@
+[package]
+name = "zide-ui"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "zide"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit = "=0.11.0"
+similar = "3.2.1"
+zide-acp = { path = "../acp" }
+zide-ai = { path = "../ai" }
+zide-claude = { path = "../claude" }
+zide-core = { path = "../core" }
+zide-matcher = { path = "../matcher" }
+zide-git = { path = "../git" }
+zide-index = { path = "../index" }
+zide-lsp = { path = "../lsp" }
+zide-search = { path = "../search" }
+zide-stubs = { path = "../stubs" }
+zide-syntax = { path = "../syntax" }
+zide-text = { path = "../text" }
+zide-tree = { path = "../tree" }
+zide-update = { path = "../update" }
+zide-vim = { path = "../vim" }
+async-channel = "2"
+dirs = "6"
+serde_json = "1.0.154"
+shlex = "2"
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "symphonia-mp3"] }
