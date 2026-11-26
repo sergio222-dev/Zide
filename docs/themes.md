@@ -14,6 +14,10 @@ Zide's colors come from a theme. Five themes are built in, and you can add your 
 
 Their files live in [`crates/ui/themes/`](../crates/ui/themes/); copy one as a starting point for your own.
 
+## Choosing a theme
+
+Run **Theme** from Find Action (Ctrl+Shift+A). It lists the themes; moving through them previews each at once. Enter keeps the theme and saves it as `"theme": "<name>"` in `settings.json`; Esc goes back to the previous one. An unknown saved name keeps the default and is reported at startup.
+
 ## Your themes
 
 Put one file per theme in `~/.config/zide/themes/` (the `themes` folder next to `settings.json`), named

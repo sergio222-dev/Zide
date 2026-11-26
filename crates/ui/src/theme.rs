@@ -176,7 +176,6 @@ pub fn current() -> &'static Theme {
 
 /// Makes `theme` the one `current` returns. Each theme is kept for the rest of the run (it is a
 /// few hundred bytes), so views can hold the reference without a lock.
-#[allow(dead_code)] // the theme selector calls it
 pub fn set(theme: &'static Theme) {
     *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Some(theme);
 }
@@ -184,19 +183,16 @@ pub fn set(theme: &'static Theme) {
 /// Every theme to pick from: the built-in ones (the default first), then the user's from
 /// `~/.config/zide/themes/*.json`, sorted by name. A user theme named like a built-in one takes its
 /// place. The files are read once, on the first call.
-#[allow(dead_code)] // the theme selector calls it
 pub fn all() -> &'static [&'static Theme] {
     &loaded().0
 }
 
 /// The theme called `name`, if there is one.
-#[allow(dead_code)] // the theme selector calls it
 pub fn find(name: &str) -> Option<&'static Theme> {
     all().iter().copied().find(|theme| theme.name == name)
 }
 
 /// What was wrong in the theme files read by `all`, one line each, to report once.
-#[allow(dead_code)] // the theme selector calls it
 pub fn problems() -> Vec<String> {
     loaded().1.clone()
 }
