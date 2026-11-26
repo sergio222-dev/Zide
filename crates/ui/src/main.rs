@@ -1698,6 +1698,19 @@ impl Workspace {
         }
     }
 
+    /// The status bar's indicator for the open file's language server; `None` without a file or
+    /// when its language has no server.
+    fn server_indicator(&self) -> Option<statusbar::ServerIndicator> {
+        let (spec, _) = server_for(self.viewer.as_ref()?.path())?;
+        let server = match self.lsp.get(spec.name) {
+            None => statusbar::Server::Stopped,
+            Some(LspState::Starting) => statusbar::Server::Starting,
+            Some(LspState::Ready(client)) => statusbar::Server::Ready(client.label()),
+            Some(LspState::Unavailable(why)) => statusbar::Server::Unavailable(why),
+        };
+        Some(statusbar::server_indicator(spec.command, server))
+    }
+
     /// What the status bar says is going on in the background, if anything.
     fn busy_label(&self) -> Option<&'static str> {
         self.busy.last().copied()
@@ -4222,6 +4235,7 @@ impl Workspace {
             .child(statusbar::render(
                 self.viewer.as_ref().map(Viewer::status),
                 self.busy_label(),
+                self.server_indicator(),
                 self.git.branch(),
                 cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
                 self.claude_installed.then(|| self.claude_overall(cx)),
