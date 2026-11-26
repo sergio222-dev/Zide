@@ -1,9 +1,0 @@
-target/
-
-# IDE and editor folders
-.idea/
-.vscode/
-.fleet/
-.zed/
-*.iml
-.DS_Store
