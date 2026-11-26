@@ -11,8 +11,8 @@ S5. Issue #166: themes as data — built-ins as JSON, user themes in `~/.config/
 
 ## Tasks
 - [x] T1 (S4) `Theme` struct + global `theme::current()` + mechanical migration of every `theme::X` site, syntax colors and stray literals; no visible change. Route: inline. PR A.
-- [ ] T2 (S3, S5) theme files: bundled JSON themes, user dir loading, partial fallback, validation reports. Route: delegated (parallel with T3, worktree). PR B.
-- [ ] T3 (S1, S2) selector: Theme action, popup tab with live preview, Esc restore, Enter save `"theme"`, apply at startup, gpui-kit mode switch. Route: delegated (parallel with T2, worktree). PR C.
+- [x] T2 (S3, S5) theme files: bundled JSON themes, user dir loading, partial fallback, validation reports. Route: delegated (parallel with T3, worktree). PR B. Commit 812d126.
+- [x] T3 (S1, S2) selector: Theme action, popup tab with live preview, Esc restore, Enter save `"theme"`, apply at startup, gpui-kit mode switch. Route: delegated (parallel with T2, worktree). PR C. Commit d6fc627 (+ docs).
 
 Route declaration: T1 inline (everything depends on it). T2 and T3 are independent units with disjoint surfaces after T1 (Writer trigger a, parallel).
 
@@ -20,3 +20,4 @@ Route declaration: T1 inline (everything depends on it). T2 and T3 are independe
 L1 (2026-11-26) "vamos a encarar el #166 que es agregar temas a zide, puedes usar git worktree para paralelizar el diseño de varios temas o trabajo, la idea es que se pueda ir a la seleccion de temas en ctr+a, search command, y de ahi mostrar otro popup donde estan los temas, al desplazarse con las flechas se cambia el tema automaticamente"
 L2 (2026-11-26) Map: 492 `theme::X` uses in 32 files; viewer lines store `Tint` (not colors) so syntax colors resolve at paint; Projects tab (main.rs Tab::Projects) is the model for a list opened from Actions; settings live in crates/ui/src/settings.rs; `apply_palette` in main.rs maps to gpui-kit.
 L3 (2026-11-26) T1 committed d43a769; shared API stub `all()/find()/problems()` 51153fa so T2/T3 build in parallel. User: "la idea es abrir agentes para que si tienen consultas lo pueda administrar en hedr" — T2 and T3 run as interactive Claude agents under herdr-core (`hc run --bg`, names themes-files / themes-selector) in worktrees ../zide-worktrees/themes-files and ../zide-worktrees/themes-selector. README/docs left to the parent (docs/readme-pages branch splits the README).
+L4 (2026-11-26) T2 done by agent themes-files (812d126): 5 built-ins (Zide Dark, Light, Ember, Fjord, High Contrast), user dir, partial fallback, problems as '<file>: <issue>', docs/themes.md. T3 done by agent themes-selector (d6fc627): Tab::Themes from the Theme action, live preview, Esc/close restore, Enter saves "theme", apply_palette switches kit ThemeMode and keeps font_family/margins. Stack: feat/themes -> feat/themes-files -> feat/themes-selector. fmt, clippy -D warnings, cargo test --workspace (36 suites) green. Pending: manual app check.
