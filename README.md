@@ -40,6 +40,7 @@ Only Linux x86_64 is published for now.
 - [Editor features](docs/editor.md): everything the editor does, in detail.
 - [Keybindings](docs/keybindings.md): shortcuts, project tree keys.
 - [Vim keymap](docs/vim.md): fold and scroll keys, rebinding keys, the opcode list.
+- [Themes](docs/themes.md): the built-in themes, choosing one, writing your own.
 - [Git](docs/git.md): branch switcher, push, pull, merge, rebase, conflicts, Git log.
 - [Claude chat](docs/chat.md): chat keys, workers, configuring the agent.
 - [Language servers](docs/language-servers.md): which servers Zide uses and how to install them.
