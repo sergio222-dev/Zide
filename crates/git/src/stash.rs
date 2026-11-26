@@ -90,12 +90,10 @@ pub fn drop_stash(root: &Path, index: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, process::Command};
+    use std::fs;
 
     fn git_in(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(dir)
+        let status = crate::git_at(dir)
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
             .args(args)
             .status()
