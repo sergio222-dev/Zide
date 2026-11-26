@@ -2,6 +2,7 @@
 //! `agent_servers` maps a name to the command that runs Claude (a sandbox wrapper, say), and
 //! `agent` names the one in use; and `confirm_stop: false` lets Esc stop Claude without asking.
 //! `editor_font` and `ui_font` name the font families Zide draws code and its interface in.
+//! `theme` names the color theme (see the Theme command).
 //! `indent` is the indent level of files that do not show their own: `"tab"` or a number of spaces.
 //! `keymap` rebinds Vim keys over Zide's defaults (see `zide_vim::Keymap::with_overrides`).
 //! Keys Zide does not know are kept when the file is saved.
@@ -185,6 +186,40 @@ pub fn set_fonts(fonts: Fonts) -> Result<(), String> {
     *FONTS.write().unwrap_or_else(|e| e.into_inner()) = fonts.clone();
     let path = path().ok_or("No config folder to save the setting in")?;
     update(&path, |file| with_fonts(file, &fonts)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+static THEME: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// The name of the theme chosen in `theme`, as the settings last applied (or the Theme
+/// command) say; `None` is the default theme.
+pub fn theme() -> Option<String> {
+    THEME.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn theme_in(file: &Value) -> Option<String> {
+    file.get("theme")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+/// `file` with `name` as the theme; the other settings stay.
+pub fn with_theme(mut file: Value, name: &str) -> Value {
+    if !file.is_object() {
+        file = json!({});
+    }
+    file["theme"] = json!(name);
+    file
+}
+
+/// The Theme command: remembered at once and saved; a file that cannot be saved is reported,
+/// and the choice then lasts until Zide closes.
+pub fn set_theme(name: &str) -> Result<(), String> {
+    *THEME.write().unwrap_or_else(|e| e.into_inner()) = Some(name.to_string());
+    let path = path().ok_or("No config folder to save the setting in")?;
+    update(&path, |file| with_theme(file, name)).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -378,6 +413,7 @@ pub fn use_file(file: &Value) {
     CONFIRM_STOP.store(confirm_stop_in(file), Ordering::Relaxed);
     *FONTS.write().unwrap_or_else(|e| e.into_inner()) = fonts_in(file);
     *INDENT.write().unwrap_or_else(|e| e.into_inner()) = indent_in(file);
+    *THEME.write().unwrap_or_else(|e| e.into_inner()) = theme_in(file);
     let (keymap, errors) = keymap_in(file);
     for error in &errors {
         eprintln!("settings: {error}");
@@ -620,5 +656,25 @@ mod tests {
         assert!(!confirm_stop_in(&file));
         let file = with_fonts(file, &Fonts::default());
         assert_eq!(file, json!({ "confirm_stop": false }));
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_theme_is_saved_by_name_beside_the_other_settings() {
+        assert_eq!(theme_in(&json!({})), None);
+        assert_eq!(theme_in(&json!({ "theme": "  " })), None);
+        assert_eq!(theme_in(&json!({ "theme": 3 })), None);
+        let file = with_theme(
+            with_confirm_stop(json!({ "indent": 2 }), false),
+            "Zide Light",
+        );
+        assert_eq!(theme_in(&file).as_deref(), Some("Zide Light"));
+        assert_eq!(
+            file,
+            json!({ "indent": 2, "confirm_stop": false, "theme": "Zide Light" })
+        );
+        let file = with_theme(file, "Zide Dark");
+        assert_eq!(theme_in(&file).as_deref(), Some("Zide Dark"));
+        assert!(!confirm_stop_in(&file));
+        assert_eq!(indent_in(&file), Indent::Spaces(2));
     }
 }
