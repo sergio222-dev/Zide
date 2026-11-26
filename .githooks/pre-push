@@ -1,0 +1,6 @@
+#!/bin/sh
+# The checks CI runs, so a push does not fail there for something found here first.
+set -e
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace

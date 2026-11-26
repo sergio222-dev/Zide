@@ -1,0 +1,11 @@
+[package]
+name = "zide-acp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = "0.22.1"
+serde_json = "1.0.154"
+zide-claude = { path = "../claude" }
