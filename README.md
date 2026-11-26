@@ -55,7 +55,9 @@ Only Linux x86_64 is published for now.
   slow; on Arch Linux install `ollama-cuda`) or the share on the GPU when it did not fit.
 - **Signature help** while typing a call: after `(` or `,` the signature shows over the line, the parameter being
   typed in bold, and follows the cursor until the call is closed.
-- **Status bar**: messages on the left; on the right the branch's state against its upstream (`↑` to push, `↓` to pull,
+- **Status bar**: messages on the left; on the right the open file's language server (gray when not running,
+  orange while starting, green when ready, red when it cannot run; hover it for why and how to install it),
+  the branch's state against its upstream (`↑` to push, `↓` to pull,
   `Δ` when diverged), the branch name, the cursor position and the vim mode.
 - **Branch switcher** (``Ctrl+Shift+` ``, click the branch in the status bar, or Find Action → *Switch Branch*): Recent, Local, Remote and
   Tags as folder trees (`feat/` holds `feat/*`), searchable; Enter checks out, a remote branch gets a

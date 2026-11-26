@@ -2,7 +2,7 @@
 //! stands against its upstream, the branch, and the position and mode of the editor.
 
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::{Sizable as _, spinner::Spinner};
+use gpui_kit::component::{Sizable as _, spinner::Spinner, tooltip::Tooltip};
 use gpui_kit::*;
 use zide_claude::Overall;
 use zide_git::BranchStatus;
@@ -40,13 +40,62 @@ pub fn claude_color(overall: Overall) -> u32 {
     }
 }
 
+/// Where the language server of the open file stands, as the status bar needs it: the workspace
+/// keeps the real state, this only borrows what is shown.
+pub enum Server<'a> {
+    /// Never asked for, or it died: the next request starts it again.
+    Stopped,
+    Starting,
+    /// Running; what to call it (its command, or `<name> (native)`).
+    Ready(&'a str),
+    /// It could not run: why, with the command that installs it.
+    Unavailable(&'a str),
+}
+
+/// The language server indicator: a dot in a color and a name, and what hovering it explains.
+pub struct ServerIndicator {
+    pub label: String,
+    pub color: u32,
+    pub tooltip: String,
+}
+
+/// The indicator for the server whose command is `command`, in the same colors as the AI one:
+/// gray when not running, orange while starting, green when ready, red when it cannot run.
+pub fn server_indicator(command: &str, server: Server) -> ServerIndicator {
+    let (label, color, tooltip) = match server {
+        Server::Stopped => (
+            command.to_string(),
+            theme::DIM,
+            "Language server not running: it starts on the next request".to_string(),
+        ),
+        Server::Starting => (
+            format!("{command} starting…"),
+            theme::WORKING,
+            "Language server starting".to_string(),
+        ),
+        Server::Ready(label) => (
+            label.to_string(),
+            theme::OK,
+            "Language server running".to_string(),
+        ),
+        Server::Unavailable(why) => (command.to_string(), theme::ERROR, why.to_string()),
+    };
+    ServerIndicator {
+        label,
+        color,
+        tooltip,
+    }
+}
+
 /// `busy` names the background work in progress, if any. `on_branch` runs when the branch name is clicked; `claude` is `None` when Claude is not
 /// installed, and `on_claude` runs when its indicator is clicked. `ai` is the state of the local
-/// model, and `on_ai` turns it on or off.
+/// model, and `on_ai` turns it on or off. `server` is the open file's language server, `None`
+/// when its language has none.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     status: Option<ViewerStatus>,
     busy: Option<&'static str>,
+    server: Option<ServerIndicator>,
     branch: Option<&BranchStatus>,
     on_branch: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     claude: Option<Overall>,
@@ -70,6 +119,19 @@ pub fn render(
                 .gap_1()
                 .child(Spinner::new().small().color(rgb(theme::WORKING).into()))
                 .child(label),
+        );
+    }
+    if let Some(server) = server {
+        let tooltip = SharedString::from(server.tooltip);
+        bar = bar.right(
+            div()
+                .id("language-server")
+                .flex()
+                .items_center()
+                .gap_1()
+                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .child(div().size_2().rounded_full().bg(rgb(server.color)))
+                .child(server.label),
         );
     }
     bar = bar.right(
@@ -161,5 +223,38 @@ mod tests {
         assert_eq!(label(true, 0, 2), "↓2");
         assert_eq!(label(true, 4, 2), "↑4 ↓2 Δ+2");
         assert_eq!(label(true, 1, 3), "↑1 ↓3 Δ-2");
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_server_indicator_names_the_server_and_colors_its_state() {
+        let stopped = server_indicator("pyright-langserver", Server::Stopped);
+        assert_eq!(
+            (stopped.label.as_str(), stopped.color),
+            ("pyright-langserver", theme::DIM)
+        );
+
+        let starting = server_indicator("pyright-langserver", Server::Starting);
+        assert_eq!(
+            (starting.label.as_str(), starting.color),
+            ("pyright-langserver starting…", theme::WORKING)
+        );
+
+        // the running server's own name wins: a native build is not the spec's command
+        let ready = server_indicator("rust-analyzer", Server::Ready("rust (native)"));
+        assert_eq!(
+            (ready.label.as_str(), ready.color),
+            ("rust (native)", theme::OK)
+        );
+
+        let why = "pyright-langserver is not installed. Setup: npm install pyright";
+        let missing = server_indicator("pyright-langserver", Server::Unavailable(why));
+        assert_eq!(
+            (
+                missing.label.as_str(),
+                missing.color,
+                missing.tooltip.as_str()
+            ),
+            ("pyright-langserver", theme::ERROR, why)
+        );
     }
 }
