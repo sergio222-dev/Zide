@@ -26,6 +26,10 @@ pub struct FoldRegion {
 /// What a grammar folds, by node kind.
 struct Rules {
     blocks: &'static [&'static str],
+    /// Blocks that start below their header (Python's indented `block` begins on the line after
+    /// `def f():`): their fold starts on the header's first line instead, so the header stays
+    /// visible and the body hides.
+    header_blocks: &'static [&'static str],
     imports: &'static [&'static str],
     /// A comment node that is a single line (`//`), foldable only in runs.
     line_comment: fn(&str, Node) -> bool,
@@ -45,6 +49,7 @@ fn rules_for(extension: &str) -> Option<Rules> {
                 "match_block",
                 "token_tree",
             ],
+            header_blocks: &[],
             imports: &["use_declaration"],
             line_comment: |_, node| node.kind() == "line_comment",
             block_comment: |_, node| node.kind() == "block_comment",
@@ -62,6 +67,7 @@ fn rules_for(extension: &str) -> Option<Rules> {
                 "named_imports",
                 "jsx_element",
             ],
+            header_blocks: &[],
             imports: &["import_statement"],
             line_comment: |source, node| {
                 node.kind() == "comment" && source[node.start_byte()..].starts_with("//")
@@ -80,12 +86,30 @@ fn rules_for(extension: &str) -> Option<Rules> {
                 "var_declaration",
                 "const_declaration",
             ],
+            header_blocks: &[],
             imports: &["import_declaration"],
             line_comment: |source, node| {
                 node.kind() == "comment" && source[node.start_byte()..].starts_with("//")
             },
             block_comment: |source, node| {
                 node.kind() == "comment" && source[node.start_byte()..].starts_with("/*")
+            },
+        }),
+        "py" => Some(Rules {
+            blocks: &["dictionary", "list", "set"],
+            header_blocks: &["block"],
+            imports: &[
+                "import_statement",
+                "import_from_statement",
+                "future_import_statement",
+            ],
+            line_comment: |_, node| node.kind() == "comment",
+            // a docstring (a string standing alone as a statement) folds like a block comment
+            block_comment: |_, node| {
+                node.kind() == "string"
+                    && node
+                        .parent()
+                        .is_some_and(|p| p.kind() == "expression_statement")
             },
         }),
         _ => None,
@@ -131,6 +155,15 @@ fn visit(rules: &Rules, source: &str, node: Node, regions: &mut Vec<FoldRegion>)
     let kind = node.kind();
     if rules.blocks.contains(&kind) {
         push(regions, node, closing_line(source, node), FoldKind::Block);
+    } else if rules.header_blocks.contains(&kind) {
+        // the block has no closing bracket: it ends with its last statement
+        let header = node.parent().unwrap_or(node);
+        push_lines(
+            regions,
+            header.start_position().row,
+            last_row(node),
+            FoldKind::Block,
+        );
     } else if (rules.block_comment)(source, node) {
         push(regions, node, closing_line(source, node), FoldKind::Comment);
     }
@@ -182,7 +215,10 @@ fn last_row(node: Node) -> usize {
 }
 
 fn push(regions: &mut Vec<FoldRegion>, node: Node, end_line: usize, kind: FoldKind) {
-    let start_line = node.start_position().row;
+    push_lines(regions, node.start_position().row, end_line, kind);
+}
+
+fn push_lines(regions: &mut Vec<FoldRegion>, start_line: usize, end_line: usize, kind: FoldKind) {
     if end_line > start_line {
         regions.push(FoldRegion {
             start_line,
@@ -292,7 +328,31 @@ mod tests {
 
     #[test]
     fn a_language_without_rules_has_no_regions() {
-        assert_eq!(regions("a.py", "def f():\n    pass\n"), []);
+        assert_eq!(regions("a.md", "# a\n\ntext\nmore\n"), []);
+    }
+
+    #[test]
+    fn python_folds_from_the_header_line_of_each_block() {
+        let source = "import a\nfrom b import c\n\n# one\n# two\nclass C:\n    def m(self):\n        \"\"\"Doc.\n\n        More.\n        \"\"\"\n        if x:\n            y()\n        else:\n            z()\n\n\n@dec\ndef f(\n    a,\n):\n    return {\n        \"k\": 1,\n    }\n";
+        assert_eq!(
+            regions("a.py", source),
+            [
+                (0, 1, FoldKind::Imports),
+                (3, 4, FoldKind::Comment),
+                (5, 14, FoldKind::Block),
+                (6, 14, FoldKind::Block),
+                (7, 10, FoldKind::Comment),
+                (11, 12, FoldKind::Block), // `else:` stays visible
+                (13, 14, FoldKind::Block),
+                (18, 23, FoldKind::Block), // from `def`, the decorator above stays out
+                (21, 23, FoldKind::Block),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_one_line_python_block_does_not_fold() {
+        assert_eq!(regions("a.py", "if x: y()\nz = 1\n"), []);
     }
 
     #[test]

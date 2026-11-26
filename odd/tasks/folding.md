@@ -16,6 +16,7 @@ S7. After an edit the regions are recomputed; a collapsed region stays collapsed
 - [x] T2 (S3, S4) viewer: map between list rows and buffer lines (visible lines), behavior-preserving with no folds; every row/line site uses it. Route: inline. PR B (with T3).
 - [x] T3 (S3, S4, S5, S7) viewer fold state, collapse/expand, placeholder rendering, cursor snapping, auto-unfold, `z` keys. Route: inline. PR B.
 - [x] T4 (S5, S6) gutter chevrons with click, IntelliJ keys (Ctrl+minus/plus), Go regions (Python skipped: its blocks start below the header line, needs its own rule). Route: inline. PR C.
+- [x] T5 (S2) Python regions: `header_blocks` rule folds a `block` from its parent's first line; dicts/lists/sets, imports, `#` runs and docstrings. Route: inline.
 
 Route declaration: all inline. No Writer trigger: T3 needs both T1's API and T2's mapping, so there are no independent units to launch together.
 
