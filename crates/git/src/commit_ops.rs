@@ -3,7 +3,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use crate::{ChangeKind, FileChange, run, run_raw};
 
@@ -172,9 +171,7 @@ pub fn get_from_revision(root: &Path, hash: &str, files: &[FileChange]) -> Resul
             continue;
         }
         let spec = format!("{hash}:{}", file.path);
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(root)
+        let out = crate::git_at(root)
             .args(["cat-file", "blob", &spec])
             .stdin(std::process::Stdio::null())
             .output()
@@ -208,17 +205,11 @@ pub fn get_from_revision(root: &Path, hash: &str, files: &[FileChange]) -> Resul
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::process::Command;
 
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .unwrap();
+        let out = crate::git_at(dir).args(args).output().unwrap();
         assert!(
             out.status.success(),
             "git {args:?}: {}",

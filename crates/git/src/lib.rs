@@ -18,6 +18,38 @@ pub use options::{
     rebase_args,
 };
 
+/// The variables through which a running git (a hook, `git rebase --exec`) tells the gits it
+/// starts which repository to use, as `git rev-parse --local-env-vars` lists them. They win over
+/// `-C`, so a Zide started from one, or its tests run from a hook, would act on that repository.
+const REPOSITORY_ENV: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
+/// `git -C root`, acting on the repository at `root` and no other. Every git Zide starts, its
+/// tests' included, starts here.
+pub(crate) fn git_at(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root);
+    for name in REPOSITORY_ENV {
+        command.env_remove(name);
+    }
+    command
+}
+
 /// How a line of the file differs from the last commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineChange {
@@ -34,9 +66,7 @@ pub enum LineChange {
 /// The file as of the last commit. `None` when git is missing, `root` is not a repository or the
 /// file is not in the commit (untracked): there is nothing to compare with.
 pub fn head_content(root: &Path, relative: &str) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let output = crate::git_at(root)
         .arg("show")
         .arg(format!("HEAD:./{relative}"))
         .output()
@@ -173,9 +203,7 @@ pub fn date_and_time(time: i64, tz_minutes: i32) -> (String, String) {
 /// Blame of `relative` (a path under `root`), one entry per line of the file on disk. `None`
 /// when git is missing, `root` is not a repository or the file is not tracked.
 pub fn blame(root: &Path, relative: &str) -> Option<Vec<BlameLine>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let output = crate::git_at(root)
         .args(["blame", "--line-porcelain", "--", relative])
         .output()
         .ok()?;
@@ -277,9 +305,7 @@ impl Progress {
 /// The branch of the repository at `root` and how far it is from its upstream, as of the last
 /// fetch. `None` when git is missing or `root` is not a repository.
 pub fn branch_status(root: &Path) -> Option<BranchStatus> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let output = crate::git_at(root)
         .args([
             "status",
             "--porcelain=v2",
@@ -398,12 +424,7 @@ const RECENT_BRANCHES: usize = 5;
 /// The branches of the repository at `root`; `None` when git is missing or `root` is none.
 pub fn branches(root: &Path) -> Option<Branches> {
     let git = |args: &[&str]| {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(args)
-            .output()
-            .ok()?;
+        let output = crate::git_at(root).args(args).output().ok()?;
         output
             .status
             .success()
@@ -466,12 +487,8 @@ fn parse_branches(refs: &str, reflog: &str) -> Branches {
 /// Runs git in `root`; the error is what git said. `network` commands never ask for a password
 /// on a terminal that is not there: they fail instead of hanging.
 fn run(root: &Path, args: &[&str], network: bool) -> Result<String, String> {
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .stdin(std::process::Stdio::null());
+    let mut command = crate::git_at(root);
+    command.args(args).stdin(std::process::Stdio::null());
     if network {
         command.env("GIT_TERMINAL_PROMPT", "0");
     }
@@ -493,9 +510,7 @@ fn run(root: &Path, args: &[&str], network: bool) -> Result<String, String> {
 /// Like [`run`] but the output is returned as git wrote it: a patch loses its last line, and a
 /// `-z` list its separators, when trimmed.
 fn run_raw(root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let output = crate::git_at(root)
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()
@@ -772,9 +787,7 @@ pub enum Switch {
 /// that local changes would be overwritten), for the user to read.
 pub fn switch(root: &Path, target: &Switch) -> Result<(), String> {
     let git = |args: &[&str]| {
-        Command::new("git")
-            .arg("-C")
-            .arg(root)
+        crate::git_at(root)
             .args(args)
             .output()
             .map_err(|e| format!("git could not run: {e}"))
@@ -812,6 +825,46 @@ pub fn switch(root: &Path, target: &Switch) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::{fs, path::PathBuf};
+
+    #[test]
+    fn git_runs_in_the_given_folder_whatever_repository_the_environment_names() {
+        let command = git_at(Path::new("/some/repo"));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["-C", "/some/repo"]);
+        let removed: Vec<_> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_str().unwrap())
+            .collect();
+        for name in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+        ] {
+            assert!(removed.contains(&name), "{name} is not cleared");
+        }
+    }
+
+    /// A hook exports `GIT_DIR`; a git started any other way would follow it to that repository
+    /// instead of `-C`'s (the tests once committed into Zide's own repository that way).
+    #[test]
+    fn git_is_only_started_through_git_at() {
+        let sources = [
+            ("lib.rs", include_str!("lib.rs")),
+            ("commit_ops.rs", include_str!("commit_ops.rs")),
+            ("stash.rs", include_str!("stash.rs")),
+            ("log.rs", include_str!("log.rs")),
+            ("merge.rs", include_str!("merge.rs")),
+            ("options.rs", include_str!("options.rs")),
+        ];
+        let needle = concat!("Command::new(", "\"git\")");
+        for (file, text) in sources {
+            let starts = text.matches(needle).count();
+            let allowed = usize::from(file == "lib.rs"); // git_at itself
+            assert_eq!(starts, allowed, "{file} starts git without git_at");
+        }
+    }
 
     #[test]
     fn the_cache_text_gives_back_the_same_branches() {
@@ -871,9 +924,7 @@ mod tests {
     }
 
     fn git_in(dir: &Path, args: &[&str]) {
-        let ok = Command::new("git")
-            .arg("-C")
-            .arg(dir)
+        let ok = crate::git_at(dir)
             .args([
                 "-c",
                 "user.name=t",
@@ -1245,9 +1296,7 @@ mod tests {
         fs::write(clone.join("c.txt"), "c").unwrap();
         git_in(&clone, &["add", "c.txt"]);
         // `--since` reads the date the commit was committed
-        let old = Command::new("git")
-            .arg("-C")
-            .arg(&clone)
+        let old = crate::git_at(&clone)
             .args(["commit", "-q", "-m", "ancient"])
             .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00")
             .env("GIT_AUTHOR_DATE", "2001-01-01T00:00:00")
@@ -1535,9 +1584,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            let ok = Command::new("git")
-                .arg("-C")
-                .arg(&dir)
+            let ok = crate::git_at(&dir)
                 .args([
                     "-c",
                     "user.name=Sergio Molina",
@@ -1636,9 +1683,7 @@ pub struct FileChange {
 /// The files that differ from the last commit, staged or not, untracked ones included, sorted by
 /// path. Empty when git is missing or `root` is not a repository.
 pub fn changes(root: &Path) -> Vec<FileChange> {
-    let Ok(output) = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let Ok(output) = crate::git_at(root)
         .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         .output()
     else {
@@ -1686,8 +1731,8 @@ fn parse_changes(output: &str) -> Vec<FileChange> {
 /// The patch of `change` against the last commit, whole file included (not only the lines around
 /// the changes) so the viewer can fold what did not change. An untracked file is all additions.
 pub fn diff(root: &Path, change: &FileChange) -> Result<String, String> {
-    let mut command = Command::new("git");
-    command.arg("-C").arg(root).args([
+    let mut command = crate::git_at(root);
+    command.args([
         "diff",
         "--no-color",
         "--no-ext-diff",
@@ -2065,9 +2110,7 @@ pub fn proceed(root: &Path, operation: Operation) -> Result<(), String> {
         Operation::CherryPick => "cherry-pick",
         Operation::Revert => "revert",
     };
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let output = crate::git_at(root)
         .args([command, "--continue"])
         .env("GIT_EDITOR", "true")
         .stdin(std::process::Stdio::null())
@@ -2325,12 +2368,7 @@ mod commit_tests {
     fn conflicted(name: &str, theirs: &str) -> std::path::PathBuf {
         let dir = repo(name);
         let git = |args: &[&str]| {
-            let out = Command::new("git")
-                .arg("-C")
-                .arg(&dir)
-                .args(args)
-                .output()
-                .unwrap();
+            let out = crate::git_at(&dir).args(args).output().unwrap();
             out.status.success()
         };
         git(&["checkout", "-q", "-b", "main"]);
@@ -2482,9 +2520,7 @@ mod commit_tests {
 
     /// Runs git in `dir`, with an editor that would fail if git opened one.
     fn git_in(dir: &Path, args: &[&str]) -> bool {
-        Command::new("git")
-            .arg("-C")
-            .arg(dir)
+        crate::git_at(dir)
             .args(args)
             .env("GIT_EDITOR", "false")
             .output()
