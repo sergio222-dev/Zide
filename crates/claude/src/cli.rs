@@ -256,14 +256,16 @@ mod tests {
         );
     }
 
+    /// Writes a shell script the tests run as `/bin/sh <script> ...`.
+    /// Executing a freshly written file directly races with other test
+    /// threads forking while its write descriptor is open ("Text file
+    /// busy"); handing it to the shell only reads it.
     #[cfg(unix)]
     fn script(name: &str, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("zide-launcher-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("agent.sh");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&path, format!("{body}\n")).unwrap();
         path
     }
 
@@ -274,7 +276,7 @@ mod tests {
             "ok",
             r#"[ "$1" = claude ] && [ "$2" = --version ] && echo "2.1.400 (Claude Code)""#,
         );
-        let launcher = configured(path.to_str().unwrap(), &["claude"]);
+        let launcher = configured("/bin/sh", &[path.to_str().unwrap(), "claude"]);
         assert_eq!(probe(&launcher), Ok(Version::parse("2.1.400").unwrap()));
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
@@ -283,7 +285,7 @@ mod tests {
     #[test]
     fn a_failed_probe_says_why() {
         let path = script("fail", "echo 'bwrap: No such file' >&2; exit 1");
-        let launcher = configured(path.to_str().unwrap(), &["claude"]);
+        let launcher = configured("/bin/sh", &[path.to_str().unwrap(), "claude"]);
         assert_eq!(probe(&launcher), Err("bwrap: No such file".to_string()));
         let missing = configured("/nonexistent/agent.sh", &[]);
         assert!(probe(&missing).is_err());
